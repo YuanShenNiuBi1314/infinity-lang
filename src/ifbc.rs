@@ -805,27 +805,99 @@ impl Op {
     pub fn arity(self) -> usize {
         match self {
             // zero operands
-            Op::Nop | Op::Dup | Op::Dup2 | Op::Swap | Op::Pop | Op::LdNull | Op::LdFrame
-            | Op::Ldw | Op::Ret | Op::Leave | Op::FrameEnter | Op::FrameExit | Op::TagGet
-            | Op::UnboxDyn | Op::DynTruthy | Op::DynIdentity | Op::Yield | Op::YieldFrom
-            | Op::RefInc | Op::RefDec | Op::TypeOfIdx => 0,
+            Op::Nop
+            | Op::Dup
+            | Op::Dup2
+            | Op::Swap
+            | Op::Pop
+            | Op::LdNull
+            | Op::LdFrame
+            | Op::Ret
+            | Op::Leave
+            | Op::FrameEnter
+            | Op::FrameExit
+            | Op::TagGet
+            | Op::UnboxDyn
+            | Op::DynTruthy
+            | Op::DynIdentity
+            | Op::Yield
+            | Op::YieldFrom
+            | Op::RefInc
+            | Op::RefDec
+            | Op::TypeOfIdx
+            | Op::NewFrame => 0,
             // one operand
-            Op::Ldl | Op::Stl | Op::Ldg | Op::Stg | Op::Push | Op::PushB | Op::Jmp | Op::Br
-            | Op::Brf | Op::TickLoop | Op::ThrowInf | Op::CallStat | Op::CallVirt | Op::CallHost
-            | Op::CallEmbed | Op::TailCallStat | Op::Import | Op::ImportAttr | Op::NewStr
-            | Op::IdxGet | Op::IdxSet | Op::Slice | Op::SeqLen | Op::SeqIter | Op::SeqNext
-            | Op::SeqPush | Op::InstGet | Op::InstSet | Op::StrConcat | Op::SeqConcat
-            | Op::MoveOut | Op::CastDyn | Op::IsDyn | Op::BoxDyn | Op::InvokeDynamic
-            | Op::CoroResume | Op::CoroThrow | Op::SizeOf | Op::AlignOf | Op::FieldOff
-            | Op::RetMulti | Op::NewFrame
+            Op::Ldl
+            | Op::Stl
+            | Op::Ldw
+            | Op::Ldg
+            | Op::Stg
+            | Op::Push
+            | Op::PushB
+            | Op::Jmp
+            | Op::Br
+            | Op::Brf
+            | Op::TickLoop
+            | Op::ThrowInf
+            | Op::CallStat
+            | Op::CallVirt
+            | Op::CallHost
+            | Op::CallEmbed
+            | Op::InvokeDynamic
+            | Op::TailCallStat
+            | Op::Import
+            | Op::ImportAttr
+            | Op::NewStr
+            | Op::IdxGet
+            | Op::IdxSet
+            | Op::Slice
+            | Op::SeqLen
+            | Op::SeqIter
+            | Op::SeqNext
+            | Op::SeqPush
+            | Op::MapInsert
+            | Op::InstGet
+            | Op::InstSet
+            | Op::StrConcat
+            | Op::SeqConcat
+            | Op::MoveOut
+            | Op::CastDyn
+            | Op::IsDyn
+            | Op::BoxDyn
+            | Op::CoroResume
+            | Op::CoroThrow
+            | Op::SizeOf
+            | Op::AlignOf
+            | Op::FieldOff
+            | Op::RetMulti
             // D.3 families: operand 0 is the type index (DEV-IFBC-1)
-            | Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Rem | Op::Neg | Op::Abs | Op::And
-            | Op::Or | Op::Xor | Op::Not | Op::Shl | Op::Shr | Op::ShrA | Op::CmpLt | Op::CmpLe
-            | Op::CmpGt | Op::CmpGe | Op::CmpEq | Op::CmpNe | Op::Cmp
-            | Op::GuardNonzero | Op::GuardShift => 1,
+            | Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Rem
+            | Op::Neg
+            | Op::Abs
+            | Op::And
+            | Op::Or
+            | Op::Xor
+            | Op::Not
+            | Op::Shl
+            | Op::Shr
+            | Op::ShrA
+            | Op::CmpLt
+            | Op::CmpLe
+            | Op::CmpGt
+            | Op::CmpGe
+            | Op::CmpEq
+            | Op::CmpNe
+            | Op::Cmp
+            | Op::GuardNonzero
+            | Op::GuardShift => 1,
             // two operands
-            Op::NewList | Op::NewDict | Op::ClosureNew | Op::EnterTry | Op::MapInsert
-            | Op::Switch => 2,
+            Op::NewList | Op::ClosureNew | Op::EnterTry | Op::Switch => 2,
+            // three operands — D.6's `new.dict k_ty,v_ty` plus this implementation's element count
+            Op::NewDict => 3,
         }
     }
 
@@ -833,19 +905,38 @@ impl Op {
     pub fn operand_kinds(self) -> Vec<OperandKind> {
         use OperandKind::*;
         match self {
-            Op::Ldl | Op::Stl | Op::Ldg | Op::Stg | Op::MoveOut => vec![Slot],
-            Op::Push | Op::ThrowInf | Op::NewStr | Op::ImportAttr => vec![Pool],
-            Op::PushB | Op::TickLoop | Op::SizeOf | Op::AlignOf | Op::FieldOff | Op::RetMulti
-            | Op::CoroResume | Op::CoroThrow => vec![Imm],
+            Op::Ldl | Op::Stl | Op::Ldw | Op::Ldg | Op::Stg | Op::MoveOut => vec![Slot],
+            Op::Push | Op::ThrowInf | Op::NewStr | Op::ImportAttr | Op::InstGet | Op::InstSet => {
+                vec![Pool]
+            }
+            Op::PushB
+            | Op::TickLoop
+            | Op::SizeOf
+            | Op::AlignOf
+            | Op::FieldOff
+            | Op::RetMulti
+            | Op::CoroResume
+            | Op::CoroThrow => vec![Imm],
             Op::Jmp | Op::Br | Op::Brf => vec![CodeOff],
             Op::CallStat | Op::TailCallStat => vec![Func],
             Op::CallHost | Op::Import => vec![Import],
-            Op::CallVirt | Op::CallEmbed | Op::InvokeDynamic | Op::ClosureNew => vec![Imm, Imm],
-            Op::NewList | Op::SeqLen | Op::SeqIter | Op::SeqNext | Op::SeqPush | Op::IdxGet
-            | Op::IdxSet | Op::Slice | Op::InstGet | Op::InstSet | Op::StrConcat | Op::SeqConcat
-            | Op::CastDyn | Op::IsDyn | Op::BoxDyn | Op::NewFrame => vec![Type],
-            Op::NewDict => vec![Type, Type],
-            Op::MapInsert => vec![Type, Imm],
+            Op::CallVirt | Op::CallEmbed | Op::InvokeDynamic => vec![Imm],
+            Op::ClosureNew => vec![Imm, Imm],
+            Op::IdxGet
+            | Op::IdxSet
+            | Op::Slice
+            | Op::SeqLen
+            | Op::SeqIter
+            | Op::SeqNext
+            | Op::SeqPush
+            | Op::CastDyn
+            | Op::IsDyn
+            | Op::BoxDyn
+            | Op::StrConcat
+            | Op::SeqConcat
+            | Op::MapInsert => vec![Type],
+            Op::NewList => vec![Type, Imm],
+            Op::NewDict => vec![Type, Type, Imm],
             Op::EnterTry => vec![CodeOff, CodeOff],
             Op::Switch => vec![Imm, CodeOff],
             _ => Vec::new(),
@@ -886,28 +977,32 @@ impl Op {
     }
 
     /// `(pops, pushes)` for the stack-height validation (§7.8.3 item 2), for the instructions whose
-    /// effect is opcode-implied. Call instructions are resolved by the verifier from the tables.
+    /// effect is opcode-implied. Table-dependent instructions (`call.*`, `new.list`, `new.dict`,
+    /// `closure.new`) are resolved by the verifier from the tables — see `effect`.
     pub fn stack_effect(self) -> (usize, usize) {
         use Op::*;
         match self {
             Nop | LdFrame | GuardNonzero | GuardShift | TickLoop | EnterTry | Leave | FrameEnter
-            | FrameExit | Jmp | Br | Brf | Switch | ThrowInf | Ret | RetMulti | Yield
-            | YieldFrom | CoroResume | CoroThrow | RefDec | Import | RefInc => (0, 0),
+            | FrameExit | Jmp | Br | Brf | Switch | ThrowInf | Ret | RetMulti | Yield | YieldFrom
+            | CoroResume | CoroThrow | RefDec | Import | RefInc => (0, 0),
             Ldl | Ldw | Push | PushB | LdNull | Ldg | SeqLen | NewStr | NewFrame | TypeOfIdx
             | SizeOf | AlignOf | FieldOff | DynTruthy => (0, 1),
-            Stl | Stg | Pop | IdxSet | MoveOut => (1, 0),
+            Stl | Stg | Pop | MoveOut => (1, 0),
             Dup => (1, 2),
             Dup2 => (2, 4),
             Swap => (2, 2),
-            Neg | Abs | Not | InvokeDynamic | CallVirt | CallEmbed | ClosureNew => (1, 1),
+            Neg | Abs | Not | TagGet | IsDyn | BoxDyn | CastDyn | UnboxDyn | InstGet | ImportAttr
+            | SeqIter | InvokeDynamic | CallVirt | CallEmbed => (1, 1),
             Add | Sub | Mul | Div | Rem | And | Or | Xor | Shl | Shr | ShrA | CmpLt | CmpLe
-            | CmpGt | CmpGe | CmpEq | CmpNe | Cmp | DynIdentity | StrConcat | SeqConcat => (2, 1),
-            IdxGet | Slice | InstGet | SeqNext | SeqIter | ImportAttr | CastDyn | UnboxDyn
-            | TagGet | IsDyn | BoxDyn | MapInsert => (1, 1),
-            NewList => (0, 1), // pops `count` operands, resolved per-operand by the verifier
-            NewDict => (0, 1),
+            | CmpGt | CmpGe | CmpEq | CmpNe | Cmp | DynIdentity | StrConcat | SeqConcat
+            | IdxGet => (2, 1),
+            SeqNext => (1, 2),
+            IdxSet => (3, 0),
+            InstSet => (2, 0),
+            Slice => (3, 1),
             SeqPush => (2, 1),
-            CallStat | CallHost | TailCallStat => (0, 1), // resolved from the tables
+            MapInsert => (3, 1),
+            NewList | NewDict | ClosureNew | CallStat | CallHost | TailCallStat => (0, 0),
         }
     }
 }
@@ -1164,14 +1259,20 @@ fn be_u32(b: &[u8]) -> Option<u32> {
 
 impl IfbcModule {
     /// A module that can only come from the B-track ingest of `format` (`CPY-313`, `LUA-54`).
+    /// `unit` and `source_name` are interned first so they occupy pool slots 0 and 1 — `decode`
+    /// recovers them from those positions, which is what keeps `dump` able to name the origin of
+    /// every line (§7.4).
     pub fn new_unit(format: &str, cap_version: u32, unit: &str, source_name: &str) -> Option<IfbcModule> {
         let tag = lang_tag_of(format)?;
-        Some(IfbcModule {
+        let mut m = IfbcModule {
             lang: LangTag { tag, cap_version },
             unit: unit.to_string(),
             source_name: source_name.to_string(),
             ..IfbcModule::default()
-        })
+        };
+        m.strings.intern(unit);
+        m.strings.intern(source_name);
+        Some(m)
     }
 
     /// Intern a string into the pool (first-appearance order, therefore deterministic).
@@ -1787,8 +1888,416 @@ impl CodeBuilder {
     pub fn leave(&mut self, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
         self.emit(Op::Leave, &[], line)
     }
+}
 
-/// One decoded instruction: opcode plus its fixed-width operands.
+// ------------------------------------------------------------------------ decoding
+
+/// Cursor over a big-endian image. Nothing here trusts the bytes: every read is bounds-checked and
+/// yields a [`IfbcDecodeErr`] rather than panicking, because a malformed `.infib` must produce a
+/// diagnostic (§7.8.3, UB-019).
+struct Reader<'a> {
+    b: &'a [u8],
+    p: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(b: &'a [u8]) -> Reader<'a> {
+        Reader { b, p: 0 }
+    }
+    fn rest(&self) -> usize {
+        self.b.len() - self.p
+    }
+    fn take(&mut self, n: usize, region: &'static str) -> Result<&'a [u8], IfbcDecodeErr> {
+        if self.rest() < n {
+            return Err(IfbcDecodeErr::RegionTruncated { region, need: n, got: self.rest() });
+        }
+        let s = &self.b[self.p..self.p + n];
+        self.p += n;
+        Ok(s)
+    }
+    fn u8(&mut self, region: &'static str) -> Result<u8, IfbcDecodeErr> {
+        Ok(self.take(1, region)?[0])
+    }
+    fn u16(&mut self, region: &'static str) -> Result<u16, IfbcDecodeErr> {
+        Ok(be_u16(self.take(2, region)?).unwrap_or(0))
+    }
+    fn u32(&mut self, region: &'static str) -> Result<u32, IfbcDecodeErr> {
+        Ok(be_u32(self.take(4, region)?).unwrap_or(0))
+    }
+    fn hash(&mut self, region: &'static str) -> Result<[u8; 32], IfbcDecodeErr> {
+        let s = self.take(32, region)?;
+        let mut h = [0u8; 32];
+        h.copy_from_slice(s);
+        Ok(h)
+    }
+}
+
+/// Decode a container image: the structural half of §7.8.3 (regions, indices, arity, linearity of
+/// the code stream). The semantic half — stack heights, host signatures — is [`IfbcModule::verify`].
+pub fn decode(bytes: &[u8]) -> Result<IfbcModule, IfbcDecodeErr> {
+    if bytes.len() < HEADER_LEN {
+        return Err(IfbcDecodeErr::TooShort { need: HEADER_LEN, got: bytes.len() });
+    }
+    if &bytes[0..4] != MAGIC {
+        let mut m = [0u8; 4];
+        m.copy_from_slice(&bytes[0..4]);
+        return Err(IfbcDecodeErr::BadMagic(m));
+    }
+    let mut r = Reader::new(bytes);
+    r.take(4, REGIONS[0])?;
+    let ifbc_version = r.u16(REGIONS[0])?;
+    if ifbc_version != IFBC_VERSION_V1 {
+        return Err(IfbcDecodeErr::UnsupportedIfbc(ifbc_version));
+    }
+    let ifabi = r.u16(REGIONS[0])?;
+    if ifabi != IFABI_V2 {
+        return Err(IfbcDecodeErr::UnsupportedIfabi(ifabi));
+    }
+    let tag = r.u16(REGIONS[0])?;
+    if lang_tag_name(tag).is_none() {
+        return Err(IfbcDecodeErr::UnknownLangTag(tag));
+    }
+    let module_hash = r.hash(REGIONS[0])?;
+    let func_count = r.u32(REGIONS[0])?;
+    let frame_kind = r.u8(REGIONS[0])?;
+    if frame_kind > FRAME_KIND_COROUTINE {
+        return Err(IfbcDecodeErr::BadFrameKind(frame_kind));
+    }
+
+    let mut m = IfbcModule {
+        ifbc_version,
+        ifabi,
+        lang: LangTag { tag, cap_version: 0 },
+        frame_kind,
+        module_hash,
+        ..IfbcModule::default()
+    };
+    m.types = decode_types(&mut r)?;
+    m.imports = decode_imports(&mut r)?;
+    m.funcs = decode_funcs(&mut r, func_count)?;
+    m.code = decode_code(&mut r, &m)?;
+    m.lines = decode_lines(&mut r)?;
+    m.exceptions = decode_exceptions(&mut r, &m)?;
+    let entries = decode_pool(&mut r)?;
+    m.strings = StringPool::from_entries(entries);
+    if let Some(u) = m.strings.get(0) {
+        m.unit = u.clone();
+    }
+    if let Some(s) = m.strings.get(1) {
+        m.source_name = s.clone();
+    }
+    if r.rest() != 0 {
+        return Err(IfbcDecodeErr::TrailingBytes(r.rest()));
+    }
+    validate_refs(&m)?;
+    // §7.3: the image must hash to exactly what its own contents say.
+    let computed = m.compute_module_hash();
+    if computed != m.module_hash {
+        return Err(IfbcDecodeErr::HashMismatch { stored: m.module_hash, computed });
+    }
+    Ok(m)
+}
+
+/// Cross-table reference checks that only become possible once the pool is decoded: every `name`,
+/// `sig`, type, import, func and slot index must be inside its table (§7.8.3 items 1, 3 and 5).
+fn validate_refs(m: &IfbcModule) -> Result<(), IfbcDecodeErr> {
+    let plen = m.strings.len() as u32;
+    let tlen = m.types.len() as u32;
+    let ilen = m.imports.len() as u32;
+    let flen = m.funcs.len() as u32;
+    let in_bounds = |v: u32, len: u32| v == NONE32 || v < len;
+    for t in &m.types {
+        if !in_bounds(t.name, plen) {
+            return Err(IfbcDecodeErr::PoolIndexOutOfRange { pool: t.name, len: plen });
+        }
+        for k in [t.a, t.b] {
+            if !in_bounds(k, tlen) {
+                return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: k, len: tlen });
+            }
+        }
+    }
+    for e in &m.imports {
+        if !in_bounds(e.name, plen) {
+            return Err(IfbcDecodeErr::PoolIndexOutOfRange { pool: e.name, len: plen });
+        }
+        if !in_bounds(e.ret_ty, tlen) {
+            return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: e.ret_ty, len: tlen });
+        }
+        for p in &e.params {
+            if !in_bounds(*p, tlen) {
+                return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: *p, len: tlen });
+            }
+        }
+    }
+    for f in &m.funcs {
+        if !in_bounds(f.name, plen) {
+            return Err(IfbcDecodeErr::PoolIndexOutOfRange { pool: f.name, len: plen });
+        }
+        if !in_bounds(f.sig, plen) {
+            return Err(IfbcDecodeErr::PoolIndexOutOfRange { pool: f.sig, len: plen });
+        }
+        if !in_bounds(f.ret_ty, tlen) {
+            return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: f.ret_ty, len: tlen });
+        }
+    }
+    for (i, f) in m.funcs.iter().enumerate() {
+        for (off, ins) in instructions_of(m, i)? {
+            for (k, kind) in ins.op.operand_kinds().iter().enumerate() {
+                let v = ins.ops[k];
+                let bad = |e: &str| match e {
+                    "pool" => IfbcDecodeErr::PoolIndexOutOfRange { pool: v, len: plen },
+                    "type" => IfbcDecodeErr::TypeIndexOutOfRange { ty: v, len: tlen },
+                    "import" => IfbcDecodeErr::ImportIndexOutOfRange { imp: v, len: ilen },
+                    "func" => IfbcDecodeErr::FuncIndexOutOfRange { func: v, len: flen },
+                    _ => IfbcDecodeErr::InstructionRunsPastFunc { op: ins.op.base(), off },
+                };
+                match kind {
+                    OperandKind::Pool if v != NONE32 && v >= plen => return Err(bad("pool")),
+                    OperandKind::Type if v != NONE32 && v >= tlen => return Err(bad("type")),
+                    OperandKind::Import if v >= ilen => return Err(bad("import")),
+                    OperandKind::Func if v >= flen => return Err(bad("func")),
+                    OperandKind::Slot if v >= f.locals => return Err(bad("slot")),
+                    OperandKind::CodeOff => {
+                        if v as usize > m.code.len() {
+                            return Err(IfbcDecodeErr::CodeRangeOutOfRange {
+                                func: i as u32,
+                                off,
+                                len: v,
+                                code_len: m.code.len() as u32,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_types(r: &mut Reader) -> Result<Vec<TypeEntry>, IfbcDecodeErr> {
+    let region = REGIONS[1];
+    let len = r.u32(region)? as usize;
+    let body = r.take(len, region)?;
+    let mut br = Reader::new(body);
+    let n = br.u32(region)?;
+    if (n as usize) * 13 + 4 > len {
+        return Err(IfbcDecodeErr::RegionCount { region, max: n });
+    }
+    let mut out = Vec::with_capacity(n.min(len.saturating_sub(4) as u32 / 13) as usize);
+    for _ in 0..n {
+        let kind = br.u8(region)?;
+        if TyKind::from_u8(kind).is_none() {
+            return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: kind as u32, len: 30 });
+        }
+        let name = br.u32(region)?;
+        let a = br.u32(region)?;
+        let b = br.u32(region)?;
+        out.push(TypeEntry { kind, name, a, b });
+    }
+    Ok(out)
+}
+
+fn decode_imports(r: &mut Reader) -> Result<Vec<ImportEntry>, IfbcDecodeErr> {
+    let region = REGIONS[2];
+    let len = r.u32(region)? as usize;
+    let body = r.take(len, region)?;
+    let mut br = Reader::new(body);
+    let n = br.u32(region)?;
+    if (n as usize) * 16 + 4 > len {
+        return Err(IfbcDecodeErr::RegionCount { region, max: n });
+    }
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let name = br.u32(region)?;
+        let ifabi = br.u16(region)?;
+        let kb = br.u8(region)?;
+        let kind = ImportKind::from_u8(kb).ok_or(IfbcDecodeErr::RegionTruncated {
+            region,
+            need: 1,
+            got: 0,
+        })?;
+        let arity = br.u8(region)?;
+        let ret_ty = br.u32(region)?;
+        let sig_hash = br.u32(region)?;
+        if (arity as usize) * 4 + 16 > len {
+            return Err(IfbcDecodeErr::RegionTruncated { region, need: 1, got: 0 });
+        }
+        let mut params = Vec::with_capacity(arity as usize);
+        for _ in 0..arity {
+            params.push(br.u32(region)?);
+        }
+        out.push(ImportEntry { name, kind, ifabi, ret_ty, params, sig_hash });
+    }
+    Ok(out)
+}
+
+fn decode_funcs(r: &mut Reader, func_count: u32) -> Result<Vec<FuncEntry>, IfbcDecodeErr> {
+    let region = REGIONS[3];
+    let len = r.u32(region)? as usize;
+    let body = r.take(len, region)?;
+    let mut br = Reader::new(body);
+    let n = br.u32(region)?;
+    if n != func_count {
+        return Err(IfbcDecodeErr::FuncCountMismatch { header: func_count, table: n });
+    }
+    if (n as usize) * 36 + 4 > len {
+        return Err(IfbcDecodeErr::RegionCount { region, max: n });
+    }
+    let mut out = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let name = br.u32(region)?;
+        let code_off = br.u32(region)?;
+        let code_len = br.u32(region)?;
+        let locals = br.u32(region)?;
+        let arity = br.u32(region)?;
+        let ret_ty = br.u32(region)?;
+        let sig = br.u32(region)?;
+        let sig_hash = br.u32(region)?;
+        let frame = br.u8(region)?;
+        let flags = br.u8(region)?;
+        let _ = br.u16(region)?;
+        out.push(FuncEntry {
+            name,
+            code_off,
+            code_len,
+            locals,
+            arity,
+            ret_ty,
+            sig,
+            sig_hash,
+            frame,
+            flags,
+        });
+    }
+    Ok(out)
+}
+
+fn decode_code(r: &mut Reader, m: &IfbcModule) -> Result<Vec<u8>, IfbcDecodeErr> {
+    let region = REGIONS[4];
+    let len = r.u32(region)? as usize;
+    let body = r.take(len, region)?.to_vec();
+    if body.len() % 4 != 0 {
+        return Err(IfbcDecodeErr::MisalignedRegion { region, len: body.len() as u32 });
+    }
+    for (i, f) in m.funcs.iter().enumerate() {
+        let end = (f.code_off as usize) + (f.code_len as usize);
+        if (f.code_off as usize) % 4 != 0 {
+            return Err(IfbcDecodeErr::MisalignedFunc { func: i as u32, off: f.code_off });
+        }
+        if end > body.len() {
+            return Err(IfbcDecodeErr::CodeRangeOutOfRange {
+                func: i as u32,
+                off: f.code_off,
+                len: f.code_len,
+                code_len: body.len() as u32,
+            });
+        }
+    }
+    Ok(body)
+}
+
+fn decode_lines(r: &mut Reader) -> Result<Vec<LineEntry>, IfbcDecodeErr> {
+    let region = REGIONS[5];
+    let len = r.u32(region)? as usize;
+    let body = r.take(len, region)?;
+    let mut br = Reader::new(body);
+    let n = br.u32(region)?;
+    if (n as usize) * 8 + 4 > len {
+        return Err(IfbcDecodeErr::RegionCount { region, max: n });
+    }
+    let mut out = Vec::with_capacity(n as usize);
+    let mut last = 0u32;
+    for i in 0..n {
+        let code_off = br.u32(region)?;
+        let line = br.u32(region)?;
+        if i > 0 && code_off < last {
+            return Err(IfbcDecodeErr::LineMapUnsorted { at: code_off });
+        }
+        last = code_off;
+        out.push(LineEntry { code_off, line });
+    }
+    Ok(out)
+}
+
+fn decode_exceptions(r: &mut Reader, m: &IfbcModule) -> Result<Vec<ExcEntry>, IfbcDecodeErr> {
+    let region = REGIONS[6];
+    let len = r.u32(region)? as usize;
+    let body = r.take(len, region)?;
+    let mut br = Reader::new(body);
+    let n = br.u32(region)?;
+    if (n as usize) * 12 + 4 > len {
+        return Err(IfbcDecodeErr::RegionCount { region, max: n });
+    }
+    let mut out = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let start = br.u32(region)?;
+        let end = br.u32(region)?;
+        let handler = br.u32(region)?;
+        let depth = br.u16(region)?;
+        let kind = ExcKind::from_u16(br.u16(region)?).ok_or(IfbcDecodeErr::ExcRangeInvalid {
+            at: i as usize,
+        })?;
+        if end < start || (end as usize) > m.code.len() || (handler as usize) > m.code.len() {
+            return Err(IfbcDecodeErr::ExcRangeInvalid { at: i as usize });
+        }
+        out.push(ExcEntry { start, end, handler, depth, kind });
+    }
+    Ok(out)
+}
+
+fn decode_pool(r: &mut Reader) -> Result<Vec<String>, IfbcDecodeErr> {
+    let region = REGIONS[7];
+    let len = r.u32(region)? as usize;
+    let body = r.take(len, region)?;
+    let mut br = Reader::new(body);
+    let n = br.u32(region)?;
+    let mut out = Vec::new();
+    for i in 0..n {
+        let el = br.u32(region)? as usize;
+        let raw = br.take(el, region)?;
+        let s = std::str::from_utf8(raw)
+            .map_err(|_| IfbcDecodeErr::BadUtf8InPool { pool: i })?
+            .to_string();
+        out.push(s);
+    }
+    Ok(out)
+}
+
+/// All decoded instructions of one function, in code order, each with its absolute code offset.
+pub fn instructions_of(m: &IfbcModule, func: usize) -> Result<Vec<(u32, Instr)>, IfbcDecodeErr> {
+    let f = m
+        .funcs
+        .get(func)
+        .ok_or(IfbcDecodeErr::FuncIndexOutOfRange { func: func as u32, len: m.funcs.len() as u32 })?;
+    let end = (f.code_off as usize) + (f.code_len as usize);
+    if end > m.code.len() {
+        return Err(IfbcDecodeErr::CodeRangeOutOfRange {
+            func: func as u32,
+            off: f.code_off,
+            len: f.code_len,
+            code_len: m.code.len() as u32,
+        });
+    }
+    let mut out = Vec::new();
+    let mut p = f.code_off as usize;
+    while p < end {
+        let byte = m.code[p];
+        let op = Op::from_byte(byte).ok_or(IfbcDecodeErr::UnknownOpcode { byte, off: p as u32 })?;
+        let width = 1 + 4 * op.arity();
+        if p + width > end {
+            return Err(IfbcDecodeErr::InstructionRunsPastFunc { op: op.base(), off: p as u32 });
+        }
+        let mut instr = Instr::new(op);
+        for i in 0..op.arity() {
+            let q = p + 1 + i * 4;
+            instr.ops[i] = be_u32(&m.code[q..q + 4]).unwrap_or(0);
+        }
+        out.push((p as u32, instr));
+        p += width;
+    }
+    Ok(out)
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Instr {
     pub op: Op,
@@ -1828,15 +2337,30 @@ impl Instr {
         } else {
             s.push_str(&base);
         }
-        let kinds = self.op.operand_kinds();
+        let kinds = ins.op.operand_kinds();
         for (i, o) in self.operands().iter().enumerate() {
             s.push(' ');
             let txt = match kinds.get(i) {
-                Some(OperandKind::Pool) | Some(OperandKind::Slot) if false => String::new(),
-                Some(OperandKind::Pool) => format!("{:?}@{o}", m.strings.get(*o).cloned().unwrap_or_default()),
+                Some(OperandKind::Pool) => {
+                    format!("{:?}@{o}", m.strings.get(*o).cloned().unwrap_or_default())
+                }
                 Some(OperandKind::Type) => ty_text(&m.types, &m.strings, *o),
-                Some(OperandKind::Func) => format!("#{o} {}", m.funcs.get(*o as usize).map(|f| m.strings.get(f.name).cloned().unwrap_or_default()).unwrap_or_default()),
-                Some(OperandKind::Import) => format!("#{o} {}", m.imports.get(*o as usize).map(|e| m.strings.get(e.name).cloned().unwrap_or_default()).unwrap_or_default()),
+                Some(OperandKind::Func) => format!(
+                    "#{o} {:?}",
+                    m.funcs
+                        .get(*o as usize)
+                        .and_then(|f| m.strings.get(f.name))
+                        .cloned()
+                        .unwrap_or_default()
+                ),
+                Some(OperandKind::Import) => format!(
+                    "#{o} {:?}",
+                    m.imports
+                        .get(*o as usize)
+                        .and_then(|e| m.strings.get(e.name))
+                        .cloned()
+                        .unwrap_or_default()
+                ),
                 Some(OperandKind::CodeOff) => format!("@{o:#06x}"),
                 _ => format!("{o}"),
             };
@@ -1844,4 +2368,642 @@ impl Instr {
         }
         s
     }
+}
+
+// ------------------------------------------------------------------------ disassembly
+
+/// Byte-stable text rendering of a container image — the body of `infy ifbc dump` (§7.8.4, and the
+/// golden-file target of §12.3). No table iteration order is left to a hash map, so two runs over
+/// the same bytes print the same bytes.
+pub fn disassemble(bytes: &[u8]) -> String {
+    match decode(bytes) {
+        Ok(m) => m.disassemble(),
+        Err(e) => format!("IFBC 镜像无法解码: {e}\n"),
+    }
+}
+
+impl IfbcModule {
+    /// See [`disassemble`]; this is the same renderer on an already-decoded (or just-encoded)
+    /// module, so callers can print a module they assembled without a round trip.
+    pub fn disassemble(&self) -> String {
+        let mut o = String::new();
+        let tag = self.lang.name().unwrap_or("UNKNOWN");
+        o.push_str(&format!(
+            "IFBC module  magic={}  ifbc_version={}  ifabi={}  lang_tag={}({:#06x})  cap={}  \
+             frame_kind={}  funcs={}  image_len={}\n",
+            std::str::from_utf8(MAGIC).unwrap_or("?"),
+            self.ifbc_version,
+            self.ifabi,
+            tag,
+            self.lang.tag,
+            self.lang.cap_version,
+            self.frame_kind,
+            self.funcs.len(),
+            self.encode().len()
+        ));
+        o.push_str(&format!("unit          = {:?}\n", self.unit));
+        o.push_str(&format!("source_name   = {:?}\n", self.source_name));
+        o.push_str(&format!(
+            "module_hash   = sha256:{}\n",
+            hex32(&self.module_hash)
+        ));
+        o.push_str(&format!("regions       = {}\n", REGIONS.join(" | ")));
+
+        o.push_str(&format!("\ntype_table ({}):\n", self.types.len()));
+        for (i, t) in self.types.iter().enumerate() {
+            let k = TyKind::from_u8(t.kind).map(|k| k.suffix()).unwrap_or("?");
+            let name = self.strings.get(t.name).cloned().unwrap_or_default();
+            let kids: Vec<String> = [t.a, t.b]
+                .iter()
+                .filter(|x| **x != NONE32)
+                .map(|x| format!("ty#{x}"))
+                .collect();
+            o.push_str(&format!(
+                "  #{i:<3} {k:<8} name={name:<10} {}",
+                kids.join(" ")
+            ));
+            if let Some(dt) = TyKind::from_u8(t.kind).and_then(|k| k.dyn_tag()) {
+                o.push_str(&format!("InfyDynTag={dt}"));
+            }
+            o.push('\n');
+        }
+
+        o.push_str(&format!("\nimport_table ({}):\n", self.imports.len()));
+        for (i, e) in self.imports.iter().enumerate() {
+            o.push_str(&format!(
+                "  #{i:<3} {:<6} ifabi={} {:?}  {}  sig_hash={:#010x}\n",
+                e.kind.word(),
+                e.ifabi,
+                self.strings.get(e.name).cloned().unwrap_or_default(),
+                e.sig_text(&self.strings, &self.types),
+                e.sig_hash
+            ));
+        }
+
+        for (i, f) in self.funcs.iter().enumerate() {
+            let frame = if f.frame == FRAME_KIND_COROUTINE { "coroutine" } else { "stack" };
+            o.push_str(&format!(
+                "\nfunc #{i} {:?}  code=[{:#06x},{:#06x})  locals={}  arity={}  frame={frame}  \
+                 flags={:#04x}  sig={:?}  sig_hash={:#010x}\n",
+                self.strings.get(f.name).cloned().unwrap_or_default(),
+                f.code_off,
+                f.code_off + f.code_len,
+                f.locals,
+                f.arity,
+                f.flags,
+                self.strings.get(f.sig).cloned().unwrap_or_default(),
+                f.sig_hash
+            ));
+            let per = self.line_per_code_off();
+            match instructions_of(self, i) {
+                Ok(instrs) => {
+                    for (off, ins) in instrs {
+                        let line = per
+                            .iter()
+                            .rev()
+                            .find(|(o, _)| *o <= off)
+                            .map(|(_, l)| *l)
+                            .unwrap_or(0);
+                        o.push_str(&format!(
+                            "  {off:#06x}  {:02x}  {:<22} ; line {line}\n",
+                            ins.op.byte(),
+                            ins.render(self),
+                        ));
+                    }
+                }
+                Err(e) => o.push_str(&format!("  ; 指令流解码失败: {e}\n")),
+            }
+        }
+
+        o.push_str(&format!("\nline_map ({}): code_off -> 原始语言行\n", self.lines.len()));
+        for l in &self.lines {
+            o.push_str(&format!("  {:#06x} -> line {}\n", l.code_off, l.line));
+        }
+        o.push_str(&format!("\nexception_table ({}):\n", self.exceptions.len()));
+        for e in &self.exceptions {
+            o.push_str(&format!(
+                "  [{:#06x},{:#06x}) -> handler {:#06x}  depth={}  kind={}({})\n",
+                e.start,
+                e.end,
+                e.handler,
+                e.depth,
+                e.kind.as_u16(),
+                e.kind.word()
+            ));
+        }
+        o.push_str(&format!("\nstring_pool ({}):\n", self.strings.len()));
+        for (i, s) in self.strings.entries().iter().enumerate() {
+            o.push_str(&format!("  #{i:<4} {s:?}\n"));
+        }
+        o.push_str("\n; appendix-D grouping decisions (docs/internals/ifbc-encoding-rust.md):\n");
+        for (row, split) in GROUPING.iter() {
+            o.push_str(&format!("; {row}: {split}\n"));
+        }
+        o
+    }
+
+    /// `line_map` as pairs, for the disassembler and for the line round-trip tests.
+    pub fn line_per_code_off(&self) -> Vec<(u32, u32)> {
+        self.lines.iter().map(|l| (l.code_off, l.line)).collect()
+    }
+
+    /// The original-language line an instruction offset came from (§7.4). `None` when the code
+    /// region has no mark at or before `off` (which is `W-0705`, not an error).
+    pub fn line_of_code_off(&self, off: u32) -> Option<u32> {
+        let mut best = None;
+        for l in &self.lines {
+            if l.code_off <= off {
+                best = Some(l.line);
+            } else {
+                break;
+            }
+        }
+        best
+    }
+
+    /// The exception-table entries protecting a code offset.
+    pub fn handlers_for(&self, off: u32) -> Vec<&ExcEntry> {
+        self.exceptions
+            .iter()
+            .filter(|e| e.start <= off && off < e.end)
+            .collect()
+    }
+}
+
+fn hex32(h: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in h {
+        s.push(std::char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
+        s.push(std::char::from_digit((b & 0x0f) as u32, 16).unwrap_or('0'));
+    }
+    s
+}
+
+// ------------------------------------------------------------------------ §7.8.3 verifier
+
+/// One loader-time violation. `code` is the `R-07xx` the runtime reports (§7.8.3, appendix D.10).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifyViolation {
+    pub code: &'static str,
+    pub func: u32,
+    pub off: u32,
+    pub item: String,
+}
+
+impl VerifyViolation {
+    pub fn new(code: &'static str, func: u32, off: u32, item: impl Into<String>) -> VerifyViolation {
+        VerifyViolation { code, func, off, item: item.into() }
+    }
+    pub fn render(&self) -> String {
+        format!("{}: func #{} @ {:#06x}: {}", self.code, self.func, self.off, self.item)
+    }
+}
+
+impl fmt::Display for VerifyViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.render())
+    }
+}
+
+/// §7.8.3's six validations, per function in `func_table` order, plus the two structural mandates of
+/// D.3 (guards) and D.7 (`is.dyn` before every `unbox.dyn`). `all_errors == false` stops at the
+/// first violation, exactly like the runtime (D.10); `true` is `infy ifbc verify --all-errors`.
+pub fn verify(m: &IfbcModule, hosts: &HostSigTable, all_errors: bool) -> Vec<VerifyViolation> {
+    let mut out = Vec::new();
+    for i in 0..m.funcs.len() {
+        verify_func(m, hosts, i, &mut out);
+        if !all_errors && !out.is_empty() {
+            return out;
+        }
+    }
+    // item 6 — line-map completeness is a warning, never a rejection (§7.8.3).
+    for i in 0..m.funcs.len() {
+        if let Ok(instrs) = instructions_of(m, i) {
+            for (off, ins) in instrs {
+                if m.line_of_code_off(off).is_none() {
+                    out.push(VerifyViolation::new("W-0705", i as u32, off, format!("{} 无行映射", ins.op.base())));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn push(out: &mut Vec<VerifyViolation>, v: VerifyViolation) {
+    out.push(v);
+}
+
+fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<VerifyViolation>) {
+    let f = match m.funcs.get(fi) {
+        Some(f) => f,
+        None => return,
+    };
+    let instrs = match instructions_of(m, fi) {
+        Ok(v) => v,
+        Err(e) => {
+            // Item 1 (linearity / unknown opcode) — the image is not a well-formed instruction stream.
+            push(out, VerifyViolation::new("R-0704", fi as u32, f.code_off, e.to_string()));
+            return;
+        }
+    };
+    let ends: Vec<u32> = instrs.iter().map(|(o, i)| *o + i.width() as u32).collect();
+    let boundaries: std::collections::BTreeSet<u32> =
+        instrs.iter().map(|(o, _)| *o).chain(ends.iter().copied()).collect();
+    let f_end = f.code_off + f.code_len;
+
+    // ---- item 1: linearity — jump targets must land on instruction boundaries, inside this frame
+    for (off, ins) in &instrs {
+        for (k, kind) in ins.op.operand_kinds().iter().enumerate() {
+            if *kind != OperandKind::CodeOff {
+                continue;
+            }
+            let t = ins.ops[k];
+            if !boundaries.contains(&t) || t < f.code_off || t >= f_end {
+                push(
+                    out,
+                    VerifyViolation::new(
+                        "R-0704",
+                        fi as u32,
+                        *off,
+                        format!("{} 的目标 {t:#06x} 不是本函数内的指令边界", ins.op.base()),
+                    ),
+                );
+            }
+        }
+        if matches!(ins.op, Op::Switch) {
+            push(
+                out,
+                VerifyViolation::new("R-0704", fi as u32, *off, "switch 的变长目标表使指令流不可线性扫描".to_string()),
+            );
+        }
+        if matches!(ins.op, Op::LdNull) {
+            push(out, VerifyViolation::new("R-0706", fi as u32, *off, "ldnull 被禁用：INFY 无 null，须用 Option".to_string()));
+        }
+    }
+
+    // ---- items 2/3/4/5: one abstract execution per block
+    let mut height: BTreeMap<u32, i64> = BTreeMap::new();
+    let mut work: Vec<u32> = vec![f.code_off];
+    height.insert(f.code_off, 0);
+    let index: BTreeMap<u32, usize> = instrs.iter().enumerate().map(|(i, (o, _))| (*o, i)).collect();
+    while let Some(start) = work.pop() {
+        let mut h = height.get(&start).copied().unwrap_or(0);
+        let mut idx = match index.get(&start) {
+            Some(i) => *i,
+            None => continue,
+        };
+        loop {
+            let (off, ins) = match instrs.get(idx) {
+                Some(x) => *x,
+                None => break,
+            };
+            let (pops, pushes) = effect(m, fi, &ins, hosts, out);
+            if h < pops as i64 {
+                push(
+                    out,
+                    VerifyViolation::new(
+                        "R-0705",
+                        fi as u32,
+                        off,
+                        format!("{} 需要 {pops} 个栈槽，块入口高度只有 {h}", ins.op.base()),
+                    ),
+                );
+                break;
+            }
+            h = h - pops as i64 + pushes as i64;
+            check_operands(m, &ins, &f, off, fi, out);
+            check_adjacency(m, &instrs, idx, off, fi, out);
+
+            match ins.op {
+                Op::Jmp => {
+                    push_block(&mut height, &mut work, ins.ops[0], h, out, fi, off, "jmp");
+                    break;
+                }
+                Op::Br | Op::Brf => {
+                    push_block(&mut height, &mut work, ins.ops[0], h, out, fi, off, ins.op.base());
+                }
+                Op::Ret | Op::ThrowInf => {
+                    if matches!(ins.op, Op::Ret) && h < 1 {
+                        push(out, VerifyViolation::new("R-0707", fi as u32, off, "ret 时操作数栈为空".to_string()));
+                    }
+                    break;
+                }
+                Op::RetMulti => {
+                    let n = ins.ops[0] as i64;
+                    if h < n {
+                        push(
+                            out,
+                            VerifyViolation::new("R-0707", fi as u32, off, format!("ret.multi {n} 需要 {n} 个值，栈高 {h}")),
+                        );
+                    }
+                    break;
+                }
+                Op::Yield | Op::YieldFrom => {
+                    if f.frame != FRAME_KIND_COROUTINE {
+                        push(
+                            out,
+                            VerifyViolation::new("R-0707", fi as u32, off, format!("{} 出现在非协程帧", ins.op.base())),
+                        );
+                    }
+                }
+                _ => {}
+            }
+            idx += 1;
+            if idx >= instrs.len() {
+                break;
+            }
+            let next = instrs[idx].0;
+            // A block is entered with a single height; a second arrival with a different height is
+            // R-0705 (item 2).
+            match height.get(&next) {
+                Some(&prev) if prev != h => {
+                    push(
+                        out,
+                        VerifyViolation::new(
+                            "R-0705",
+                            fi as u32,
+                            next,
+                            format!("基本块入口高度不唯一：{prev} 与 {h}"),
+                        ),
+                    );
+                    break;
+                }
+                Some(_) => {}
+                None => {
+                    height.insert(next, h);
+                    work.push(next);
+                }
+            }
+        }
+    }
+
+    // ---- item 4: frame legality — the last instruction of a function must terminate it
+    if let Some((off, last)) = instrs.last() {
+        if !matches!(last.op, Op::Ret | Op::RetMulti | Op::ThrowInf) {
+            push(
+                out,
+                VerifyViolation::new(
+                    "R-0707",
+                    fi as u32,
+                    *off,
+                    format!("函数以 {} 结束，未收口于 ret/ret.multi/throw.inf", last.op.base()),
+                ),
+            );
+        }
+    } else {
+        push(out, VerifyViolation::new("R-0707", fi as u32, f.code_off, "函数无代码".to_string()));
+    }
+    if f.ret_ty != NONE32 && m.ty_kind(f.ret_ty).is_none() {
+        push(out, VerifyViolation::new("R-0706", fi as u32, f.code_off, "返回类型索引越界".to_string()));
+    }
+
+    // ---- item 5: every host call target must exist and match IFABI
+    for (off, ins) in &instrs {
+        if *ins.op == Op::CallHost {
+            let idx = ins.ops[0] as usize;
+            if let Err(msg) = hosts.check_import(m, idx) {
+                push(out, VerifyViolation::new("R-0708", fi as u32, *off, msg));
+            }
+        }
+        if *ins.op == Op::InvokeDynamic {
+            let t = ins.ops[0];
+            if t as usize >= m.funcs.len() {
+                push(
+                    out,
+                    VerifyViolation::new("R-0712", fi as u32, *off, format!("invoke.dynamic 目标 #{t} 不在本模块 func_table 内")),
+                );
+            }
+        }
+    }
+}
+
+fn push_block(
+    height: &mut BTreeMap<u32, i64>,
+    work: &mut Vec<u32>,
+    target: u32,
+    h: i64,
+    out: &mut Vec<VerifyViolation>,
+    fi: usize,
+    off: u32,
+    what: &str,
+) {
+    if let Some(&prev) = height.get(&target) {
+        if prev != h {
+            push(
+                out,
+                VerifyViolation::new(
+                    "R-0705",
+                    fi as u32,
+                    off,
+                    format!("{what} 的目标 {target:#06x} 入口高度不唯一：{prev} 与 {h}"),
+                ),
+            );
+        }
+        return;
+    }
+    height.insert(target, h);
+    work.push(target);
+}
+
+/// Stack effect, resolving the table-dependent instructions. Errors are recorded as violations.
+fn effect(
+    m: &IfbcModule,
+    fi: usize,
+    ins: &Instr,
+    off: u32,
+    hosts: &HostSigTable,
+    out: &mut Vec<VerifyViolation>,
+) -> (usize, usize) {
+    match ins.op {
+        // `new.list elem_ty, count` pops `count` elements.
+        Op::NewList => (ins.ops[1] as usize, 1),
+        // `new.dict k_ty, v_ty, count` pops `2 * count` (the verifier caps the literal size).
+        Op::NewDict => {
+            let n = ins.ops[2] as usize;
+            (2 * n, 1)
+        }
+        Op::ClosureNew => (ins.ops[1] as usize, 1),
+        Op::CallStat => match m.funcs.get(ins.ops[0] as usize) {
+            Some(t) => (
+                t.arity as usize,
+                if m.ty_kind(t.ret_ty) == Some(TyKind::Unit) { 0 } else { 1 },
+            ),
+            None => {
+                push(
+                    out,
+                    VerifyViolation::new(
+                        "R-0707",
+                        fi as u32,
+                        off,
+                        format!("call.stat 目标 #{} 不存在（校验项 4）", ins.ops[0]),
+                    ),
+                );
+                (0, 1)
+            }
+        },
+        Op::TailCallStat => match m.funcs.get(ins.ops[0] as usize) {
+            Some(t) => {
+                if Some(t.locals) != m.funcs.get(fi).map(|x| x.locals) {
+                    push(
+                        out,
+                        VerifyViolation::new(
+                            "R-0709",
+                            fi as u32,
+                            off,
+                            "tailcall.stat 的帧尺寸与调用者不兼容（校验项 4 / 边界）".to_string(),
+                        ),
+                    );
+                }
+                (t.arity as usize, 0)
+            }
+            None => (0, 0),
+        },
+        Op::CallHost => match m.imports.get(ins.ops[0] as usize) {
+            Some(x) => {
+                if hosts.check_import(m, ins.ops[0] as usize).is_err() {
+                    // Reported once, in the item-5 pass, to keep `verify` output readable.
+                }
+                (
+                    x.params.len(),
+                    if m.ty_kind(x.ret_ty) == Some(TyKind::Unit) { 0 } else { 1 },
+                )
+            }
+            None => {
+                push(
+                    out,
+                    VerifyViolation::new(
+                        "R-0708",
+                        fi as u32,
+                        off,
+                        format!("call.host 目标 #{} 不在 import_table 内", ins.ops[0]),
+                    ),
+                );
+                (0, 1)
+            }
+        },
+        _ => ins.op.stack_effect(),
+    }
+}
+
+/// Item 3 (operand type vs suffix) plus the D.2 index bounds.
+fn check_operands(m: &IfbcModule, ins: &Instr, f: &FuncEntry, off: u32, fi: usize, out: &mut Vec<VerifyViolation>) {
+    let kinds = ins.op.operand_kinds();
+    for (k, kind) in kinds.iter().enumerate() {
+        let v = ins.ops[k];
+        match kind {
+            OperandKind::Slot => {
+                if v >= f.locals {
+                    push(
+                        out,
+                        VerifyViolation::new(
+                            "R-0706",
+                            fi as u32,
+                            off,
+                            format!("{} 的局部槽 {v} 超出帧窗口 {}", ins.op.base(), f.locals),
+                        ),
+                    );
+                }
+            }
+            OperandKind::Type | OperandKind::Pool | OperandKind::Func | OperandKind::Import => {
+                let (len, what) = match kind {
+                    OperandKind::Type => (m.types.len(), "type_table"),
+                    OperandKind::Pool => (m.strings.len(), "string_pool"),
+                    OperandKind::Func => (m.funcs.len(), "func_table"),
+                    _ => (m.imports.len(), "import_table"),
+                };
+                if v != NONE32 && v as usize >= len {
+                    push(
+                        out,
+                        VerifyViolation::new(
+                            "R-0706",
+                            fi as u32,
+                            off,
+                            format!("{} 的 {what} 索引 {v} 越界（{len}）", ins.op.base()),
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    if ins.op.is_typed_family() || matches!(ins.op, Op::GuardNonzero | Op::GuardShift) {
+        match m.ty_kind(ins.ops[0]) {
+            Some(k) if k.is_numeric() => {}
+            Some(k) => push(
+                out,
+                VerifyViolation::new(
+                    "R-0706",
+                    fi as u32,
+                    off,
+                    format!("{} 的类型后缀 {} 不是数值类型（D.3）", ins.op.base(), k.suffix()),
+                ),
+            ),
+            None => push(
+                out,
+                VerifyViolation::new("R-0706", fi as u32, off, format!("{} 缺少类型后缀操作数", ins.op.base())),
+            ),
+        }
+    }
+    if matches!(ins.op, Op::IsDyn | Op::CastDyn | Op::BoxDyn) {
+        match m.ty_kind(ins.ops[0]) {
+            Some(k) if k.dyn_tag().is_some() => {}
+            Some(k) => push(
+                out,
+                VerifyViolation::new(
+                    "R-0710",
+                    fi as u32,
+                    off,
+                    format!("{} 的类型 {} 不是 dyn 可见类型（UB-020）", ins.op.base(), k.suffix()),
+                ),
+            ),
+            None => push(out, VerifyViolation::new("R-0710", fi as u32, off, "dyn 指令的类型索引非法".to_string())),
+        }
+    }
+}
+
+/// D.3 (`guard.nonzero` before `div`/`rem`, `guard.shift` before `shl`/`shr`/`shr.a`) and D.7
+/// (`is.dyn` before every `unbox.dyn`). Adjacency is checked in the *instruction stream*, which is
+/// what the two clauses mean; the byte values are D.3's own gaps (`DEV-IFBC-4`).
+fn check_adjacency(
+    m: &IfbcModule,
+    instrs: &[(u32, Instr)],
+    idx: usize,
+    off: u32,
+    fi: usize,
+    out: &mut Vec<VerifyViolation>,
+) {
+    let ins = instrs[idx].1;
+    let prev = if idx > 0 { Some(instrs[idx - 1].1) } else { None };
+    let need = |what: &str, code: &'static str, ok: bool| {
+        if !ok {
+            push(
+                out,
+                VerifyViolation::new(
+                    code,
+                    fi as u32,
+                    off,
+                    format!("{} 前必须紧邻 {what}（检查不可删除，UB-003/UB-004 的字节码侧对应）", ins.op.base()),
+                ),
+            );
+        }
+    };
+    match ins.op {
+        Op::Div | Op::Rem => need(
+            "guard.nonzero",
+            "R-0706",
+            prev.map(|p| p.op == Op::GuardNonzero && p.ops[0] == ins.ops[0]).unwrap_or(false),
+        ),
+        Op::Shl | Op::Shr | Op::ShrA => need(
+            "guard.shift",
+            "R-0706",
+            prev.map(|p| p.op == Op::GuardShift && p.ops[0] == ins.ops[0]).unwrap_or(false),
+        ),
+        Op::UnboxDyn => need(
+            "is.dyn",
+            "R-0710",
+            prev.map(|p| p.op == Op::IsDyn).unwrap_or(false),
+        ),
+        _ => {}
+    }
+    let _ = m;
 }

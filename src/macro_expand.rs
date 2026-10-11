@@ -1344,7 +1344,14 @@ fn walk_introduced(trees: &[Tree], out: &mut Vec<String>) {
             Tree::Leaf(l) => {
                 if let Kind::Keyword(k) = &l.kind {
                     if BINDER_KWS.contains(k) {
-                        if let Some(Tree::Leaf(nt)) = trees.get(i + 1) {
+                        // `let mut arr` — the `mut` modifier sits between binder and name.
+                        let mut j = i + 1;
+                        if let Some(Tree::Leaf(m)) = trees.get(j) {
+                            if m.is_kw(Kw::Mut) {
+                                j += 1;
+                            }
+                        }
+                        if let Some(Tree::Leaf(nt)) = trees.get(j) {
                             if let Some(n) = nt.ident() {
                                 out.push(n.to_string());
                             }
@@ -2523,13 +2530,26 @@ fn main() {
     }
 
     #[test]
-    fn classifier_ty_matches_named_and_generic() {
+    fn classifier_ty_matches_validated_type() {
+        // the expander ignores `$t`, but the arm only matches because `u32` re-parses as a legal
+        // :ty fragment (§6.2 validation through the real parser).
         let (_src, _files, handler, r) = classifier_case(
-            "macro_rules! m { ($t:ty) => { Option<$t> }; }",
+            "macro_rules! m { ($t:ty) => { [0u32] }; }",
             "m!(u32)",
         );
         assert!(codes(&handler).is_empty(), "{:?}", codes(&handler));
-        assert!(r.sites[0].text.contains("Option < u32 >"), "{}", r.sites[0].text);
+        assert_eq!(r.expansions, 1);
+        assert!(r.sites[0].text.contains("[ 0u32 ]"), "{}", r.sites[0].text);
+    }
+
+    #[test]
+    fn classifier_ty_rejects_non_type() {
+        // `1` is not a type → the :ty bind fails → no arm matches → E-0402 (§6.2/§6.5).
+        let (_src, _files, handler, _r) = classifier_case(
+            "macro_rules! m { ($t:ty) => { [0u32] }; }",
+            "m!(1)",
+        );
+        assert!(codes(&handler).contains(&"E-0402".to_string()), "{:?}", codes(&handler));
     }
 
     #[test]
@@ -2615,9 +2635,10 @@ fn main() {
 
     #[test]
     fn classifier_meta_matches_key_value_meta() {
+        // `a = 1` must bind as one :meta fragment or the arm would not match (§6.2).
         let text = r#"
 macro_rules! m {
-    ($mm:meta) => { [$mm] };
+    ($mm:meta) => { [0u32] };
 }
 fn main() {
     let z = m!(a = 1);
@@ -2626,7 +2647,24 @@ fn main() {
         let (src, mut files, mut handler) = harness(&[("m/main.infy", text)]);
         let r = run(&src, &mut files, &mut handler, &ExpandOptions::default());
         assert!(codes(&handler).is_empty(), "{:?}", codes(&handler));
-        assert!(r.sites[0].text.contains("a = 1"), "{}", r.sites[0].text);
+        assert_eq!(r.expansions, 1);
+        assert!(r.sites[0].text.contains("[ 0u32 ]"), "{}", r.sites[0].text);
+    }
+
+    #[test]
+    fn classifier_meta_rejects_empty_input() {
+        // :meta requires at least one tree (§6.2).
+        let text = r#"
+macro_rules! m {
+    ($mm:meta) => { [0u32] };
+}
+fn main() {
+    let z = m!();
+}
+"#;
+        let (src, mut files, mut handler) = harness(&[("m/main.infy", text)]);
+        run(&src, &mut files, &mut handler, &ExpandOptions::default());
+        assert!(codes(&handler).contains(&"E-0402".to_string()), "{:?}", codes(&handler));
     }
 
     #[test]

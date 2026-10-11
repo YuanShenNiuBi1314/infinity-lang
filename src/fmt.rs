@@ -3598,6 +3598,7 @@ fn fp_stmt(st: &Stmt) -> (String, String);
 
 
 
+impl<'a> Printer<'a> {
     fn field_nodes(&mut self, fields: &[Field]) -> Vec<NodeSpec> {
         let mut out = Vec::with_capacity(fields.len());
         for f in fields {
@@ -3880,6 +3881,8 @@ fn fp_stmt(st: &Stmt) -> (String, String);
 
 
 
+
+}
 
 /// The one canonical "may break, one item per line when it does" shape:
 /// `open` · items separated by `,` · optional trailing comma (`§9.5` rule 5) · `close`.

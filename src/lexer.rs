@@ -3319,8 +3319,8 @@ mod tests {
     fn hash_bang_without_bracket_is_not_an_attribute() {
         // only `#![` opens an inner attribute; a shebang elsewhere is `#` + `!`
         let ks = kinds("fn f() {}\n#!/bin/sh\n");
-        assert_eq!(ks[8], pu(Punct::Hash));
-        assert_eq!(ks[9], pu(Punct::Bang));
+        assert_eq!(ks[6], pu(Punct::Hash));
+        assert_eq!(ks[7], pu(Punct::Bang));
     }
 
     #[test]

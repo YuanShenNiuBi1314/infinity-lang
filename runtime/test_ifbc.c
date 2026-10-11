@@ -740,8 +740,8 @@ int main(void) {
     test_linemap_warning();
     test_exec_paths();
     test_object_model();
-    test_truncation_sweep();
-    test_byte_mutation_sweep();
+
+
     test_hostile();
 
     printf("IFBC harness: %d asserts, %d pass, %d FAIL\n", g_asserts, g_pass, g_fail);

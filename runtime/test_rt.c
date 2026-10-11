@@ -1787,11 +1787,12 @@ static void test_misc(void) {
 }
 
 void e_leak_check(void) { infy_leak_check(); }
-void e_free_leaky(void) {
+static void e_leak_check(void) { infy_leak_check(); }
+static void e_free_leaky(void) {
     static uint64_t c = 2;
     static int obj = 1;
     void* b = infy_arc_cb_box(&obj, &c);
-    infy_arc_cb_free(b, &LOC(2, 1, 0));
+    infy_arc_cb_free(b, &LOC(2, 1, 0));   /* count is still 2 -> R-0723 */
     c = 0;
     infy_arc_cb_free(b, &LOC(2, 1, 0));   /* already released: no-op, must not double free */
 }
