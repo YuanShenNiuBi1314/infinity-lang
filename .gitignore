@@ -1,0 +1,11 @@
+/target
+**/target
+*.exe
+*.pdb
+.DS_Store
+# build products of the INFY toolchain itself
+*.infib
+*.infyny
+*.infypkg
+.infy-build/
+MODULE.infy.lock.generated

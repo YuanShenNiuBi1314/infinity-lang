@@ -1,0 +1,6 @@
+# The toolchain builds offline by design (zero external crates — see Cargo.toml).
+[net]
+offline = true
+
+[build]
+incremental = true

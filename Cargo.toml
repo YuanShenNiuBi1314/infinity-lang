@@ -1,0 +1,31 @@
+[package]
+name = "infy"
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Infinity Language (INFY) v2.0 toolchain — compiler, linker, runtime host, and the `infy` CLI"
+license = "MIT"
+repository = "https://github.com/YuanShenNiuBi1314/infinity-lang"
+readme = "README.md"
+build = false
+autobins = false
+
+[lib]
+name = "infy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "infy"
+path = "src/main.rs"
+
+# INFY v2.0 toolchain is deliberately dependency-free (std only).
+# Rationale: a compiler is a trust boundary; the supply-chain model of §5.8 is applied to
+# user code, and the toolchain itself must therefore be auditable without a lockfile.
+[dependencies]
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 2
+debug = false
+panic = "abort"
