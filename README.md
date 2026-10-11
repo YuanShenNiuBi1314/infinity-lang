@@ -1,4 +1,69 @@
-# Infinity Language (INFY) — v2.0 工具链
+# Infinity Language (INFY) — v2.0
+
+**A zero-dependency Rust toolchain for a statically-typed, compiled language.**
+
+`infy` is the reference implementation of the [INFY Language Spec v2.0](spec/infinity_lang_spec.md) — lexer / parser / macros / type & ownership checker / C11 backend / single-file self-contained artifacts / IFBC bytecode with dual-track embedding / `infy` CLI.
+
+- Language `2.0` · toolchain `2.0.0` · **IFABI-2** · IFBC v1 · std 1.0
+- Implemented in Rust with **zero third-party dependencies** (`.cargo/config.toml` sets `offline = true`; the compiler is a trust boundary — the supply-chain model of §5.8 applies only to user code)
+- AOT path: INFY → C11 → host `cc` → single executable + appended `.inf` segment (§7.4)
+- License: MIT
+
+[English](#english) · [中文](#中文)
+
+## English
+
+### Why INFY v2.0
+
+Most orchestration DSLs are either weakly checked or drag in a heavy runtime. INFY v2.0 is designed as a **statically-typed, compiled language** with a toolchain that is itself auditable: no crates, no lockfile, no runtime dependency — `cargo build --release --offline` is all you need.
+
+### Quick start
+
+```
+cargo build --release --offline
+target/release/infy -V
+infy init github.com/me/hello
+infy check            # §7.1 phases [1]–[5]
+infy build --reproducible
+infy run
+infy fmt --check
+infy expand --stage macro
+infy conformance --report
+```
+
+### Status (honest)
+
+Implemented and covered by unit/golden tests: the **210-code diagnostics engine** (§9.1–§9.3, byte-exact rendering), full lexer (§2), recursive-descent EBNF parser (§3), module/package/file with SHA-256 Merkle dirhash (§5), type & ownership checking (§4), the std signature table (§10), the artifact container with `INFYART2` trailer (§7.4/§7.3), IFBC bytecode with six load-time checks (§7.8/appendix D), and the `HostApi` C ABI with the three-step handshake (§11).
+
+Still converging (`cargo check --offline --lib` is the trunk gate; some `cargo test` modules are not settled yet): macro expansion, derive, `fmt`, borrow checking module, IFBC B-track ingestion, the C11 emitter, and the conformance suite.
+
+Explicitly not implemented (errors out, no silent degradation): the TLS backend of `std.net`, `infy lsp`, and a few spec-gap byte formats (fixed locally, documented in `runtime/IFBC.md`).
+
+**This implementation does not claim "INFY v2.0 conformance"**: spec §12 requires 100% of 2300 cases; current case count and pass rate live in `docs/coverage.md`.
+
+### Layout
+
+```
+src/             toolchain (Rust, zero dependencies)
+runtime/         embedded runtime & IFBC VM (C11) + ABI docs
+capabilities/    §7.7.2 capability tables (IFBC-CAP-<lang>-<minor>.toml)
+spec/            INFY Language Spec v2.0 (full text)
+docs/            design docs, coverage matrix, deviation log
+examples/        compilable §14 language tour
+tests/           integration tests
+```
+
+### Spec deviations
+
+Every choice made where the spec is silent is recorded in `docs/spec-deviations.md` (including two internal inconsistencies in §9.2 examples, 14 codes outside the §9.1 range table, and the appendix-E pseudo-TOML `;` syntax).
+
+### License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+## 中文
 
 `infy` 是 [INFY Language Spec v2.0](spec/infinity_lang_spec.md) 的参考实现：**静态类型、编译型**语言的工具链 ——
 词法 / 语法 / 宏 / 类型与所有权检查 / C 后端 / 单文件自包含产物 / IFBC 字节码与双轨嵌入 / `infy` CLI。
