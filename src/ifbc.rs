@@ -3180,8 +3180,10 @@ mod tests {
         b.emit(Op::TickLoop, &[TICKLOOP_TEST], Some(2)).unwrap();
         b.emit(Op::Jmp, &[0], Some(2)).unwrap();
         b.emit(Op::Ret, &[], Some(3)).unwrap();
+        // the marks belong to the builder, and `finish_into` consumes it, so snapshot them first
+        let lines: Vec<LineEntry> = b.marks().iter().map(|(o, l)| LineEntry { code_off: *o, line: *l }).collect();
         let (off, len) = b.finish_into(&mut m);
-        m.lines = b.marks().iter().map(|(o, l)| LineEntry { code_off: *o, line: *l }).collect();
+        m.lines = lines;
         m.exceptions.push(ExcEntry {
             start: off,
             end: off + len,
@@ -3273,3 +3275,5 @@ mod tests {
         assert!(b > a);
         assert_eq!(m.strings.len(), 4);
     }
+
+}
