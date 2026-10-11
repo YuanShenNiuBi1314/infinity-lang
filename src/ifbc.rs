@@ -86,7 +86,7 @@ pub fn lang_tag_of(name: &str) -> Option<u16> {
     FORMATS
         .iter()
         .find(|(_, n)| *n == name)
-        .map(|((l, f), _)| ((l as u16) << 8) | *f as u16)
+        .map(|((l, f), _)| ((*l as u16) << 8) | *f as u16)
 }
 
 pub fn lang_tag_name(tag: u16) -> Option<&'static str> {
@@ -985,6 +985,14 @@ impl Op {
         )
     }
 
+    /// The six two-operand comparisons of D.3: they push a `bool`, not the operand type.
+    pub fn is_cmp(self) -> bool {
+        matches!(
+            self,
+            Op::CmpLt | Op::CmpLe | Op::CmpGt | Op::CmpGe | Op::CmpEq | Op::CmpNe
+        )
+    }
+
     /// Binary arithmetic/comparison families: two operands on the stack.
     pub fn is_family(self) -> bool {
         self.is_typed_family() || matches!(self, Op::GuardNonzero | Op::GuardShift)
@@ -1516,7 +1524,7 @@ impl IfbcModule {
     }
 
     fn encode_exceptions(&self) -> Vec<u8> {
-        let mut b = Vec<u8>::new();
+        let mut b: Vec<u8> = Vec::new();
         put_u32(&mut b, self.exceptions.len() as u32);
         for e in &self.exceptions {
             put_u32(&mut b, e.start);
@@ -1673,6 +1681,9 @@ impl HostSigTable {
             ("std.embed.to_bool", vec![dyn_], Bool),
             ("std.embed.to_str", vec![dyn_], Str),
             ("std.embed.to_list", vec![dyn_], List),
+            ("std.embed.eq", vec![dyn_, dyn_], Bool),
+            ("std.embed.ne", vec![dyn_, dyn_], Bool),
+            ("std.math.truediv", vec![dyn_, dyn_], Float),
         ] {
             let sig = match name {
                 "std.iter.range" => HostSig::new(name, &params, ret).with_elem(Int),
@@ -2371,7 +2382,7 @@ impl Instr {
         } else {
             s.push_str(&base);
         }
-        let kinds = ins.op.operand_kinds();
+        let kinds = self.op.operand_kinds();
         for (i, o) in self.operands().iter().enumerate() {
             s.push(' ');
             let txt = match kinds.get(i) {
@@ -3056,6 +3067,8 @@ fn check_operands(m: &IfbcModule, ins: &Instr, f: &FuncEntry, off: u32, fi: usiz
     }
     if ins.op.is_typed_family() || matches!(ins.op, Op::GuardNonzero | Op::GuardShift) {
         match m.ty_kind(ins.ops[0]) {
+            // `not` is D.3's boolean family member; every other family needs a numeric suffix.
+            Some(TyKind::Bool) if ins.op == Op::Not => {}
             Some(k) if k.is_numeric() => {}
             Some(k) => push(
                 out,
@@ -3102,7 +3115,7 @@ fn check_adjacency(
 ) {
     let ins = instrs[idx].1;
     let prev = if idx > 0 { Some(instrs[idx - 1].1) } else { None };
-    let need = |what: &str, code: &'static str, ok: bool| {
+    let mut need = |what: &str, code: &'static str, ok: bool| {
         if !ok {
             push(
                 out,
@@ -3135,3 +3148,128 @@ fn check_adjacency(
     }
     let _ = m;
 }
+
+// ------------------------------------------------------------------------ tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TICKLOOP_TEST: u32 = 65536;
+
+    /// A module built by hand: `f(a) = (a / 2) + 1`, exercising the pool, the type table, the D.3
+    /// guards, the D.7 tag checkpoints, the line map and the exception table.
+    fn sample() -> IfbcModule {
+        let mut m = IfbcModule::new_unit("CPY-313", 1, "__infy_unit__", "b_track/demo.py").unwrap();
+        let ty_i = m.intern_type(TyKind::Int, "i64", NONE32, NONE32);
+        let k2 = m.intern("2");
+        let k1 = m.intern("1");
+        let hosts = HostSigTable::std_default();
+        let mut b = CodeBuilder::new(0);
+        b.set_locals(2);
+        b.emit(Op::Ldl, &[0], Some(1)).unwrap();
+        b.emit(Op::IsDyn, &[ty_i], Some(1)).unwrap();
+        b.emit(Op::UnboxDyn, &[], Some(1)).unwrap();
+        b.emit(Op::Push, &[k2, ty_i], Some(1)).unwrap();
+        b.emit(Op::IsDyn, &[ty_i], Some(1)).unwrap();
+        b.emit(Op::UnboxDyn, &[], Some(1)).unwrap();
+        b.emit(Op::GuardNonzero, &[ty_i], Some(1)).unwrap();
+        b.emit(Op::Div, &[ty_i], Some(1)).unwrap();
+        b.emit(Op::BoxDyn, &[ty_i], Some(1)).unwrap();
+        b.emit(Op::Push, &[k1, ty_i], Some(1)).unwrap();
+        b.emit(Op::TickLoop, &[TICKLOOP_TEST], Some(2)).unwrap();
+        b.emit(Op::Jmp, &[0], Some(2)).unwrap();
+        b.emit(Op::Ret, &[], Some(3)).unwrap();
+        let (off, len) = b.finish_into(&mut m);
+        m.lines = b.marks().iter().map(|(o, l)| LineEntry { code_off: *o, line: *l }).collect();
+        m.exceptions.push(ExcEntry {
+            start: off,
+            end: off + len,
+            handler: off,
+            depth: 1,
+            kind: ExcKind::Cleanup,
+        });
+        let _ = m.intern_host(&hosts, "std.io.log");
+        m.push_func(
+            "__infy_unit__",
+            off,
+            len,
+            2,
+            &[TyKind::Instance],
+            TyKind::Instance,
+            0,
+            F_ENTRY,
+        );
+        m.seal();
+        m
+    }
+
+    fn find_instr(m: &IfbcModule, op: Op) -> usize {
+        for i in 0..m.funcs.len() {
+            for (off, ins) in instructions_of(m, i).unwrap() {
+                if ins.op == op {
+                    return off as usize;
+                }
+            }
+        }
+        panic!("no {op:?} in the sample")
+    }
+
+    #[test]
+    fn encode_decode_encode_is_idempotent() {
+        let m = sample();
+        let a = m.encode();
+        let d = decode(&a).expect("decode");
+        let b = d.encode();
+        assert_eq!(a, b, "encode -> decode -> encode must be byte-identical");
+        assert_eq!(&a[0..4], MAGIC);
+        assert_eq!(d.lang.tag, m.lang.tag);
+        assert_eq!(d.funcs.len(), 1);
+        assert_eq!(d.strings.entries(), m.strings.entries());
+        assert_eq!(d.lines, m.lines);
+        assert_eq!(d.exceptions, m.exceptions);
+    }
+
+    #[test]
+    fn module_hash_covers_normalised_contents() {
+        let mut m = sample();
+        let h = m.module_hash;
+        assert_eq!(h, m.compute_module_hash());
+        m.intern("one byte more into the pool");
+        assert_ne!(h, m.compute_module_hash(), "§7.3 reproducibility + tamper evidence");
+    }
+
+    #[test]
+    fn disassembly_is_byte_stable() {
+        let a = sample().encode();
+        let d1 = disassemble(&a);
+        let d2 = disassemble(&a);
+        assert_eq!(d1, d2, "infy ifbc dump must be byte-stable (§12.3 golden)");
+        for want in ["div.i64", "guard.nonzero", "is.dyn i64", "tickloop", "lang_tag=CPY-313"] {
+            assert!(d1.contains(want), "missing {want} in\n{d1}");
+        }
+        assert!(d1.contains("InfyDynTag=1"), "the Int row must show it *is* DY_INT:\n{d1}");
+    }
+
+    #[test]
+    fn lang_tag_scheme_matches_7_8_1() {
+        assert_eq!(lang_tag_of("CPY-313"), Some(0x010d));
+        assert_eq!(lang_tag_of("LUA-54"), Some(0x0236));
+        assert_eq!(lang_tag_name(0x010d), Some("CPY-313"));
+        assert_eq!(lang_tag_name(0x0236), Some("LUA-54"));
+        assert_eq!(lang_tag_of("CPY-999"), None);
+        assert_eq!(
+            LangTag { tag: lang_tag_of("CPY-313").unwrap(), cap_version: 1 }.cap_string(),
+            "CPY-313:1"
+        );
+    }
+
+    #[test]
+    fn pool_interns_by_first_appearance() {
+        let mut m = IfbcModule::new_unit("CPY-313", 1, "u", "s").unwrap();
+        let a = m.intern("second");
+        let b = m.intern("first");
+        assert_eq!(m.intern("second"), a, "re-interning never moves an entry (§7.3)");
+        assert!(b > a);
+        assert_eq!(m.strings.len(), 4);
+    }

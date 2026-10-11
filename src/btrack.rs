@@ -32,7 +32,8 @@ use std::process::{Command, Stdio};
 
 use crate::ast::EmbedBlock;
 use crate::codes;
-use crate::diag::{Diagnostic, Handler, Origin, Phase, Position};
+use crate::diag::{Diagnostic, Handler, Origin, Phase};
+use crate::span::Position;
 use crate::ifbc::{
     self, CodeBuilder, ExcEntry, ExcKind, HostSig, HostSigTable, IfbcModule, ImportKind, Instr,
     Op, TyKind, F_ENTRY, NONE32,
@@ -311,7 +312,7 @@ pub enum PyConst {
 
 /// One instruction of `co_code`, exactly as `dis.get_instructions` reports it. INFY never re-derives
 /// any of this — §7.7.1 forbids writing a parser for another language.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PyInstr {
     pub opname: String,
     pub opcode: u32,
@@ -345,7 +346,7 @@ pub struct LineSpan {
     pub line: Option<u32>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CodeObj {
     pub name: String,
     pub argcount: u32,
@@ -723,7 +724,7 @@ impl IngestErr {
         let d = if self.help().is_empty() { d } else { d.help(self.help()) };
         if let IngestErr::Scan(v) = self {
             return v.iter().skip(1).fold(d, |acc, x| {
-                acc.child(ScanViolation::diagnostic_single(x, file, pos))
+                acc.child(x.diagnostic(file, pos))
             });
         }
         d
@@ -861,7 +862,9 @@ fn probe_error(body: &str, stderr: &str) -> IngestErr {
             return IngestErr::SourceRejected { kind, message, line };
         }
     }
-    IngestErr::Probe { message: if stderr.is_empty() { body } else { stderr } }
+    IngestErr::Probe {
+        message: if stderr.is_empty() { body } else { &stderr }.to_string(),
+    }
 }
 
 fn parse_dump(body: &str) -> Result<CodeObjDump, IngestErr> {
@@ -1851,7 +1854,7 @@ fn check_mnemonic(text: &str, context: &str) -> Result<(), IngestErr> {
 /// A value of the *model* operand stack. IFBC is a stack machine too, so most Python instructions
 /// map 1:1; a value may additionally be parked in a local-window slot, which is what lets loop
 /// headers and fused instructions keep one verifiable stack height (§7.8.3 item 2).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum Val {
     /// Physically on the IFBC operand stack.
     Stack { ty: u32 },
@@ -2336,7 +2339,7 @@ impl<'a> Lowerer<'a> {
         if let Some(&o) = self.off_map.get(&py) {
             return Some(o);
         }
-        self.off_map.range((py..).next()).next().map(|(_, &v)| v)
+        self.off_map.range(py..).next().map(|(_, &v)| v)
     }
 
     /// §7.7.2 scan item 5 in the other direction: the code object's own `co_exceptiontable` becomes
@@ -2973,7 +2976,8 @@ impl<'a> Lowerer<'a> {
             }
             "UNPACK_SEQUENCE" => {
                 let n = arg;
-                let cont = self.to_slot(self.pop(at)?, at)?;
+                let cv = self.pop(at)?;
+                let cont = self.to_slot(cv, at)?;
                 let cti = cont.ty();
                 let elem = self.elem_of(cti).unwrap_or(self.ty_dyn);
                 // Element order matches CPython: item 0 is pushed first, so the last `STORE_FAST`
@@ -3120,9 +3124,14 @@ impl<'a> Lowerer<'a> {
             }
             "IMPORT_FROM" => {
                 let nm = self.m.intern(&at.argrepr);
-                let cont = self.to_slot(self.stack.last().cloned().ok_or_else(|| {
-                    self.err("IMPORT_FROM 于空栈", "code object 栈形状与设计不符".to_string(), at)
-                })?, at)?;
+                let top = match self.stack.last().cloned() {
+                    Some(v) => v,
+                    None => {
+                        self.err("IMPORT_FROM 于空栈", "code object 栈形状与设计不符".to_string(), at);
+                        return Err(());
+                    }
+                };
+                let cont = self.to_slot(top, at)?;
                 self.push_val(&cont, at)?;
                 self.emit(Op::ImportAttr, &[nm], at)?;
                 let ty = self.ty_dyn;
@@ -3131,19 +3140,16 @@ impl<'a> Lowerer<'a> {
             }
             // ---- control flow ----------------------------------------------------
             "RETURN_VALUE" => {
-                let v = self.stack.last().cloned();
-                match v {
+                match self.stack.last().cloned() {
                     Some(val) => {
                         self.push_val(&val, at)?;
                         self.stack.pop();
                     }
                     None => {
+                        // A bare `return` still hands back exactly one value in Python.
                         let pool = self.m.intern("None");
                         self.emit(Op::Push, &[pool, self.ty_unit], at)?;
                     }
-                }
-                if let Some(Val::Stack { .. }) = v.filter(|x| matches!(x, Val::Stack { .. })) {
-                    // already pushed above
                 }
                 self.emit(Op::Ret, &[], at)?;
                 self.terminated = true;
@@ -3259,20 +3265,20 @@ impl<'a> Lowerer<'a> {
     ) -> Result<usize, ()> {
         let depth = at.arg.unwrap_or(2) as usize;
         let val = self.pop(at)?;
-        let vals = self.to_slot(val, at)?;
+        let vals = self.to_slot(val.clone(), at)?;
         if self.stack.len() < depth {
             self.err(format!("{name} {depth}"), "容器不在预期的栈深度".to_string(), at);
             return Err(());
         }
         let cont_idx = self.stack.len() - depth;
         let cont = self.stack.remove(cont_idx);
-        let cont = self.to_slot(&cont, at)?;
+        let cont = self.to_slot(cont.clone(), at)?;
         let cty = cont.ty();
         match name {
             "MAP_ADD" => {
                 // MAP_ADD pushes (map, key, value): the key is the value below `val`.
                 let key = self.stack.remove(self.stack.len() - 2);
-                let key = self.to_slot(&key, at)?;
+                let key = self.to_slot(key.clone(), at)?;
                 self.push_val(&cont, at)?;
                 self.push_val(&key, at)?;
                 self.push_val(&val, at)?;
@@ -3322,23 +3328,16 @@ impl<'a> Lowerer<'a> {
         Ok(1)
     }
 
-    fn jump_target(&self, at: &PyInstr) -> Result<u32, ()> {
-        at.argval_int
-            .filter(|v| *v >= 0)
-            .map(|v| v as u32)
-            .ok_or_else(|| {
-                self
-                    .viol
-                    .push(ScanViolation::new(
-                        "E-0712",
-                        "lowering",
-                        format!("{} 的跳转目标无法解析", at.opname),
-                        "dis 未报告 argval 为绝对偏移；code object 形态与本实现预期不符".to_string(),
-                        self.co.name.clone(),
-                        at.offset,
-                        at.start_line,
-                    ))
-            })
+    fn jump_target(&mut self, at: &PyInstr) -> Result<u32, ()> {
+        if let Some(t) = at.argval_int.filter(|v| *v >= 0) {
+            return Ok(t as u32);
+        }
+        self.err(
+            format!("{} 的跳转目标无法解析", at.opname),
+            "dis 未把 argval 报成绝对偏移：code object 形态与本实现预期不符".to_string(),
+            at,
+        );
+        Err(())
     }
 
     /// A conditional branch: everything below the tested value is parked, the tested value stays on
@@ -3357,34 +3356,65 @@ impl<'a> Lowerer<'a> {
     /// `shr` result always gets its D.3 guard immediately before it (the verifier refuses the module
     /// without one — UB-003/UB-004's bytecode-side counterpart).
     fn binop(&mut self, l: &Val, r: &Val, at: &PyInstr) -> Result<(), ()> {
-        let (op, ty) = self.choose(at, &[l.ty(), r.ty()])?;
-        // `choose` already emitted a `call.host` for host candidates.
-        if op == Op::CallHost {
-            let ty2 = ty;
-            self.stack.push(Val::Stack { ty: ty2 });
-            return Ok(());
+        let sel = self.choose(at, &[l.ty(), r.ty()])?;
+        match sel {
+            Selected::Family(op, ty) => {
+                // D.7 / UB-020: every `unbox.dyn` is preceded by its `is.dyn` checkpoint.
+                self.push_val(l, at)?;
+                self.emit(Op::IsDyn, &[ty], at)?;
+                self.emit(Op::UnboxDyn, &[], at)?;
+                self.push_val(r, at)?;
+                self.emit(Op::IsDyn, &[ty], at)?;
+                self.emit(Op::UnboxDyn, &[], at)?;
+                // D.3: the boundary checks must be adjacent and may not be dropped (UB-003/UB-004).
+                match op {
+                    Op::Div | Op::Rem => self.emit(Op::GuardNonzero, &[ty], at)?,
+                    Op::Shl | Op::Shr | Op::ShrA => self.emit(Op::GuardShift, &[ty], at)?,
+                    _ => {}
+                }
+                self.emit(op, &[ty], at)?;
+                let res = if op.is_cmp() { self.ty_bool } else { ty };
+                self.box_as(res, at)?;
+                self.stack.push(Val::Stack { ty: res });
+            }
+            Selected::Object(op, ty) => {
+                self.push_val(l, at)?;
+                self.push_val(r, at)?;
+                if op.arity() == 1 {
+                    self.emit(op, &[ty], at)?;
+                } else {
+                    self.emit(op, &[], at)?;
+                }
+                let res = self.object_result_ty(op, ty);
+                self.stack.push(Val::Stack { ty: res });
+            }
+            Selected::Host(name) => {
+                let refs: Vec<&Val> = vec![l, r];
+                let ty = self.emit_host(&name, &refs, at)?;
+                self.stack.push(Val::Stack { ty });
+            }
+            Selected::None => {
+                self.err(
+                    format!("{}({})", at.opname, dispatch_key(at)),
+                    "能力表给出的候选映射都不适用于这里的操作数类型（§7.7.2：按诊断列出的具体项扩容）"
+                        .to_string(),
+                    at,
+                );
+                return Err(());
+            }
         }
-        self.push_val(l, at)?;
-        self.emit(Op::IsDyn, &[ty], at)?;
-        self.emit(Op::UnboxDyn, &[], at)?;
-        self.push_val(r, at)?;
-        self.emit(Op::IsDyn, &[ty], at)?;
-        self.emit(Op::UnboxDyn, &[], at)?;
-        match op {
-            Op::Div | Op::Rem => self.emit(Op::GuardNonzero, &[ty], at)?,
-            Op::Shl | Op::Shr | Op::ShrA => self.emit(Op::GuardShift, &[ty], at)?,
-            _ => {}
-        }
-        self.emit(op, &[ty], at)?;
-        let res = if matches!(op, Op::CmpLt | Op::CmpLe | Op::CmpGt | Op::CmpGe | Op::CmpEq | Op::CmpNe)
-        {
-            self.ty_bool
-        } else {
-            ty
-        };
-        self.box_as(res, at)?;
-        self.stack.push(Val::Stack { ty: res });
         Ok(())
+    }
+
+    /// Result type of an object-level instruction (D.6/D.7).
+    fn object_result_ty(&mut self, op: Op, container: u32) -> u32 {
+        let elem = self.elem_of(container).unwrap_or(self.ty_dyn);
+        match op {
+            Op::IdxGet | Op::SeqNext | Op::SeqIter => elem,
+            Op::SeqLen => self.ty_int,
+            Op::DynTruthy | Op::DynIdentity => self.ty_bool,
+            _ => container,
+        }
     }
 
     fn local_slot_ty(&self, slot: u32) -> u32 {
@@ -4172,7 +4202,7 @@ pub fn is_pure_python_tag(tag: &str) -> bool {
     if parts.len() != 3 {
         return false;
     }
-    let (pyabi, abi, plat) = (&parts[0], &parts[1], &parts[2]);
+    let (pyabi, abi, plat) = (parts[0], parts[1], parts[2]);
     plat == "any" && abi == "none" && {
         pyabi.split('.').all(|p| p == "py3" || p == "py2.py3" || p == "py2")
             && !pyabi.is_empty()
@@ -4300,7 +4330,7 @@ fn ingest_inner(
             }
             return Err(IngestErr::Scan(gaps));
         }
-        let m = lower_named(&dump, &cap, &hosts, mname)?;
+        let m = lower_named(&dump, &cap, &hosts, mname).map_err(IngestErr::Scan)?;
         let image = m.encode();
         let rel = format!("ifbc/{}", mname.replace('/', "_"));
         let rel_src = format!("source/{mname}");

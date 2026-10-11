@@ -1,0 +1,6 @@
+fatal: unable to access 'https://github.com/YuanShenNiuBi1314/infinity-lang.git/': Failed to connect to github.com:443 after 21069 ms: Could not connect to server
+attempt 1 failed 00:02:27
+fatal: unable to access 'https://github.com/YuanShenNiuBi1314/infinity-lang.git/': Failed to connect to github.com:443 after 21081 ms: Could not connect to server
+attempt 2 failed 00:03:38
+fatal: unable to access 'https://github.com/YuanShenNiuBi1314/infinity-lang.git/': Failed to connect to github.com:443 after 21053 ms: Could not connect to server
+attempt 3 failed 00:04:49
