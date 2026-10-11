@@ -9,3 +9,4 @@
 *.infypkg
 .infy-build/
 MODULE.infy.lock.generated
+push.log

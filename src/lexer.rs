@@ -1203,6 +1203,7 @@ impl<'a> Lexer<'a> {
                 let nxt = self.peek_at(at + 1);
                 if radix == Radix::Dec && matches!(nxt, Some('.') | Some('e') | Some('E')) {
                     self.underscore_adjacent(h, at, nxt.unwrap_or('.'));
+                    reported_at = Some(at);
                 }
                 last_us = true;
                 self.bump_char();
@@ -1213,7 +1214,9 @@ impl<'a> Lexer<'a> {
         if last_us {
             let at = self.pos.saturating_sub(1);
             let nxt = self.cur();
-            if radix == Radix::Dec && matches!(nxt, Some('.') | Some('e') | Some('E')) {
+            if reported_at == Some(at) {
+                // already diagnosed as "`_` next to `.`/`e`" while scanning
+            } else if radix == Radix::Dec && matches!(nxt, Some('.') | Some('e') | Some('E')) {
                 self.underscore_adjacent(h, at, nxt.unwrap_or('.'));
             } else {
                 let d = self
@@ -2402,4 +2405,1229 @@ pub fn build_token_tree(toks: &[Tok]) -> (Vec<Tree>, usize) {
         }
     }
     (top, consumed)
+}
+
+// =============================================================================================
+// Conformance seed for §12.1's "词法 96 例": one test per diagnostic the lexer can emit, plus a
+// positive case for every literal form of §2.6/§2.8/§2.9, the whole §2.7 operator table, the §2.4
+// reserved set, `@embed` (§2.11/§3.6), nested comments (§2.2), token trees (§3.9) and the §14 tour.
+// Tests never read `codes`' table titles — only codes, kinds and values.
+// =============================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::token::{CommentKind, Kind, Kw, Lit, Punct, Radix};
+
+    /// Lex `text`, appending the trailing LF §2.1 asks for so `W-0002` does not pollute the
+    /// positive cases. Returns the stream, the diagnostic codes in emission order, and the sources.
+    fn lex(text: &str) -> (Lexed, Vec<String>) {
+        let mut t = text.to_string();
+        if !t.ends_with('\n') {
+            t.push('\n');
+        }
+        let mut src = Sources::default();
+        let f = src.add("t.infy".to_string(), t);
+        let mut h = Handler::default();
+        let lx = lex_file(&src, f, &mut h);
+        (lx, h.diags.iter().map(|d| d.code.clone()).collect())
+    }
+
+    /// Lex exactly as written (no appended LF) — for the §2.1 line-ending cases.
+    fn lex_raw(text: &str) -> (Lexed, Vec<String>) {
+        let mut src = Sources::default();
+        let f = src.add("t.infy".to_string(), text.to_string());
+        let mut h = Handler::default();
+        let lx = lex_file(&src, f, &mut h);
+        (lx, h.diags.iter().map(|d| d.code.clone()).collect())
+    }
+
+    fn codes(text: &str) -> Vec<String> {
+        lex(text).1
+    }
+
+    fn kinds(text: &str) -> Vec<Kind> {
+        toks(text).iter().map(|t| t.kind.clone()).collect()
+    }
+
+    /// The token stream without the trailing `Eof`.
+    fn toks(text: &str) -> Vec<Tok> {
+        let mut v: Vec<Tok> = lex(text).0.toks;
+        assert!(v.last().map(|t| t.is_eof()).unwrap_or(false), "stream must end with Eof");
+        v.pop();
+        v
+    }
+
+    fn clean(text: &str) -> Lexed {
+        let (lx, c) = lex(text);
+        assert!(c.is_empty(), "expected a lex-clean file, got {c:?}\n--- source ---\n{text}");
+        lx
+    }
+
+    fn has(text: &str, code: &str) {
+        let c = codes(text);
+        assert!(c.iter().any(|x| x == code), "expected `{code}` among {c:?}\n--- source ---\n{text}");
+    }
+
+    fn lacks(text: &str, code: &str) {
+        let c = codes(text);
+        assert!(!c.iter().any(|x| x == code), "did not expect `{code}`, got {c:?}\n{text}");
+    }
+
+    fn id(s: &str) -> Kind {
+        Kind::Ident(s.to_string())
+    }
+    fn kw(k: Kw) -> Kind {
+        Kind::Keyword(k)
+    }
+    fn pu(p: Punct) -> Kind {
+        Kind::Punct(p)
+    }
+
+    fn ints(text: &str) -> Vec<(String, Radix, Option<String>, Option<u128>)> {
+        lex(text)
+            .0
+            .toks
+            .iter()
+            .filter_map(|t| match &t.kind {
+                Kind::Lit(Lit::Int(i)) => {
+                    Some((i.digits.clone(), i.radix, i.suffix.clone(), i.value))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn floats(text: &str) -> Vec<(String, Option<String>, Option<String>)> {
+        lex(text)
+            .0
+            .toks
+            .iter()
+            .filter_map(|t| match &t.kind {
+                Kind::Lit(Lit::Float(f)) => {
+                    Some((f.mantissa.clone(), f.exp.clone(), f.suffix.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn strs(text: &str) -> Vec<String> {
+        lex(text)
+            .0
+            .toks
+            .iter()
+            .filter_map(|t| match &t.kind {
+                Kind::Lit(Lit::Str(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // -- §2.1 encoding, BOM, line endings ------------------------------------------------------
+
+    #[test]
+    fn check_utf8_finds_invalid_sequences() {
+        assert_eq!(check_utf8(b"let x = 1;\n"), None);
+        assert_eq!(check_utf8(&[0xFF, 0xFE]), Some((0, 1)));
+        // A truncated multi-byte sequence at EOF reports the remaining length.
+        assert_eq!(check_utf8(&[b'a', 0xE4, 0xB8]), Some((1, 2)));
+        assert_eq!(check_utf8("漢字".as_bytes()), None);
+    }
+
+    #[test]
+    fn lex_bytes_reports_e0002_and_refuses_to_lex() {
+        let mut src = Sources::default();
+        let mut h = Handler::default();
+        let (_f, lx) = lex_bytes(&mut src, "bad.infy", &[b'l', b'e', b't', 0xC3, 0x28], &mut h);
+        assert_eq!(h.diags.len(), 1, "{:?}", h.diags.iter().map(|d| &d.code).collect::<Vec<_>>());
+        assert_eq!(h.diags[0].code, "E-0002");
+        assert_eq!(lx.toks.len(), 1);
+        assert!(lx.toks[0].is_eof());
+        assert_eq!(lx.diagnostics_emitted, 1);
+    }
+
+    #[test]
+    fn lex_bytes_accepts_valid_utf8() {
+        let mut src = Sources::default();
+        let mut h = Handler::default();
+        let (f, lx) = lex_bytes(&mut src, "ok.infy", "package ok\n".as_bytes(), &mut h);
+        assert!(h.diags.is_empty());
+        assert!(matches!(lx.toks[0].kind, Kind::Keyword(Kw::Package)));
+        assert_eq!(src.get(f).map(|x| x.display_path.as_str()), Some("ok.infy"));
+    }
+
+    #[test]
+    fn bom_is_skipped_once() {
+        let (lx, c) = lex_raw("\u{FEFF}package a\n");
+        assert!(c.is_empty(), "{c:?}");
+        assert!(matches!(lx.toks[0].kind, Kind::Keyword(Kw::Package)));
+    }
+
+    #[test]
+    fn crlf_warns_w0001() {
+        let (_lx, c) = lex_raw("package a\r\nfn f() {}\r\n");
+        assert_eq!(c.iter().filter(|x| x.as_str() == "W-0001").count(), 1, "{c:?}");
+        assert!(!c.iter().any(|x| x.as_str() == "E-0003"), "{c:?}");
+    }
+
+    #[test]
+    fn lone_cr_is_e0003() {
+        let (_lx, c) = lex_raw("package a\rfn f() {}\n");
+        assert_eq!(c.iter().filter(|x| x.as_str() == "E-0003").count(), 1, "{c:?}");
+        assert!(!c.iter().any(|x| x.as_str() == "W-0001"), "{c:?}");
+    }
+
+    #[test]
+    fn missing_trailing_lf_is_w0002() {
+        let (_lx, c) = lex_raw("package a");
+        assert!(c.iter().any(|x| x.as_str() == "W-0002"), "{c:?}");
+        assert!(!codes("package a\n").iter().any(|x| x.as_str() == "W-0002"));
+    }
+
+    #[test]
+    fn empty_file_is_e0090() {
+        has("", "E-0090");
+        has("\u{FEFF}", "E-0090");
+    }
+
+    // -- §2.2 comments -------------------------------------------------------------------------
+
+    #[test]
+    fn line_and_doc_comments_keep_verbatim_text() {
+        let lx = clean("// plain body\n///  doc body\n/* block */\nfn f() {}\n");
+        assert_eq!(lx.comments.len(), 3);
+        assert_eq!(lx.comments[0].kind, CommentKind::Line);
+        assert_eq!(lx.comments[0].text, " plain body");
+        assert_eq!(lx.comments[1].kind, CommentKind::Doc);
+        assert_eq!(lx.comments[1].text, "  doc body");
+        assert_eq!(lx.comments[2].kind, CommentKind::Block);
+        assert_eq!(lx.comments[2].text, " block ");
+        // comments never appear in the token stream
+        assert_eq!(kinds("/// doc\nfn f() {}\n"), vec![kw(Kw::Fn), id("f"), pu(Punct::LParen), pu(Punct::RParen), pu(Punct::LBrace), pu(Punct::RBrace)]);
+    }
+
+    #[test]
+    fn four_slashes_is_an_ordinary_comment() {
+        let lx = clean("//// not a doc comment\nfn f() {}\n");
+        assert_eq!(lx.comments[0].kind, CommentKind::Line);
+        assert_eq!(lx.comments[0].text, "// not a doc comment");
+    }
+
+    #[test]
+    fn block_comments_nest() {
+        let lx = clean("/* a /* b /* c */ d */ e */\nfn f() {}\n");
+        assert_eq!(lx.comments.len(), 1);
+        assert_eq!(lx.comments[0].text, " a /* b /* c */ d */ e ");
+    }
+
+    #[test]
+    fn unterminated_block_comment_is_e0004() {
+        has("/* open /* inner\nfn f() {}\n", "E-0004");
+    }
+
+    #[test]
+    fn block_comment_depth_limit_is_e0005() {
+        let deep = format!("{}{}\n", "/*".repeat(256), "*/".repeat(256));
+        has(&deep, "E-0005");
+        let ok = format!("{}{}\n", "/*".repeat(255), "*/".repeat(255));
+        lacks(&ok, "E-0005");
+    }
+
+    // -- §2.2 build constraint -----------------------------------------------------------------
+
+    #[test]
+    fn build_constraint_on_first_line() {
+        let lx = clean("//infy:build linux\nfn f() {}\n");
+        let (raw, line, _) = lx.build_constraint.clone().expect("constraint captured");
+        assert_eq!(raw, "linux");
+        assert_eq!(line, 1);
+    }
+
+    #[test]
+    fn build_constraint_after_shebang_and_blanks() {
+        let lx = clean("#!/usr/bin/env -S infy run\n\n//infy:build windows && x86_64\nfn f() {}\n");
+        assert_eq!(lx.shebang.as_deref(), Some("#!/usr/bin/env -S infy run"));
+        let (raw, line, _) = lx.build_constraint.clone().expect("constraint captured");
+        assert_eq!(raw, "windows && x86_64");
+        assert_eq!(line, 3);
+    }
+
+    #[test]
+    fn misplaced_build_constraint_is_e0011() {
+        has("fn f() {}\n//infy:build linux\n", "E-0011");
+        has("/// doc\n//infy:build linux\nfn f() {}\n", "E-0011");
+    }
+
+    #[test]
+    fn duplicated_build_constraint_is_e0013() {
+        let c = codes("//infy:build linux\n//infy:build windows\nfn f() {}\n");
+        assert!(c.iter().any(|x| x.as_str() == "E-0013"), "{c:?}");
+        assert_eq!(c.iter().filter(|x| x.as_str() == "E-0013").count(), 1);
+    }
+
+    #[test]
+    fn constraint_expression_without_features_is_not_accused_by_lex_file() {
+        // `lex_file` cannot see the manifest's `features`, so it must not emit E-0012.
+        lacks("//infy:build riscv\nfn f() {}\n", "E-0012");
+    }
+
+    #[test]
+    fn unknown_constraint_name_is_e0012_when_features_are_known() {
+        let mut src = Sources::default();
+        let f = src.add("t.infy".to_string(), "//infy:build riscv && gpu\nfn f() {}\n".to_string());
+        let mut h = Handler::default();
+        let lx = lex_file_with_features(&src, f, &mut h, &["gpu"]);
+        let c: Vec<String> = h.diags.iter().map(|d| d.code.clone()).collect();
+        assert!(c.iter().any(|x| x.as_str() == "E-0012"), "{c:?}");
+        assert_eq!(lx.build_constraint.as_ref().unwrap().0, "riscv && gpu");
+        // With the real feature set declared, nothing is unknown.
+        let mut h2 = Handler::default();
+        lex_file_with_features(&src, f, &mut h2, &["gpu", "riscv"]);
+        assert!(!h2.diags.iter().any(|d| d.code == "E-0012"), "{:?}", h2.diags.iter().map(|d| &d.code).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn constraint_names_helper_returns_unknown_only() {
+        assert!(check_constraint_names("windows && x86_64 || !a_track", &[]).is_empty());
+        assert_eq!(check_constraint_names("riscv", &[]), vec!["riscv".to_string()]);
+        assert_eq!(check_constraint_names("riscv && gpu", &["gpu"]), vec!["riscv".to_string()]);
+        assert_eq!(
+            check_constraint_names("a && b && a", &[]),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert!(known_constraint_names().contains(&"ignore"));
+    }
+
+    // -- §2.3 / §2.4 identifiers and keywords ---------------------------------------------------
+
+    #[test]
+    fn identifiers_are_unicode_xid() {
+        assert!(is_xid_start('汉') && is_xid_start('あ') && is_xid_start('ア') && is_xid_start('한'));
+        assert!(is_xid_start('_') && is_xid_start('a') && !is_xid_start('1'));
+        assert!(!is_xid_start('\u{300}'), "a combining mark may not start an identifier");
+        assert!(is_xid_continue('\u{301}') && is_xid_continue('9') && is_xid_continue('_'));
+        assert_eq!(kinds("let 变量_1 = 漢字;\n")[1], id("变量_1"));
+        assert_eq!(kinds("let x = _y;\n")[3], id("_y"));
+        assert_eq!(kinds("let _ = 1;\n")[1], id("_"));
+        assert_eq!(kinds("let a = Foo; let b = foo;\n")[3], id("Foo"));
+    }
+
+    #[test]
+    fn double_underscore_prefix_is_e0007() {
+        has("let __reserved = 1;\n", "E-0007");
+        lacks("let _single = 1;\n", "E-0007");
+        lacks("let _ = 1;\n", "E-0007");
+    }
+
+    #[test]
+    fn keywords_are_reserved_words() {
+        let table: &[(&str, Kw)] = &[
+            ("module", Kw::Module), ("package", Kw::Package), ("import", Kw::Import),
+            ("pub", Kw::Pub), ("priv", Kw::Priv), ("mod", Kw::Mod), ("event", Kw::Event),
+            ("fn", Kw::Fn), ("struct", Kw::Struct), ("enum", Kw::Enum), ("union", Kw::Union),
+            ("trait", Kw::Trait), ("impl", Kw::Impl), ("type", Kw::Type), ("const", Kw::Const),
+            ("static", Kw::Static), ("let", Kw::Let), ("var", Kw::Var), ("extern", Kw::Extern),
+            ("unsafe", Kw::Unsafe), ("link", Kw::Link), ("owns", Kw::Owns),
+            ("borrows", Kw::Borrows), ("label", Kw::Label), ("u8", Kw::U8), ("u16", Kw::U16),
+            ("u32", Kw::U32), ("u64", Kw::U64), ("u128", Kw::U128), ("i8", Kw::I8),
+            ("i16", Kw::I16), ("i32", Kw::I32), ("i64", Kw::I64), ("i128", Kw::I128),
+            ("f32", Kw::F32), ("f64", Kw::F64), ("bool", Kw::BoolTy), ("str", Kw::Str),
+            ("char", Kw::Char), ("dyn", Kw::Dyn), ("Self", Kw::SelfTy), ("self", Kw::SelfVal),
+            ("true", Kw::True), ("false", Kw::False), ("if", Kw::If), ("else", Kw::Else),
+            ("while", Kw::While), ("loop", Kw::Loop), ("for", Kw::For), ("in", Kw::In),
+            ("break", Kw::Break), ("continue", Kw::Continue), ("return", Kw::Return),
+            ("match", Kw::Match), ("chain", Kw::Chain), ("start_flag", Kw::StartFlag),
+            ("goto", Kw::Goto), ("start", Kw::Start), ("stop", Kw::Stop), ("pause", Kw::Pause),
+            ("resume", Kw::Resume), ("linkage", Kw::Linkage), ("as", Kw::As), ("is", Kw::Is),
+            ("where", Kw::Where), ("move", Kw::Move), ("auto", Kw::Auto), ("mut", Kw::Mut),
+            ("ref", Kw::Ref), ("defer", Kw::Defer), ("const_assert", Kw::ConstAssert),
+            ("use", Kw::Use),
+        ];
+        for (text, k) in table {
+            let src = format!("{text}\n");
+            let ks = kinds(&src);
+            assert_eq!(ks.len(), 1, "{text} produced {ks:?}");
+            assert_eq!(ks[0], kw(*k), "{text} must lex as {:?} and round-trip its text", k);
+            assert_eq!(k.text(), *text);
+        }
+    }
+
+    #[test]
+    fn reserved_but_unused_words_are_e0020() {
+        for w in ["use", "mod", "union", "linkage"] {
+            has(&format!("let {w} = 1;\n"), "E-0020");
+        }
+        lacks("let model = 1;\nlet unified = 1;\n", "E-0020");
+    }
+
+    #[test]
+    fn macro_rules_bang_is_one_token() {
+        let ks = kinds("macro_rules! m { () => {}; }\n");
+        assert_eq!(ks[0], kw(Kw::MacroRules));
+        assert_eq!(clean("macro_rules! m {}\n").toks[0].text, "macro_rules!");
+        // The `!` is part of the keyword: no separate Bang punct is emitted.
+        assert!(!ks.iter().any(|k| *k == pu(Punct::Bang)));
+        // plain `macro_rules` (no bang) is just an identifier
+        assert_eq!(kinds("let macro_rules = 1;\n")[1], id("macro_rules"));
+    }
+
+    #[test]
+    fn keywords_are_not_identifiers_and_are_case_sensitive() {
+        assert_eq!(kinds("let IF = 1;\n")[1], id("IF"));
+        assert_eq!(kinds("let Str = 1;\n")[1], id("Str"));
+    }
+
+    // -- §2.10 script / confusable checks ------------------------------------------------------
+
+    #[test]
+    fn mixed_script_inside_one_identifier() {
+        has("let аdmin = 1;\n", "E-0050"); // Cyrillic а + Latin d (§2.10's example)
+        has("let 汉한 = 1;\n", "E-0051"); // Han + Hangul (§2.10's example)
+        lacks("let 漢字ひらがな = 1;\n", "E-0051"); // Han + kana is legal (§2.10)
+        lacks("let 漢字カタカナ = 1;\n", "E-0050");
+        lacks("let normal_1 = 1;\n", "E-0050");
+        lacks("let normal_1 = 1;\n", "E-0051");
+    }
+
+    #[test]
+    fn skeleton_folds_confusables_and_marks() {
+        assert_eq!(skeleton("аdmin"), skeleton("admin"));
+        assert_eq!(skeleton("ＰＹ"), skeleton("py"));
+        assert_eq!(skeleton("e\u{301}"), skeleton("e"));
+        assert_ne!(skeleton("abc"), skeleton("abd"));
+        assert_eq!(skeleton("A\u{200b}B"), skeleton("ab"));
+    }
+
+    #[test]
+    fn invisible_characters_outside_strings_are_e0052() {
+        has("let a\u{200b}b = 1;\n", "E-0052");
+        has("let x = 1;\u{202e}\n", "E-0052");
+        has("// trailing \u{202d} direction mark\n", "E-0052");
+        has("/* \u{200f} inside a block comment */\n", "E-0052");
+        lacks("let s = \"a\u{200b}b\";\n", "E-0052");
+        lacks("let r = r\"a\u{200f}b\";\n", "E-0052");
+        lacks("@py(a = 1) { \u{202e} }\n", "E-0052");
+    }
+
+    #[test]
+    fn stray_characters_use_the_source_charset_code() {
+        has("let x = `quote`;\n", "E-0052");
+        has("let nbsp = 1;\u{a0}\n", "E-0052");
+    }
+
+    // -- §2.5 lifetimes ------------------------------------------------------------------------
+
+    #[test]
+    fn lifetimes_are_their_own_kind() {
+        let ks = kinds("fn f<'a, 'static>(x: &'a u8) -> u8 { 0 }\n");
+        assert_eq!(ks[2], pu(Punct::Lt));
+        assert_eq!(ks[3], Kind::Lifetime("a".to_string()));
+        assert_eq!(ks[5], Kind::Lifetime("static".to_string()));
+        assert_eq!(ks.iter().filter(|k| matches!(k, Kind::Lifetime(_))).count(), 3);
+        let ks = kinds("#[borrows('static)]\nfn f() {}\n");
+        assert_eq!(ks[0], Kind::AttrOpen { inner: false });
+        assert_eq!(ks[3], Kind::Lifetime("static".to_string()));
+        assert_eq!(clean("'a\n").toks[0].text, "'a");
+    }
+
+    // -- §2.6 / §2.8 numeric literals ----------------------------------------------------------
+
+    #[test]
+    fn integer_forms_from_the_spec() {
+        assert_eq!(
+            ints("let a = 123u32;\n"),
+            vec![("123".to_string(), Radix::Dec, Some("u32".to_string()), Some(123))]
+        );
+        assert_eq!(
+            ints("let a = 0x_FFu8;\n"),
+            vec![("FF".to_string(), Radix::Hex, Some("u8".to_string()), Some(255))]
+        );
+        assert_eq!(ints("let a = 0o777;\n"), vec![("777".to_string(), Radix::Oct, None, Some(511))]);
+        assert_eq!(
+            ints("let a = 0b1010i64;\n"),
+            vec![("1010".to_string(), Radix::Bin, Some("i64".to_string()), Some(10))]
+        );
+        assert_eq!(ints("let a = 1_000_000;\n")[0].3, Some(1_000_000));
+        assert_eq!(ints("let a = 12usize;\n")[0].2.as_deref(), Some("usize"));
+        assert_eq!(ints("let a = 13isize;\n")[0].2.as_deref(), Some("isize"));
+        assert_eq!(ints("let a = 18446744073709551615u64;\n")[0].3, Some(u64::MAX as u128));
+        assert_eq!(clean("0x_FFu8 == 0xFFu8\n").toks.len(), 4);
+    }
+
+    #[test]
+    fn range_errors_are_left_to_sema() {
+        // 300u8 / 129i8 are SUFFIXED range errors (E-0043); a value above u128 clears `value`
+        // (E-0042) — the lexer must not decide either.
+        let lx = clean("let a = 300u8; let b = 129i8; let c = -128i8;\n");
+        assert!(lx.diagnostics_emitted == 0);
+        let got = ints("let c = 340282366920938463463374607431768211456;\n");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].3, None, "overflowing u128 must leave value: None for sema");
+        lacks("let a = 300u8;\n", "E-0042");
+        lacks("let a = 300u8;\n", "E-0043");
+        lacks("let a = 123;\n", "E-0008");
+    }
+
+    #[test]
+    fn float_forms() {
+        assert_eq!(
+            floats("let a = 3.14f64;\n"),
+            vec![("3.14".to_string(), None, Some("f64".to_string()))]
+        );
+        assert_eq!(
+            floats("let a = 1.0e-5f32;\n"),
+            vec![("1.0".to_string(), Some("-5".to_string()), Some("f32".to_string()))]
+        );
+        assert_eq!(
+            floats("let a = 1.5e-3f32;\n"),
+            vec![("1.5".to_string(), Some("-3".to_string()), Some("f32".to_string()))]
+        );
+        assert_eq!(floats("let a = 1e5;\n"), vec![("1".to_string(), Some("5".to_string()), None)]);
+        assert_eq!(floats("let a = 1.5e+3;\n")[0].1.as_deref(), Some("+3"));
+        assert_eq!(floats("let a = 1_0.2_5e1_0;\n")[0].0, "10.25");
+    }
+
+    #[test]
+    fn dot_disambiguation() {
+        // `x.0` is a tuple field access (§3.11); `1.0` is always one float.
+        assert_eq!(
+            kinds("x.0;\n"),
+            vec![id("x"), pu(Punct::Dot), Kind::Lit(Lit::Int(IntLit {
+                digits: "0".to_string(),
+                radix: Radix::Dec,
+                suffix: None,
+                value: Some(0),
+            })), pu(Punct::Semi)]
+        );
+        assert_eq!(kinds("1.0;\n")[0], Kind::Lit(Lit::Float(FloatLit {
+            mantissa: "1.0".to_string(),
+            exp: None,
+            suffix: None,
+        })));
+        assert_eq!(kinds("x.0.abs();\n")[3], pu(Punct::Dot));
+        // `1..2` and `1..=2` are ranges, never broken floats.
+        assert_eq!(kinds("a = 1..2;\n")[3], pu(Punct::DotDot));
+        assert_eq!(kinds("a = 1..=2;\n")[3], pu(Punct::DotDotEq));
+        assert_eq!(kinds("1.5..2.5\n")[1], pu(Punct::DotDot));
+        // a method call on an integer literal keeps the dot as a punct
+        assert_eq!(kinds("1.min(2)\n")[1], pu(Punct::Dot));
+        lacks("let a = 1.min(2);\n", "E-0044");
+    }
+
+    #[test]
+    fn underscore_rules() {
+        has("let a = 1__000;\n", "E-0040");
+        has("let a = 1000_;\n", "E-0040");
+        has("let a = 0x_FF_;\n", "E-0040");
+        has("let a = 1._5;\n", "E-0041");
+        has("let a = 1_e5;\n", "E-0041");
+        has("let a = 1.5e_3;\n", "E-0041");
+        lacks("let a = 1_000;\n", "E-0040");
+        lacks("let a = 0x_FF_FF;\n", "E-0040");
+        // `_123` is an identifier, so a decimal literal can never start with `_`
+        assert_eq!(kinds("let a = _123;\n")[3], id("_123"));
+        assert_eq!(codes("let a = 1_e5;\n").iter().filter(|c| *c == "E-0041").count(), 1);
+    }
+
+    #[test]
+    fn trailing_dot_float_is_e0044() {
+        has("let a = 1.;\n", "E-0044");
+        has("let a = 1.\n", "E-0044");
+        lacks("let a = 1.0;\n", "E-0044");
+    }
+
+    #[test]
+    fn float_overflow_to_infinity_is_e0045() {
+        has("let a = 1.0e999f32;\n", "E-0045");
+        has("let a = 1e400;\n", "E-0045");
+        has("let a = 1e39f32;\n", "E-0045");
+        lacks("let a = 1e38f32;\n", "E-0045");
+        lacks("let a = 1e308;\n", "E-0045");
+        lacks("let a = 1e-400;\n", "E-0045");
+    }
+
+    #[test]
+    fn literal_longest_match_and_adjacent_ident() {
+        // `0b1010i64` must not lose its suffix; `123abc` is a literal plus an identifier.
+        let ks = kinds("0b1010i64 123abc\n");
+        assert!(matches!(ks[0], Kind::Lit(Lit::Int(_))));
+        assert_eq!(ks[2], id("abc"));
+        assert_eq!(ints("123abc\n")[0].0, "123");
+        assert_eq!(ints("123abc\n")[0].2, None);
+    }
+
+    // -- §2.9 strings, byte strings, chars, cords ----------------------------------------------
+
+    #[test]
+    fn closed_escape_table_resolves() {
+        let v = strs("let s = \"\\n\\r\\t\\0\\\\\\\"\\'\\e\\a\\b\\f\\v\";\n");
+        assert_eq!(v[0], "\n\r\t\0\\\"\'\u{1b}\u{7}\u{8}\u{c}\u{b}");
+        assert_eq!(strs("let s = \"\\u{1F600}\";\n")[0], "\u{1F600}");
+        assert_eq!(strs("let s = \"a\\u{41}b\";\n")[0], "aAb");
+    }
+
+    #[test]
+    fn unknown_escape_is_e0046() {
+        has("let s = \"a\\qb\";\n", "E-0046");
+        has("let s = \"\\u\";\n", "E-0046");
+        has("let s = \"\\u7F62\";\n", "E-0046");
+        has("let s = \"\\x4\";\n", "E-0046");
+        has("let c = '\\u{110000}';\n", "E-0046");
+        has("let c = '\\uD800';\n", "E-0046");
+        lacks("let s = \"\\n\";\n", "E-0046");
+        // a `\` before a newline is not in the closed table either (§2.9): E-0046
+        has("let s = \"abc\\\n", "E-0046");
+    }
+
+    #[test]
+    fn byte_escape_forbidden_in_str_lit() {
+        has("let s = \"\\x41\";\n", "E-0047");
+        has("let s = \"\\x{0041}\";\n", "E-0047");
+        // allowed in char_lit and b".."
+        assert_eq!(clean("let c = '\\x41';\n").toks[3].kind, Kind::Lit(Lit::Char('A')));
+        // ... but a byte escape may only encode one byte
+        has("let c = '\\x{1F600}';\n", "E-0046");
+        let lx = clean("let b = b\"A\\x41B\";\n");
+        assert_eq!(lx.toks[3].kind, Kind::Lit(Lit::ByteStr(vec![b'A', b'A', b'B'])));
+    }
+
+    #[test]
+    fn unterminated_string_and_bare_newline_are_e0009() {
+        has("let s = \"abc;\n", "E-0009");
+        has("let s = \"a\nb\";\n", "E-0009");
+        lacks("let s = \"ab\";\n", "E-0009");
+        lacks("let s = \"a\\\"b\";\n", "E-0009");
+    }
+
+    #[test]
+    fn raw_strings_count_delimiters() {
+        assert_eq!(strs("let s = r\"C:\\Users\\me\";\n")[0], "C:\\Users\\me");
+        // `r#".."#` needs a `"##` to close, so a single `#` stays inside the body
+        assert_eq!(strs("let s = r##\"a\"#b\"##;\n")[0], "a\"#b");
+        assert_eq!(strs("let s = r#\"a\"#;\n")[0], "a");
+        has("let s = r#\"abc;\n", "E-0010");
+        has("let s = r\"abc;\n", "E-0010");
+        lacks("let s = r\"abc\";\n", "E-0010");
+    }
+
+    #[test]
+    fn multiline_raw_dedents_at_lex_time() {
+        let v = strs("let s = r\"\n    line1\n    line2\n\";\n");
+        assert_eq!(v[0], "line1\nline2\n");
+        // a single-line raw string is untouched
+        assert_eq!(strs("let s = r\" keep  spaces \";\n")[0], " keep  spaces ");
+        // the common prefix is the maximum one
+        assert_eq!(strs("let s = r\"\n\t\ta\n\t\t\tb\n\";\n")[0], "a\n\tb\n");
+        // blank lines do not lower the common prefix
+        assert_eq!(strs("let s = r\"\n    a\n\n    b\n\";\n")[0], "a\n\nb\n");
+    }
+
+    #[test]
+    fn mixed_indent_in_raw_prefix_is_e0048() {
+        has("let s = r\"\n \ta\n \tb\n\";\n", "E-0048");
+        lacks("let s = r\"\n\t\ta\n\t\tb\n\";\n", "E-0048");
+        lacks("let s = r\"\n    a\n        b\n\";\n", "E-0048");
+    }
+
+    #[test]
+    fn byte_strings_are_ascii_only() {
+        assert_eq!(
+            clean("let b = b\"plain\";\n").toks[3].kind,
+            Kind::Lit(Lit::ByteStr(b"plain".to_vec()))
+        );
+        has("let b = b\"汉\";\n", "E-0047");
+        has("let b = b\"\\u{4E00}\";\n", "E-0047");
+        has("let b = b\"abc;\n", "E-0009");
+    }
+
+    #[test]
+    fn char_lit_is_exactly_one_code_point() {
+        assert_eq!(clean("let c = 'a';\n").toks[3].kind, Kind::Lit(Lit::Char('a')));
+        assert_eq!(clean("let c = '汉';\n").toks[3].kind, Kind::Lit(Lit::Char('汉')));
+        assert_eq!(clean("let c = '\\n';\n").toks[3].kind, Kind::Lit(Lit::Char('\n')));
+        assert_eq!(
+            clean("let c = '\\u{1F600}';\n").toks[3].kind,
+            Kind::Lit(Lit::Char('\u{1F600}'))
+        );
+        assert_eq!(clean("let c = '+';\n").toks[3].kind, Kind::Lit(Lit::Char('+')));
+        assert_eq!(clean("let c = '\\'';\n").toks[3].kind, Kind::Lit(Lit::Char('\'')));
+        has("let c = 'e\u{301}';\n", "E-0049");
+        has("let c = 'ab';\n", "E-0049");
+        has("let c = '';\n", "E-0049");
+    }
+
+    #[test]
+    fn cord_lit_normalises_at_lex_time() {
+        let lx = clean("let c = c\"café\";\n");
+        assert!(matches!(&lx.toks[3].kind, Kind::Lit(Lit::Cord(s)) if s == "café"));
+        let lx2 = clean("let c = c\"ＰＹ\";\n");
+        assert!(matches!(&lx2.toks[3].kind, Kind::Lit(Lit::Cord(s)) if s == "PY"));
+        has("let c = c\"abc;\n", "E-0009");
+    }
+
+    #[test]
+    fn adjacent_literals_stay_separate_tokens() {
+        // §3.11: `"a" "b"` is folded by the parser, so the lexer must emit both.
+        let ks = kinds("let s = \"a\" \"b\";\n");
+        assert_eq!(
+            ks[3..5],
+            [Kind::Lit(Lit::Str("a".to_string())), Kind::Lit(Lit::Str("b".to_string()))]
+        );
+        assert!(is_concatenatable_lit(&clean("let s = \"a\";\n").toks[3]));
+        assert!(!is_concatenatable_lit(&clean("let s = b\"a\";\n").toks[3]));
+    }
+
+    #[test]
+    fn no_interpolation_in_strings() {
+        // §2.9: `"${x}"` is not a thing; `{}`/`#` inside a literal are plain characters.
+        let lx = clean("let s = \"fetch #{} ${x}\";\n");
+        assert!(matches!(&lx.toks[3].kind, Kind::Lit(Lit::Str(v)) if v == "fetch #{} ${x}"));
+    }
+
+    // -- §2.7 operators ------------------------------------------------------------------------
+
+    #[test]
+    fn operator_table_longest_first() {
+        let table: &[(&str, Punct)] = &[
+            (".", Punct::Dot), ("..", Punct::DotDot), ("..=", Punct::DotDotEq),
+            (",", Punct::Comma), (";", Punct::Semi), (":", Punct::Colon),
+            ("::", Punct::ColonColon), ("(", Punct::LParen), (")", Punct::RParen),
+            ("[", Punct::LBracket), ("]", Punct::RBracket), ("{", Punct::LBrace),
+            ("}", Punct::RBrace), ("!", Punct::Bang), ("=", Punct::Eq),
+            ("=>", Punct::FatArrow), ("->", Punct::Arrow), ("?", Punct::Question),
+            ("&", Punct::Amp), ("&&", Punct::AmpAmp), ("|", Punct::Pipe),
+            ("||", Punct::PipePipe), ("^", Punct::Hat), ("*", Punct::Star),
+            ("%", Punct::Percent), ("+", Punct::Plus), ("-", Punct::Minus),
+            ("<", Punct::Lt), ("<<=", Punct::ShlEq), ("<<", Punct::Shl),
+            ("<=", Punct::LtEq), (">", Punct::Gt), (">>=", Punct::ShrEq),
+            (">>", Punct::Shr), (">=", Punct::GtEq), ("==", Punct::EqEq),
+            ("!=", Punct::BangEq), ("+=", Punct::PlusEq), ("-=", Punct::MinusEq),
+            ("*=", Punct::StarEq), ("/", Punct::Slash), ("/=", Punct::SlashEq),
+            ("%=", Punct::PercentEq), ("&=", Punct::AmpEq), ("^=", Punct::HatEq),
+            ("|=", Punct::PipeEq), ("~", Punct::Tilde), ("#", Punct::Hash),
+            ("@", Punct::At), ("$", Punct::Dollar),
+        ];
+        for (text, p) in table {
+            let ks = kinds(&format!(" {text} \n"));
+            assert_eq!(ks, vec![pu(*p)], "`{text}` must lex as exactly one {p:?}");
+        }
+    }
+
+    #[test]
+    fn precedence_spine_lexes_greedily() {
+        let ks = kinds("a <<= b >>= c .. d ..= e && f || g & h | i ^ j\n");
+        assert_eq!(
+            ks,
+            vec![
+                id("a"), pu(Punct::ShlEq), id("b"), pu(Punct::ShrEq), id("c"),
+                pu(Punct::DotDot), id("d"), pu(Punct::DotDotEq), id("e"),
+                pu(Punct::AmpAmp), id("f"), pu(Punct::PipePipe), id("g"),
+                pu(Punct::Amp), id("h"), pu(Punct::Pipe), id("i"), pu(Punct::Hat), id("j"),
+            ]
+        );
+    }
+
+    // -- §2.11 / §3.1 attribute openers, `@` prefixes, embed blocks -----------------------------
+
+    #[test]
+    fn attribute_openers_are_single_tokens() {
+        assert_eq!(kinds("#[derive(Clone)]\n")[0], Kind::AttrOpen { inner: false });
+        assert_eq!(kinds("#![entry_chain = \"P\"]\n")[0], Kind::AttrOpen { inner: true });
+        // a lone `#` stays a punct
+        assert_eq!(kinds("# x\n"), vec![pu(Punct::Hash), id("x")]);
+    }
+
+    #[test]
+    fn embed_prefixes_are_keyword_like_tokens() {
+        for lang in embed_lang_names() {
+            let src = format!("@{lang}(a = 1) {{ x }}\n");
+            let ks = kinds(&src);
+            assert_eq!(ks[0], Kind::EmbedLang(lang.to_string()), "@{lang}");
+            assert!(matches!(ks[1], Kind::EmbedArgs(_)));
+            assert!(matches!(ks[2], Kind::EmbedBody(_)));
+        }
+        assert_eq!(clean("@py(a = 1) {{}}\n").toks[0].text, "@py");
+        // bare `@` (no adjacent name) stays punct: §3.12 sub-pattern binding
+        let ks = kinds("case x @ _ => 1\n");
+        assert_eq!(ks[2], pu(Punct::At));
+        lacks("case x @ _ => 1\n", "E-0702");
+        // `@ py` with a space is not an embed prefix either
+        assert_eq!(kinds("@ py {{}}\n")[0], pu(Punct::At));
+    }
+
+    #[test]
+    fn unknown_embed_prefix_is_e0702() {
+        has("@forth(a = 1) {{ x }}\n", "E-0702");
+        has("@java {{ x }}\n", "E-0702");
+        // §3.12's sub-pattern binding `x @ y` must never be accused: the `@` follows a value.
+        lacks("case x @ y => 1\n", "E-0702");
+        assert_eq!(kinds("case x @ y => 1\n")[2], pu(Punct::At));
+    }
+
+    #[test]
+    fn embed_block_is_lexically_opaque() {
+        // §2.11: no escape, comment or string interpretation inside the body — only `{`/`}`.
+        let src = "@py(a = 1) {\n    s = \"{ } in a string\"\n    t = \"/* not a comment */\"\n    u = back\\\\slash\\n\n    if x { y }\n}\n";
+        let lx = clean(src);
+        assert!(lx.comments.is_empty(), "the body must not produce comments");
+        let body = match &lx.toks[2].kind {
+            Kind::EmbedBody(b) => b.clone(),
+            k => panic!("expected EmbedBody, got {k:?}"),
+        };
+        assert!(body.contains("\"{ } in a string\""), "{body}");
+        assert!(body.contains("/* not a comment */"));
+        assert!(body.contains("back\\\\slash"));
+        let args = match &lx.toks[1].kind {
+            Kind::EmbedArgs(a) => a.clone(),
+            k => panic!("expected EmbedArgs, got {k:?}"),
+        };
+        assert_eq!(args, "a = 1");
+        // tokens after the block keep flowing
+        assert_eq!(lx.toks[3].kind, Kind::Eof);
+    }
+
+    #[test]
+    fn embed_args_skip_parens_inside_strings() {
+        let lx = clean("@js(isolation = \"process)\", name = \"x\") { y }\n");
+        let args = match &lx.toks[1].kind {
+            Kind::EmbedArgs(a) => a.clone(),
+            k => panic!("{k:?}"),
+        };
+        assert_eq!(args, "isolation = \"process)\", name = \"x\"");
+        assert_eq!(lx.toks[2].kind, Kind::EmbedBody(" y ".to_string()));
+    }
+
+    #[test]
+    fn embed_body_without_open_brace_is_left_to_the_parser() {
+        // The parser owns "missing body" (§3.6/§9.7 report E-0053 there); the lexer stays silent so
+        // the source is not diagnosed twice.
+        let (lx, c) = lex("@py(a = 1) fn f() {}\n");
+        assert!(c.is_empty(), "{c:?}");
+        assert!(matches!(lx.toks[0].kind, Kind::EmbedLang(_)));
+        assert!(matches!(lx.toks[1].kind, Kind::EmbedArgs(_)));
+        assert!(matches!(lx.toks[2].kind, Kind::Keyword(Kw::Fn)));
+    }
+
+    #[test]
+    fn unclosed_embed_body_is_e0010() {
+        has("@py(a = 1) { if x { y\n", "E-0010");
+        has("@c { \n", "E-0010");
+        lacks("@c { if x { y } }\n", "E-0010");
+    }
+
+    #[test]
+    fn embed_block_after_another_token_still_lexes() {
+        let ks = kinds("let v = @lua(n = 2) { return n }\n");
+        assert_eq!(ks[3], Kind::EmbedLang("lua".to_string()));
+        assert!(matches!(ks[4], Kind::EmbedArgs(_)));
+        assert!(matches!(ks[5], Kind::EmbedBody(_)));
+    }
+
+    // -- §3.9 / §6.2 token trees ---------------------------------------------------------------
+
+    #[test]
+    fn token_trees_group_all_three_delimiters() {
+        let ks = toks("a (b [c] {d}) e\n");
+        let (ts, n) = build_token_tree(&ks);
+        assert_eq!(n, ks.len());
+        assert_eq!(ts.len(), 3);
+        assert!(matches!(&ts[0], Tree::Leaf(t) if t.is_ident("a")));
+        let group = match &ts[1] {
+            Tree::Group(Delim::Paren, kids, _) => kids,
+            other => panic!("expected a paren group, got {other:?}"),
+        };
+        assert_eq!(group.len(), 3, "the paren group holds b, [c] and {{d}}");
+        assert!(matches!(&group[0], Tree::Leaf(t) if t.is_ident("b")));
+        assert!(matches!(&group[1], Tree::Group(Delim::Bracket, inner, _) if inner.len() == 1));
+        assert!(matches!(&group[2], Tree::Group(Delim::Brace, inner, _) if inner.len() == 1));
+        assert!(matches!(&ts[2], Tree::Leaf(t) if t.is_ident("e")));
+        // flatten materialises the delimiters again (§6.8 byte-stable reprinting)
+        let flat = ts[1].leaves();
+        assert_eq!(flat.len(), 9);
+        assert!(flat[0].is_p(Punct::LParen) && flat[8].is_p(Punct::RParen));
+    }
+
+    #[test]
+    fn token_trees_stop_at_an_unmatched_closer() {
+        let ks = toks("a (b) ) c\n");
+        let (ts, n) = build_token_tree(&ks);
+        assert_eq!(n, 4, "must consume up to but not including the stray closer");
+        assert_eq!(ts.len(), 2);
+        assert!(matches!(&ts[1], Tree::Group(Delim::Paren, _, _)));
+    }
+
+    #[test]
+    fn token_trees_stop_at_a_mismatched_closer() {
+        let ks = toks("(a]\n");
+        let (ts, n) = build_token_tree(&ks);
+        assert_eq!(n, 2, "the `]` does not close the `(`, so it is not consumed");
+        assert_eq!(ts.len(), 1);
+        assert!(ts.iter().all(|t| matches!(t, Tree::Leaf(_))));
+    }
+
+    #[test]
+    fn token_trees_never_panic_on_malformed_input() {
+        for src in [")", ")))((( ", "[(]", "{[)", "(]", "[)", "(", "{", "}"] {
+            let ks = toks(src);
+            let (_ts, _n) = build_token_tree(&ks);
+        }
+        let (_ts, _n) = build_token_tree(&[]);
+        // an unterminated group splices its children up rather than losing tokens
+        let (ts, n) = build_token_tree(&toks("a (b c\n"));
+        assert_eq!(n, 4);
+        assert_eq!(ts.len(), 3);
+    }
+
+    #[test]
+    fn token_tree_spans_merge_the_delimiters() {
+        let ks = toks("(a)\n");
+        let (ts, _) = build_token_tree(&ks);
+        match &ts[0] {
+            Tree::Group(Delim::Paren, _, s) => {
+                assert_eq!(s.start, 0);
+                assert_eq!(s.end, 3);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // -- stream shape / recovery ---------------------------------------------------------------
+
+    #[test]
+    fn stream_always_ends_with_eof_and_recovers_after_errors() {
+        let lx = lex("fn f( { }\n").0;
+        assert!(lx.toks.last().map(|t| t.is_eof()).unwrap_or(false));
+        assert!(lx.toks.len() > 4, "error recovery must keep lexing: {} toks", lx.toks.len());
+        assert_eq!(lx.diagnostics_emitted, lex("fn f( { }\n").1.len());
+    }
+
+    #[test]
+    fn spans_and_text_reproduce_the_source() {
+        let text = "let x = 123u32;\n";
+        let (lx, _c) = lex(text);
+        for t in &lx.toks {
+            let lo = t.span.start as usize;
+            let hi = (t.span.end as usize).min(text.len());
+            assert_eq!(&text[lo..hi], t.text, "{:?}", t.kind);
+        }
+        assert_eq!(lx.toks[3].text, "123u32");
+        assert_eq!(lx.toks[3].span.start, 8);
+        assert_eq!(lx.toks[3].span.end, 14);
+    }
+
+    #[test]
+    fn pathological_input_terminates_and_is_capped() {
+        // 200 unterminated strings: the per-code cap must bound the diagnostic count.
+        let src = "\"abc\n".repeat(200);
+        let (_lx, c) = lex_raw(&src);
+        assert!(
+            c.iter().filter(|x| x.as_str() == "E-0009").count() <= MAX_PER_CODE,
+            "cap breached: {}",
+            c.iter().filter(|x| x.as_str() == "E-0009").count()
+        );
+        assert!(_lx.diagnostics_emitted <= MAX_TOTAL);
+        assert!(_lx.toks.last().map(|t| t.is_eof()).unwrap_or(false));
+    }
+
+    // -- §14 tour: every snippet must lex with zero diagnostics ---------------------------------
+
+    const TOUR_14_2: &str = r##"
+#![infy_version = "2.0"]
+
+package build
+
+import "github.com/acme/ci/core/test/report" as report;
+import "std/fs" as fs;
+import "std/fmt" as fmt;
+
+#[derive(Debug, Clone, Copy)]
+pub enum Phase { Fetch, Compile, Link, Publish }
+
+#[derive(Debug)]
+pub struct Job {
+    pub id: u32,
+    pub phase: Phase,
+    pub src: String,
+    pub out: Option<Box<Artifact>>,        // 无 null；未产出即 None
+}
+
+#[derive(Debug)]
+pub struct Fail { pub job: u32, pub why: FailWhy }
+
+pub trait Run {
+    fn run(&mut self) -> Result<u32, Fail>;
+    fn name(&self) -> &str;
+}
+
+impl Run for Job {
+    fn run(&mut self) -> Result<u32, Fail> {
+        let bytes = self.pull()?;                     // §4.11：From<Fail> for Fail 已具备
+        self.phase = Phase.Compile;
+        let n = self.compile(&bytes)?;                 // &bytes 借用止于本语句
+        Ok(n)
+    }
+    fn name(&self) -> &str { "build" }
+}
+
+fn pull_from(j: &mut Job) -> Result<Vec<u8>, Fail> {
+    let p = j.out.as_mut().ok_or(Fail { job: j.id, why: FailWhy::Missing })?;
+    // infy-safety: 无 unsafe；此处仅借用 p 的一个字段，作用域内有效
+    Ok(p.slab.take(&mut j.src))                       // 显式移动，之后 j.src 失效
+}
+
+fn describe(j: &Job) -> String {
+    match (j.phase) {                                  // §3.12：臂以逗号分隔
+        Phase::Fetch   => fmt!("fetch #{}", j.id),
+        Phase::Compile => fmt!("compile #{}", j.id),
+        Phase::Link | Phase::Publish => fmt!("late #{}", j.id),  // 或模式，绑定集相同
+    }
+}
+"##;
+
+    const TOUR_14_2_NEG: &str = r##"
+fn bad(j: Job) -> String {
+    let a = describe(&j);
+    let b = describe(&j);
+    drop(j);
+    describe(&j)                                       // E-1001：使用已移出的绑定
+}
+fn bad2(x: u32, y: f64) -> u32 { x + y }               // E-0111：隐式浮点/整数互转
+fn bad3(v: Vec<u8>) -> &u8 { &v[0] }                   // E-1004：返回局部引用
+}
+"##;
+
+    const TOUR_14_3: &str = r##"
+#![entry_chain = "Pipeline"]
+
+package runner
+
+import "github.com/acme/ci/core/build" as build;
+import "std/chain" as chain;
+import "std/sync" as sync;
+
+chain Pipeline {
+    label begin:
+    spawn_jobs();                                       // 节点 0（宿主语句）
+    harvest();                                          // 节点 1
+    report::emit();                                      // 节点 2
+
+    gate();                                              // 节点 3
+    {                                                    // §8.1：连携块挂在宿主语句之后
+        if (build::all_green()) { goto("done"); }        // 普通语句，编译期解析锚点
+        goto(+1);
+    }
+    retry_once();                                        // 节点 4
+    { goto("begin"); }                                   // 节点 5 的连携
+    label done:
+    finalize();                                          // 节点 6
+}
+
+fn gate() -> Result<(), build::Fail> {
+    let _g = chain::lock("runner:exclusive");            // Guard drop 即释放
+    Ok(())
+}
+"##;
+
+    const TOUR_14_4: &str = r##"
+#[link(name = "decoder", static = true, flags = ["-O2"], toolchain = "cc")]
+extern "C" {
+    #[borrows('static)]
+    fn dec_open(path: *const u8, len: u64, err: *mut i32) -> *mut DecHandle;
+    fn dec_read(h: &mut DecHandle, buf: &mut [u8]) -> usize;
+    fn dec_close(h: *mut DecHandle);
+}
+
+@c(name = "decoder") {
+    #include <stdint.h>
+    #include "infy_binding.h"          /* 编译器生成，§7.6.3 项 1 */
+    DecHandle* dec_open(const uint8_t* p, uint64_t n, int32_t* err) { /* … */ }
+    /* … */
+}
+
+fn open(path: &str) -> Result<Box<DecHandle>, build::Fail> {
+    let mut e: i32 = 0;
+    let raw = unsafe { dec_open(path.as_ptr(), path.len() as u64, &mut e) };
+    // infy-safety: dec_open 当且仅当返回非空时不写 err（见 decoder.c 头部约定）
+    if raw.is_null() { return Err(build::Fail { job: 0, why: build::FailWhy::Native(e) }); }
+    Ok(unsafe { Box::from_raw_safe(raw) })
+}
+"##;
+
+    const TOUR_14_5: &str = r##"
+fn normalize(batch: &[f32], scale: f32) -> Result<Vec<f32>, build::Fail> {
+    @py(timeout_ms = 5_000, batch = batch, scale = scale) {
+        # 构建期：本块写入 <build>/b_track/normalize.py
+        # 由清单声明的 CPython 3.13 compile() 产出 code object，再 lowering 为 IFBC
+        if scale == 0.0:
+            raise ZeroDivisionError("scale")
+        out = [ (x / scale) for x in batch ]
+        return out
+    }
+}
+"##;
+
+    const TOUR_14_6: &str = r##"
+fanout(n: u32) {
+    let i = 0;
+    while (i < n) {
+        start(chain = Worker);                 // 每调用创建一个新焦点（§8.5）
+        i += 1;
+    }
+    { resume; }
+}
+
+chain Worker {
+    claim();                                   // 内部用 std.chain.lock 争抢资源
+    build::run_one();
+    release();
+    { goto(+1); }                              // 无更多任务 → 焦点自然结束
+}
+"##;
+
+    const TOUR_14_7: &str = r##"
+package build_test
+
+import "github.com/acme/ci/core/build" as build;
+import "std/test" as test;
+
+#[test]
+fn describe_covers_all_phases() -> Result<(), test::Fail> {
+    let j = build::Job { id: 1, phase: build::Phase::Fetch, src: String::new(), out: None };
+    test::assert_eq(build::describe(&j), "fetch #1")?;
+    Ok(())
+}
+
+#[bench]
+fn bench_open(b: &mut test::Bench) {
+    for _ in b.iter() { let _h = build::open("x.bin"); }
+}
+"##;
+
+    #[test]
+    fn tour_snippets_lex_with_zero_errors() {
+        for (name, snippet) in [
+            ("14.2", TOUR_14_2),
+            ("14.2 counter-examples", TOUR_14_2_NEG),
+            ("14.3", TOUR_14_3),
+            ("14.4", TOUR_14_4),
+            ("14.5", TOUR_14_5),
+            ("14.6", TOUR_14_6),
+            ("14.7", TOUR_14_7),
+        ] {
+            let (_lx, c) = lex(snippet);
+            assert!(c.is_empty(), "{name} must lex clean, got {c:?}");
+        }
+    }
+
+    #[test]
+    fn tour_embed_blocks_are_captured_opaquely() {
+        let lx = clean(TOUR_14_4);
+        let langs: Vec<String> = lx
+            .toks
+            .iter()
+            .filter_map(|t| match &t.kind {
+                Kind::EmbedLang(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(langs, vec!["c".to_string()]);
+        let body = lx
+            .toks
+            .iter()
+            .find_map(|t| match &t.kind {
+                Kind::EmbedBody(b) => Some(b.clone()),
+                _ => None,
+            })
+            .expect("an embed body");
+        assert!(body.contains("#include <stdint.h>"), "{body}");
+        assert!(body.contains("\"infy_binding.h\""));
+        assert!(body.contains("/* … */"));
+        // the body's own balanced `{ … }` did not close the block early
+        assert!(body.contains("dec_open(const uint8_t*"));
+    }
+
+    #[test]
+    fn tour_py_embed_body_keeps_python_indentation_and_text() {
+        let lx = clean(TOUR_14_5);
+        let args = lx
+            .toks
+            .iter()
+            .find_map(|t| match &t.kind {
+                Kind::EmbedArgs(a) => Some(a.clone()),
+                _ => None,
+            })
+            .expect("embed args");
+        assert_eq!(args, "timeout_ms = 5_000, batch = batch, scale = scale");
+        let body = lx
+            .toks
+            .iter()
+            .find_map(|t| match &t.kind {
+                Kind::EmbedBody(b) => Some(b.clone()),
+                _ => None,
+            })
+            .expect("embed body");
+        assert!(body.contains("raise ZeroDivisionError(\"scale\")"));
+        assert!(body.contains("out = [ (x / scale) for x in batch ]"));
+    }
+
+    #[test]
+    fn tour_token_shapes() {
+        let ks = kinds(TOUR_14_2);
+        assert_eq!(ks[0], Kind::AttrOpen { inner: true });
+        // `#![infy_version = "2.0"]` is AttrOpen(inner) + the attribute's own token run
+        assert_eq!(ks[1], id("infy_version"));
+        assert_eq!(ks[2], pu(Punct::Eq));
+        assert!(matches!(ks[3], Kind::Lit(Lit::Str(ref s)) if s == "2.0"));
+        assert_eq!(ks[4], pu(Punct::RBracket));
+        let pkg = ks
+            .iter()
+            .position(|k| *k == kw(Kw::Package))
+            .expect("`package` keyword");
+        assert_eq!(ks[pkg + 1], id("build"));
+        // `fmt!(..)` is ident + bang + args, never a keyword
+        let bang_after_fmt = ks
+            .windows(2)
+            .any(|w| w[0] == id("fmt") && w[1] == pu(Punct::Bang));
+        assert!(bang_after_fmt, "`fmt!` must lex as Ident + Bang");
+        assert!(!ks.iter().any(|k| *k == kw(Kw::Fn) && false));
+        let lx = clean(TOUR_14_2);
+        assert_eq!(
+            lx.toks.iter().filter(|t| t.kind == Kind::AttrOpen { inner: false }).count(),
+            3
+        );
+    }
+
+    #[test]
+    fn tour_borrows_static_lifetime_and_attributes() {
+        let ks = kinds(TOUR_14_4);
+        let lt = ks.iter().find(|k| matches!(k, Kind::Lifetime(_))).expect("'static");
+        assert_eq!(*lt, Kind::Lifetime("static".to_string()));
+        assert!(ks.iter().any(|k| *k == kw(Kw::Unsafe)));
+        assert!(ks.iter().any(|k| *k == kw(Kw::Extern)));
+        assert!(ks.iter().any(|k| *k == kw(Kw::Borrows)));
+        assert!(ks.iter().any(|k| *k == id("usize")));
+    }
+
+    // -- API surface the parallel parser depends on --------------------------------------------
+
+    #[test]
+    fn lexed_public_fields_are_populated() {
+        let lx = clean("#!/usr/bin/env infy\n//infy:build a_track\nfn f() {}\n");
+        assert_eq!(lx.shebang.as_deref(), Some("#!/usr/bin/env infy"));
+        let (raw, line, span) = lx.build_constraint.clone().unwrap();
+        assert_eq!(raw, "a_track");
+        assert_eq!(line, 2);
+        assert_eq!(span.file, 0);
+        assert_eq!(lx.diagnostics_emitted, 0);
+    }
+
+    #[test]
+    fn missing_file_yields_empty_lexed_not_a_panic() {
+        let src = Sources::default();
+        let mut h = Handler::default();
+        let lx = lex_file(&src, 42, &mut h);
+        assert!(lx.toks.is_empty());
+        assert!(h.diags.is_empty());
+    }
 }
