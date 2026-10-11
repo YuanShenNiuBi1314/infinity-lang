@@ -97,7 +97,7 @@ pub fn xxhash64_with_seed(data: &[u8], seed: u64) -> u64 {
             .wrapping_mul(XXH64_P1)
     }
     fn merge(acc: u64, lane: u64) -> u64 {
-        (acc ^ round(0, lane)).wrapping_mul(XXH64_P1).wrapping_add(XXH64_P2)
+        (acc ^ round(0, lane)).wrapping_mul(XXH64_P1).wrapping_add(XXH64_P4)
     }
     let n = data.len();
     let mut h: u64;
@@ -127,9 +127,12 @@ pub fn xxhash64_with_seed(data: &[u8], seed: u64) -> u64 {
         h = seed.wrapping_add(XXH64_P5);
     }
     h = h.wrapping_add(n as u64);
+    // XXH64_finalize: last ≤31 bytes, 8-lanes via k1, then one 4-lane, then single bytes.
     while n - i >= 8 {
-        h = round(h, read64(data, i));
+        let k1 = round(0, read64(data, i));
         i += 8;
+        h ^= k1;
+        h = h.rotate_left(27).wrapping_mul(XXH64_P1).wrapping_add(XXH64_P4);
     }
     if n - i >= 4 {
         h ^= (read32(data, i) as u64).wrapping_mul(XXH64_P1);
@@ -137,8 +140,8 @@ pub fn xxhash64_with_seed(data: &[u8], seed: u64) -> u64 {
         i += 4;
     }
     while i < n {
-        h ^= data[i] as u64;
-        h = h.wrapping_mul(XXH64_P1);
+        h ^= (data[i] as u64).wrapping_mul(XXH64_P5);
+        h = h.rotate_left(11).wrapping_mul(XXH64_P1);
         i += 1;
     }
     h ^= h >> 33;
@@ -1782,6 +1785,7 @@ fn emit(handler: &mut Handler, span: Span, code: &str, title: &str) {
 pub fn validate_attrs(files: &BTreeMap<FileId, ParsedFile>, sources: &Sources, handler: &mut Handler) -> usize {
     let before = handler.diags.len();
     for (fid, pf) in files.iter() {
+        let fid: FileId = *fid;
         for a in &pf.file_attrs {
             check_attr(fid, a, Some("file"), sources, handler);
         }
@@ -2281,17 +2285,28 @@ mod tests {
 
     #[test]
     fn xxhash64_empty_is_the_reference_digest() {
-        assert_eq!(xxhash64(b""), 0xEF46_DB37_51D8_F9BC);
+        assert_eq!(xxhash64(b""), 0xEF46_DB37_51D8_E999);
     }
 
     #[test]
-    fn xxhash64_a_is_the_reference_digest() {
-        assert_eq!(xxhash64(b"a"), 0xD2D1_114D_0B96_F1A6);
+    fn xxhash64_single_byte_is_the_reference_digest() {
+        assert_eq!(xxhash64(b"a"), 0xD24E_C4F1_A98C_6E5B);
     }
 
     #[test]
     fn xxhash64_abc_is_the_reference_digest() {
         assert_eq!(xxhash64(b"abc"), 0x44BC_2CF5_AD77_0999);
+    }
+
+    #[test]
+    fn xxhash64_xxhash_word_is_the_reference_digest() {
+        // 6-byte input: exercises the 4-lane + single-byte tail path.
+        assert_eq!(xxhash64(b"xxhash"), 0x32DD_3895_2C4B_C720);
+    }
+
+    #[test]
+    fn xxhash64_hello_is_the_reference_digest() {
+        assert_eq!(xxhash64(b"hello"), 0x26C7_827D_889F_6DA3);
     }
 
     #[test]

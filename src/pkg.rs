@@ -407,7 +407,8 @@ fn collect_unknown_keys(v: &TomlValue, prefix: &str, out: &mut Vec<String>) {
     let Some(t) = v.as_table() else { return };
     for (k, val) in t {
         let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
-        let known = Manifest::KNOWN.iter().any(|p| *p == path || path.starts_with(&format!("{p}.")) || (matches!(k.as_str(), "path" | "version" | "infy" | "authors") && prefix == "module"))
+        let known = Manifest::KNOWN.iter().any(|p| *p == path || path.starts_with(&format!("{p}.")) || p.starts_with(&format!("{path}.")))
+            || (matches!(k.as_str(), "path" | "version" | "infy" | "authors") && prefix == "module")
             || (prefix == "profile" && matches!(k.as_str(), "overflow" | "diagnostic_level" | "opt_level" | "stack_bytes" | "focus_stack_bytes" | "focus_quota" | "iter_guard_steps" | "a_track" | "panic_radius" | "reproducible" | "fast_math" | "lto"))
             || (prefix == "net" && matches!(k.as_str(), "private" | "nosumdb" | "proxy" | "timeout_ms"))
             || (prefix.ends_with("[]") && matches!(k.as_str(), "name" | "path" | "edition" | "targets"))

@@ -351,6 +351,16 @@ impl<'a> P<'a> {
         }
         let mut args: Vec<AttrArg> = Vec::new();
         let mut positional: Vec<AttrValue> = Vec::new();
+        // §3.1 writes `attr = "[" attr_path ( "(" attr_args ")" )? "]"`, but §6.6, §1.2 and §14
+        // all use the paren-less `#![name = value]` form (`#![infy_version = "2.0"]`,
+        // `#![entry_chain = "Foo"]`). The two clauses are only jointly satisfiable if the
+        // single-assignment form is legal, so it is accepted here — see docs/spec-deviations.md.
+        if !self.at_p(Punct::LParen) && self.at_p(Punct::Eq) {
+            self.bump();
+            if let Some(v) = self.attr_value() {
+                positional.push(v);
+            }
+        }
         if self.eat_p(Punct::LParen) {
             loop {
                 if self.at_p(Punct::RParen) || self.at_end() {
@@ -1582,7 +1592,9 @@ impl<'a> P<'a> {
         match &self.peek().kind {
             Kind::Lit(_) | Kind::Lit(Lit::Int(_)) | Kind::Ident(_) | Kind::EmbedLang(_) | Kind::AttrOpen { .. } => true,
             Kind::Punct(p) => matches!(p, Punct::LParen | Punct::LBracket | Punct::LBrace | Punct::Amp | Punct::Star | Punct::Bang | Punct::Minus | Punct::Pipe | Punct::At),
-            Kind::Keyword(k) => matches!(k, Kw::If | Kw::Match | Kw::Move | Kw::Loop | Kw::Unsafe | Kw::True | Kw::False | Kw::Auto | Kw::SelfVal | Kw::SelfTy | Kw::Return | Kw::Break | Kw::Continue | Kw::For),
+            // §3.5 makes return/break/continue/for STATEMENTS, not expressions: they must go
+            // through stmt(), otherwise `return Err(..)` inside a block mis-parses.
+            Kind::Keyword(k) => matches!(k, Kw::If | Kw::Match | Kw::Move | Kw::Loop | Kw::Unsafe | Kw::True | Kw::False | Kw::Auto | Kw::SelfVal | Kw::SelfTy),
             _ => false,
         }
     }
@@ -1742,13 +1754,16 @@ impl<'a> P<'a> {
                     self.syntax_err(&tt, "语句");
                     return None;
                 }
-                // A linkage block may follow an expr_stmt (§3.5/§8.1)
+                // §3.5/§8.1: a linkage block attaches to the host expression statement — and in
+                // §14.3 it is written on the line *after* the host statement's `;`, so the `;` is
+                // consumed first and only then are the following `{ … }` groups collected.
+                let mut terminated = self.eat_p(Punct::Semi);
                 let mut linkage = Vec::new();
                 while self.at_p(Punct::LBrace) {
                     let b = self.linkage_block();
                     linkage.push(b);
+                    terminated = self.eat_p(Punct::Semi) || terminated;
                 }
-                let terminated = self.eat_p(Punct::Semi);
                 if !terminated && linkage.is_empty() && !matches!(e.kind, ExprKind::If { .. } | ExprKind::Match { .. } | ExprKind::Block(_) | ExprKind::Unsafe(_) | ExprKind::Closure { .. }) {
                     let tt = self.peek().clone();
                     self.err_at(&tt, "E-0053", "语句缺少终结符".to_string(), "此处需要 `;`", Some("§2.11 无自动分号插入".to_string()));
@@ -2555,9 +2570,11 @@ impl<'a> P<'a> {
                     segs.push(s);
                 }
                 let span = Span::new(self.file, start, self.prev_end());
-                if segs.len() == 1 {
+                if segs.len() == 1 && !self.looks_like_struct_lit() {
                     return Some(Expr::new(ExprKind::Ident(segs[0].clone()), span));
                 }
+                // §3.8: a single-segment name followed by `{ field: … }` is a struct literal,
+                // not an identifier followed by a block statement.
                 if self.looks_like_struct_lit() {
                     self.bump();
                     let mut fields = Vec::new();

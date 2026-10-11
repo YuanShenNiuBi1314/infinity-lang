@@ -1,0 +1,38 @@
+#![infy_version = "2.0"]
+
+package build
+
+// §4.1 · §14.2：枚举与结构体，字段可见性独立于类型（§5.5）
+pub enum Phase { Fetch, Compile, Link, Publish }
+
+pub enum FailWhy { Missing, Native(i32) }
+
+pub struct Fail { pub job: u32, pub why: FailWhy }
+
+pub struct Job { pub id: u32, pub phase: Phase, pub tries: u32 }
+
+// §3.12：match 必须穷尽；臂以逗号分隔
+pub fn describe(j: &Job) -> str {
+    match (j.phase) {
+        Phase::Fetch => "fetch",
+        Phase::Compile => "compile",
+        Phase::Link => "late",
+        Phase::Publish => "late",
+    }
+}
+
+// §4.11：`?` 的展开由返回类型唯一决定
+pub fn gate(n: u32) -> Result<u32, Fail> {
+    if (n == 0) { return Err(Fail { job: 0, why: FailWhy::Missing }); }
+    Ok(n)
+}
+
+pub fn twice(n: u32) -> Result<u32, Fail> {
+    let v = gate(n)?;
+    Ok(v + v)
+}
+
+// §4.4 / §4.13：无隐式数字转换，字面量按上下文取型
+pub fn bump(j: Job) -> Job {
+    Job { id: j.id, phase: Phase::Compile, tries: j.tries + 1 }
+}

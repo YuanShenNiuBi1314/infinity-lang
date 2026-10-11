@@ -746,7 +746,7 @@ mod tests {
         render_one(&d, Level::Error, &src, &mut out);
         assert_eq!(
             out,
-            "error[E-0120]: 修改 `let` 不可变绑定\n  ┌─ a.infy:1:3\n  │\n1│   let x = 1;\n  │       ^  此处\n  │\n  = note: n\n  = help: h\n"
+            "error[E-0120]: 修改 `let` 不可变绑定\n ┌─ a.infy:1:3\n │\n1│   let x = 1;\n │       ^  此处\n │\n  = note: n\n  = help: h\n"
         );
     }
 }

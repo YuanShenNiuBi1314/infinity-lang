@@ -660,11 +660,11 @@ static void test_truncation_sweep(void) {
     for (size_t k = 0; k <= img.n; k++) {
         InfyIfbcModule* mod = (InfyIfbcModule*)0xdead;
         int rc = infy_ifbc_load(img.b, k, &mod, 0, 0);
-        if (k == img.n) { if (!(rc == 0 && mod)) clean = 0; if (mod) infy_ifbc_module_free(mod); }
-        else { if (rc == 0 || mod != 0) clean = 0; }   /* a truncated image must reject and free */
-        if (mod) infy_ifbc_module_free(mod);
+        if (k == img.n) { if (!(rc == 0 && mod)) clean = 0; }        /* full image must load */
+        else { if (rc == 0 || mod != 0) clean = 0; }                 /* truncated image must reject + NULL handle */
+        if (mod) { infy_ifbc_module_free(mod); mod = 0; }            /* free exactly once */
         FILE* dev = mem_stream();
-        infy_ifbc_dump(img.b, k, dev);                 /* dump must not crash on any prefix */
+        infy_ifbc_dump(img.b, k, dev);                               /* dump must not crash on any prefix */
         fclose(dev);
     }
     bu_free(&img);
@@ -740,8 +740,8 @@ int main(void) {
     test_linemap_warning();
     test_exec_paths();
     test_object_model();
-
-
+    test_truncation_sweep();
+    test_byte_mutation_sweep();
     test_hostile();
 
     printf("IFBC harness: %d asserts, %d pass, %d FAIL\n", g_asserts, g_pass, g_fail);

@@ -47,8 +47,13 @@ pub enum Ty {
     Dyn(String),
     Adt(String),
     Generic(String),
-    /// `auto` in an argument position (§2.6) — resolves to the callee's default.
+    /// `auto` in an argument position (§2.6) — resolves to the callee default.
     Auto,
+    /// An unsuffixed integer literal whose type is still context-directed: §2.6 lets
+    /// it match the parameter or field type, and §4.13 rule 7 gives it the default `i32` when
+    /// nothing constrains it. It is deliberately not an `i64`, and it is not a licence for
+    /// implicit conversion — it only ever resolves to an integer type.
+    IntLit,
     Never,
     Invalid,
 }
@@ -76,12 +81,13 @@ impl Ty {
             Ty::Fn { params, ret } => format!("fn({}){}", params.iter().map(|t| t.text()).collect::<Vec<_>>().join(", "), ret.as_ref().map(|r| format!(" -> {}", r.text())).unwrap_or_default()),
             Ty::Closure(i) => format!("{{closure#{i}}}"),
             Ty::Auto => "auto".into(),
+            Ty::IntLit => "<int-literal>".into(),
             Ty::Never => "!".into(),
             Ty::Invalid => "<invalid>".into(),
         }
     }
     pub fn is_integer(&self) -> bool {
-        matches!(self, Ty::Prim(p) if p.is_integer())
+        matches!(self, Ty::Prim(p) if p.is_integer()) || matches!(self, Ty::IntLit)
     }
     pub fn is_float(&self) -> bool {
         matches!(self, Ty::Prim(p) if p.is_float())
@@ -92,7 +98,7 @@ impl Ty {
     /// §4.7.1: which types are implicitly `Copy`.
     pub fn is_copy(&self, prog: &Program) -> bool {
         match self {
-            Ty::Prim(_) | Ty::Bool | Ty::Unit | Ty::Str | Ty::Auto | Ty::Never => true,
+            Ty::Prim(_) | Ty::Bool | Ty::Unit | Ty::Str | Ty::Auto | Ty::Never | Ty::IntLit => true,
             Ty::Ref { .. } | Ty::Ptr { .. } | Ty::Fn { .. } => true,
             Ty::Adt(name) => prog.adt_is_copy(name),
             Ty::Array { inner, .. } => prog.copy_of(inner) && prog.copy_of(inner),
@@ -320,6 +326,10 @@ pub struct Checker<'a> {
     negated_child: Option<bool>,
     /// §8.4: nodes of the chain currently being checked.
     chain_nodes: Vec<NodeDesc>,
+    /// index of the node whose body is being checked (drives goto(+N) bounds, §8.2)
+    cur_node: i64,
+    /// the chain currently being checked (drives goto("anchor") lookup, §8.2)
+    cur_chain: Option<usize>,
     closure_counter: usize,
     /// Names declared `pub` per package for `internal`/visibility checks.
     pub manifest_module: String,
@@ -336,7 +346,7 @@ impl<'a> Checker<'a> {
         Checker {
             src, h, prog: Program::new(), package: String::new(), file: 0, self_ty: None,
             scopes: vec![Vec::new()], ret_ty: Ty::Unit, in_chain: false, in_defer: false,
-            chain_nodes: Vec::new(), closure_counter: 0, manifest_module: module.to_string(), in_unsafe: false, negated_child: None,
+            chain_nodes: Vec::new(), cur_node: 0, cur_chain: None, closure_counter: 0, manifest_module: module.to_string(), in_unsafe: false, negated_child: None,
             a_track_declared: false, b_track_versions: Vec::new(), link_unit_names: Vec::new(),
         }
     }
@@ -814,10 +824,8 @@ impl<'a> Checker<'a> {
         for (file, package, pf) in files {
             self.file = *file;
             self.package = package.clone();
-            for it in &pf.items {
-                self.check_item(it);
-            }
-            // §8.4 node table for every chain declared in this file
+            // §8.4: build every chain node table FIRST — the node count and the label set are what
+            // §8.2 resolves goto("anchor") / goto(+N) against at compile time (E-0301).
             for it in &pf.items {
                 if let ItemKind::Chain { name, stmts, .. } = &it.kind {
                     if let Some(idx) = self.prog.lookup_chain(name) {
@@ -826,6 +834,9 @@ impl<'a> Checker<'a> {
                         self.prog.chains[idx].labels = labels;
                     }
                 }
+            }
+            for it in &pf.items {
+                self.check_item(it);
             }
         }
         // `Copy` derive / implicit-copy legality (§4.7.1, §6.7)
@@ -883,14 +894,26 @@ impl<'a> Checker<'a> {
                 }
             }
             ItemKind::Chain { name, stmts, .. } => {
-                let saved = std::mem::take(&mut self.chain_nodes);
+                // §8.2: goto resolution needs this chain's node table and label set while its body
+                // is being checked, so install it before descending.
+                let saved = std::mem::replace(&mut self.chain_nodes, self.prog.lookup_chain(name).map(|i| self.prog.chains[i].nodes.clone()).unwrap_or_default());
+                let saved_chain = std::mem::replace(&mut self.cur_chain, self.prog.lookup_chain(name));
+                let saved_node = self.cur_node;
+                // §8.4: walk the top-level statements keeping the node cursor — a relative
+                // `goto(+N)` is bounded by the *current* node, not by the node count.
+                let mut next_node = 0i64;
                 self.in_chain = true;
                 for s in stmts {
+                    if matches!(&s.kind, StmtKind::Expr { .. }) {
+                        self.cur_node = next_node;
+                        next_node += 1;
+                    }
                     self.check_stmt(s);
                 }
                 self.in_chain = false;
+                self.cur_node = saved_node;
+                self.cur_chain = saved_chain;
                 self.chain_nodes = saved;
-                let _ = name;
             }
             _ => {}
         }
@@ -929,7 +952,10 @@ impl<'a> Checker<'a> {
         if let Body::Block(b) = body {
             match &b.tail {
                 Some(t) => {
-                    let ty = self.check_expr(t);
+                    // The tail was already checked inside the block's own scope (see check_block);
+                    // re-checking it here would evaluate it after that scope was popped and report a
+                    // false "undeclared identifier" for every binding the block introduced.
+                    let ty = self.prog.ty(t.span).cloned().unwrap_or(Ty::Invalid);
                     self.coerce_return(&ty, t.span, &sig.name);
                 }
                 None => {
@@ -963,6 +989,9 @@ impl<'a> Checker<'a> {
         for s in &b.stmts {
             self.check_stmt(s);
         }
+        // The tail expression is part of the same block, so it is evaluated BEFORE the scope is
+        // popped — otherwise bindings introduced by the block's statements (`let v = f()?;`) would
+        // not be visible in the block's own value expression.
         if let Some(t) = &b.tail {
             let _ = self.check_expr(t);
         }
@@ -988,10 +1017,11 @@ impl<'a> Checker<'a> {
                 if matches!(actual, Ty::Invalid) && init.is_none() {
                     self.emit("E-0131", s.span, "绑定类型无法确定", name, Some("既无类型标注也无初始化表达式（§4.1）".into()), None);
                 }
-                if *is_var {
-                    // `var` may not appear in parameter position; that is E-0022 and the parser
-                    // already routes parameters through Param{mutable}.
-                }
+                // §4.13 rule 7: an unconstrained integer literal defaults to `i32`.
+                let actual = match (&actual, &declared) {
+                    (Ty::IntLit, None) => Ty::Prim(Prim::I32),
+                    _ => actual,
+                };
                 self.declare(name, actual, *is_var);
                 let _ = name_span;
             }
@@ -1122,7 +1152,8 @@ impl<'a> Checker<'a> {
                         self.emit("N-0800", lb.span, "goto 使用绝对索引", "源码改动会移动节点（§8.4 第 6 条）", None, Some("改用命名锚点".into()));
                     }
                     GotoTarget::Rel(d) => {
-                        let cur = self.chain_nodes.len() as i128;
+                        // §8.2: `goto(+N)` / `goto(-N)` are relative to the CURRENT node index
+                        let cur = self.cur_node as i128;
                         let tgt = cur + d;
                         if tgt < 0 || tgt >= n_nodes {
                             self.emit("E-0301", lb.span, "goto 相对偏移越界", format!("目标 {tgt} 不在 [0, {n_nodes})"), Some("§8.2 编译期即可判定".into()), None);
@@ -1160,8 +1191,10 @@ impl<'a> Checker<'a> {
     }
 
     fn chain_nodes_labels(&self) -> Vec<String> {
-        // labels are collected during node-table construction
-        self.prog.chains.iter().find(|c| c.file == self.file).map(|c| c.labels.keys().cloned().collect()).unwrap_or_default()
+        // §8.2: anchors belong to the chain being checked; `cur_chain` is installed by the
+        // chain arm of check_item, so a second chain in the same file cannot borrow the first
+        // chains labels.
+        self.cur_chain.map(|i| self.prog.chains[i].labels.keys().cloned().collect()).unwrap_or_default()
     }
 
     fn check_place(&mut self, e: &Expr) -> Ty {
@@ -1369,6 +1402,13 @@ impl<'a> Checker<'a> {
                 if let Some(ei) = self.prog.enum_by_name(name) {
                     let _ = ei;
                     return Ty::Named(name.clone());
+                }
+                // §4.1: Some/None/Ok/Err are constructors of the built-in Option/Result. Treating
+                // them as ordinary identifiers would report a false E-0101 on every `Ok(v)`.
+                match name.as_str() {
+                    "Some" | "None" => return Ty::Option { inner: Box::new(Ty::Invalid) },
+                    "Ok" | "Err" => return Ty::Result { ok: Box::new(Ty::Invalid), err: Box::new(Ty::Invalid) },
+                    _ => {}
                 }
                 self.emit("E-0101", e.span, format!("未声明的标识符 `{name}`"), name, Some("§4.1 未初始化即读取 = E-0101；P5 禁止隐式声明".into()), None);
                 Ty::Invalid
@@ -1793,11 +1833,12 @@ impl<'a> Checker<'a> {
                         // decimal, no suffix, beyond i64 → E-0042 (§2.8)
                         self.emit("E-0042", span, format!("字面量超出可表示范围：{}", i.digits), "无后缀十进制整型上限为 i64", Some("§2.8".into()), Some("加后缀，如 12345678901234u64".into()));
                     }
-                    Ty::Prim(Prim::I64)
+                    Ty::IntLit
                 } else {
                     // non-decimal without suffix: i32, else u32, else E-0042 (§2.8)
                     if v <= i32::MAX as u128 {
-                        Ty::Prim(Prim::I32)
+                        // §2.8: non-decimal without a suffix defaults to i32
+                        Ty::IntLit
                     } else if v <= u32::MAX as u128 {
                         Ty::Prim(Prim::U32)
                     } else if v <= i64::MAX as u128 {
@@ -1853,6 +1894,21 @@ impl<'a> Checker<'a> {
         Ty::Invalid
     }
 
+    /// The type of a built-in constructor call, or None if `name` is not one.
+    fn ctor_ty(&mut self, name: &str, args: &[CallArg]) -> Option<Ty> {
+        let arg_ty = if args.is_empty() { Ty::Invalid } else { self.check_expr(&args[0].expr) };
+        for a in args.iter().skip(1) {
+            self.check_expr(&a.expr);
+        }
+        Some(match name {
+            "Ok" => Ty::Result { ok: Box::new(arg_ty), err: Box::new(Ty::Invalid) },
+            "Err" => Ty::Result { ok: Box::new(Ty::Invalid), err: Box::new(arg_ty) },
+            "Some" => Ty::Option { inner: Box::new(arg_ty) },
+            "None" => Ty::Option { inner: Box::new(Ty::Invalid) },
+            _ => return None,
+        })
+    }
+
     fn check_call(&mut self, call: &Expr, callee: &Expr, args: &[CallArg]) -> Ty {
         let name = match &callee.kind {
             ExprKind::Ident(n) => n.clone(),
@@ -1861,6 +1917,11 @@ impl<'a> Checker<'a> {
                 return self.check_expr(callee);
             }
         };
+        // §4.1: Some/None/Ok/Err are constructors of the built-in Option/Result, so they are
+        // resolved before the function table and typed from their argument.
+        if let Some(t) = self.ctor_ty(&name, args) {
+            return t;
+        }
         // §4.6: assigning to env is E-0140; calling it is simply unresolvable.
         let Some(fi) = self.prog.lookup_fn(&self.package, &name).or_else(|| self.prog.fns.iter().position(|f| f.name == name)) else {
             // builtin-ish names handled by std at codegen; unknown here is E-0101
@@ -1870,6 +1931,23 @@ impl<'a> Checker<'a> {
             }
             return Ty::Invalid;
         };
+        // §4.1 constructor calls: Ok(v) / Err(e) / Some(v) / None type themselves from the argument.
+        {
+            let arg_ty = if args.is_empty() { Ty::Invalid } else { self.check_expr(&args[0].expr) };
+            let ctor = match name.as_str() {
+                "Ok" => Some(Ty::Result { ok: Box::new(arg_ty.clone()), err: Box::new(Ty::Invalid) }),
+                "Err" => Some(Ty::Result { ok: Box::new(Ty::Invalid), err: Box::new(arg_ty.clone()) }),
+                "Some" => Some(Ty::Option { inner: Box::new(arg_ty.clone()) }),
+                "None" => Some(Ty::Option { inner: Box::new(Ty::Invalid) }),
+                _ => None,
+            };
+            if let Some(t) = ctor {
+                for a in args.iter().skip(1) {
+                    self.check_expr(&a.expr);
+                }
+                return t;
+            }
+        }
         let f = self.prog.fns[fi].clone();
         // §7.6.5 / §4.7.5: calling an A-track extern function requires unsafe.
         if f.is_foreign && !self.in_unsafe && self.link_names().iter().any(|_| true) {
@@ -2127,6 +2205,16 @@ pub fn type_compatible(want: &Ty, got: &Ty) -> bool {
     match (want, got) {
         (Ty::Invalid, _) | (_, Ty::Invalid) => true,
         (Ty::Auto, _) | (_, Ty::Auto) => true,
+        // §2.6/§4.13: `job: 0`, `f(retries: 3)`, `let n: u32 = 0`. The literal takes the
+        // context type. This is not an implicit conversion — the literal has no type of its own.
+        (Ty::IntLit, other) | (other, Ty::IntLit) => other.is_integer() || matches!(other, Ty::IntLit),
+        // §4.1: the built-in generic types are compatible parameter by parameter, and an
+        // unresolved parameter (a constructor whose other arm was not written) matches anything.
+        (Ty::Option { inner: a }, Ty::Option { inner: b }) => type_compatible(a, b) || matches!(**a, Ty::Invalid) || matches!(**b, Ty::Invalid),
+        (Ty::Result { ok: o1, err: e1 }, Ty::Result { ok: o2, err: e2 }) => (type_compatible(o1, o2) || matches!(**o1, Ty::Invalid) || matches!(**o2, Ty::Invalid)) && (type_compatible(e1, e2) || matches!(**e1, Ty::Invalid) || matches!(**e2, Ty::Invalid)),
+        (Ty::Vec { inner: a }, Ty::Vec { inner: b }) | (Ty::Boxed { inner: a }, Ty::Boxed { inner: b }) => type_compatible(a, b) || matches!(**a, Ty::Invalid) || matches!(**b, Ty::Invalid),
+        (Ty::Rc { inner: a, atomic: aa }, Ty::Rc { inner: b, atomic: bb }) => aa == bb && (type_compatible(a, b) || matches!(**a, Ty::Invalid) || matches!(**b, Ty::Invalid)),
+        (Ty::Tuple(x), Ty::Tuple(y)) => x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| type_compatible(p, q)),
         (Ty::Str, Ty::String) | (Ty::String, Ty::Str) => true,
         (Ty::Ref { inner: w, .. }, g) => type_compatible(w, g),
         (w, Ty::Ref { inner: g, .. }) => type_compatible(w, g),

@@ -1,0 +1,24 @@
+[module]
+path    = "github.com/acme/ci"
+version = "0.4.1"
+infy    = "2.0"
+authors = ["Acme CI <ci@acme.example>"]
+
+[dependencies]
+"std" = "1.0"
+
+[profile]
+overflow         = "panic"
+diagnostic_level = "strict"
+opt_level        = 2
+stack_bytes      = 8388608
+a_track          = "unsafe-trusted"
+reproducible     = true
+
+[[bin]]
+name = "runner"
+path = "cmd/runner"
+
+[[lib]]
+path    = "core/build"
+edition = ["source"]

@@ -535,6 +535,10 @@ pub enum Op {
     SeqConcat = 0x8F,
     RefInc = 0x90,
     RefDec = 0x91,
+    /// D.6 gap 0x92/0x93: tuple and set construction (`DEV-IFBC-7`), needed because §7.7.1 maps a
+    /// Python multi-return onto a tuple and `BUILD_TUPLE` is a plain Python instruction.
+    NewTuple = 0x92,
+    NewSet = 0x93,
     MoveOut = 0x94,
 
     // ---- D.7 dynamic values, 0xA0..0xBF (B-track only)
@@ -566,7 +570,7 @@ pub enum Op {
 /// Every appendix-D row that groups more than one mnemonic, with the byte assignment this
 /// implementation makes. Printed by `disassemble`'s legend and mirrored in
 /// `docs/internals/ifbc-encoding-rust.md` so the C side can cross-check one table.
-pub const GROUPING: [(&str, &str); 9] = [
+pub const GROUPING: [(&str, &str); 11] = [
     ("D.2 0x06", "dup / dup2 / swap -> 0x06 dup, 0x0A dup2, 0x0B swap"),
     ("D.2 0x0A..0x1F", "unassigned gap -> 0x0C ldg, 0x0D stg (global window)"),
     ("D.3 all rows", "type suffix = operand 0 (a type_table index), not a separate byte: DEV-IFBC-1"),
@@ -575,6 +579,8 @@ pub const GROUPING: [(&str, &str); 9] = [
     ("D.5 0x68, 0x69", "import, import.attr: DEV-IFBC-6"),
     ("D.6 0x84..0x87", "seq.push, seq.len, seq.next, seq.iter: DEV-IFBC-7"),
     ("D.6 0x8B..0x8F", "inst.get, inst.set, map.insert, str.concat, seq.concat: DEV-IFBC-7"),
+    ("D.6 0x92, 0x93", "new.tuple, new.set: DEV-IFBC-7"),
+    ("D.2 0x04", "push k takes a second operand = the constant's type index: DEV-IFBC-13"),
     ("D.7 0xA5, 0xA6", "dyn.truthy, dyn.identity: DEV-IFBC-7"),
 ];
 
@@ -680,6 +686,8 @@ impl Op {
             0x8F => Op::SeqConcat,
             0x90 => Op::RefInc,
             0x91 => Op::RefDec,
+            0x92 => Op::NewTuple,
+            0x93 => Op::NewSet,
             0x94 => Op::MoveOut,
             0xA0 => Op::TagGet,
             0xA1 => Op::CastDyn,
@@ -779,6 +787,8 @@ impl Op {
             Op::SeqConcat => "seq.concat",
             Op::RefInc => "ref.inc",
             Op::RefDec => "ref.dec",
+            Op::NewTuple => "new.tuple",
+            Op::NewSet => "new.set",
             Op::MoveOut => "move.out",
             Op::TagGet => "tag.get",
             Op::CastDyn => "cast.dyn",
@@ -832,7 +842,6 @@ impl Op {
             | Op::Ldw
             | Op::Ldg
             | Op::Stg
-            | Op::Push
             | Op::PushB
             | Op::Jmp
             | Op::Br
@@ -842,8 +851,6 @@ impl Op {
             | Op::CallStat
             | Op::CallVirt
             | Op::CallHost
-            | Op::CallEmbed
-            | Op::InvokeDynamic
             | Op::TailCallStat
             | Op::Import
             | Op::ImportAttr
@@ -864,6 +871,9 @@ impl Op {
             | Op::CastDyn
             | Op::IsDyn
             | Op::BoxDyn
+            | Op::CallVirt
+            | Op::CallEmbed
+            | Op::InvokeDynamic
             | Op::CoroResume
             | Op::CoroThrow
             | Op::SizeOf
@@ -894,8 +904,11 @@ impl Op {
             | Op::Cmp
             | Op::GuardNonzero
             | Op::GuardShift => 1,
-            // two operands
-            Op::NewList | Op::ClosureNew | Op::EnterTry | Op::Switch => 2,
+            // two operands — `push k` carries the constant's type as operand 1 (`DEV-IFBC-13`:
+            // IFBC has no implicit literal typing, so a pool constant must be tagged)
+            Op::NewList | Op::ClosureNew | Op::EnterTry | Op::Switch | Op::Push => 2,
+            // one operand (added by this implementation, see the D.6 gap note)
+            Op::NewTuple | Op::NewSet => 1,
             // three operands — D.6's `new.dict k_ty,v_ty` plus this implementation's element count
             Op::NewDict => 3,
         }
@@ -906,9 +919,8 @@ impl Op {
         use OperandKind::*;
         match self {
             Op::Ldl | Op::Stl | Op::Ldw | Op::Ldg | Op::Stg | Op::MoveOut => vec![Slot],
-            Op::Push | Op::ThrowInf | Op::NewStr | Op::ImportAttr | Op::InstGet | Op::InstSet => {
-                vec![Pool]
-            }
+            Op::ThrowInf | Op::NewStr | Op::ImportAttr | Op::InstGet | Op::InstSet => vec![Pool],
+            Op::Push => vec![Pool, Type],
             Op::PushB
             | Op::TickLoop
             | Op::SizeOf
@@ -936,6 +948,8 @@ impl Op {
             | Op::SeqConcat
             | Op::MapInsert => vec![Type],
             Op::NewList => vec![Type, Imm],
+            Op::NewTuple => vec![Imm],
+            Op::NewSet => vec![Type],
             Op::NewDict => vec![Type, Type, Imm],
             Op::EnterTry => vec![CodeOff, CodeOff],
             Op::Switch => vec![Imm, CodeOff],
@@ -987,7 +1001,7 @@ impl Op {
             | CoroResume | CoroThrow | RefDec | Import | RefInc => (0, 0),
             Ldl | Ldw | Push | PushB | LdNull | Ldg | SeqLen | NewStr | NewFrame | TypeOfIdx
             | SizeOf | AlignOf | FieldOff | DynTruthy => (0, 1),
-            Stl | Stg | Pop | MoveOut => (1, 0),
+            Stl | Stg | Pop | MoveOut | NewTuple | NewSet => (1, 0),
             Dup => (1, 2),
             Dup2 => (2, 4),
             Swap => (2, 2),
@@ -1002,7 +1016,8 @@ impl Op {
             Slice => (3, 1),
             SeqPush => (2, 1),
             MapInsert => (3, 1),
-            NewList | NewDict | ClosureNew | CallStat | CallHost | TailCallStat => (0, 0),
+            NewList | NewDict | NewTuple | NewSet | ClosureNew | CallStat | CallHost
+            | TailCallStat => (0, 0),
         }
     }
 }
@@ -1541,12 +1556,27 @@ pub struct HostSig {
     pub name: String,
     pub params: Vec<TyKind>,
     pub ret: TyKind,
+    /// Element kind when `ret` is a container (`std.iter.range -> list` of `Int`). This is a
+    /// *lowering hint*, not part of the signature digest: IFABI fixes the value representation, the
+    /// element kind is what lets `seq.next` produce a statically typed item (§7.7.2).
+    pub ret_elem: Option<TyKind>,
     pub ifabi: u16,
 }
 
 impl HostSig {
     pub fn new(name: &str, params: &[TyKind], ret: TyKind) -> HostSig {
-        HostSig { name: name.to_string(), params: params.to_vec(), ret, ifabi: IFABI_V2 }
+        HostSig {
+            name: name.to_string(),
+            params: params.to_vec(),
+            ret,
+            ret_elem: None,
+            ifabi: IFABI_V2,
+        }
+    }
+    /// Same, with the container element kind.
+    pub fn with_elem(mut self, elem: TyKind) -> HostSig {
+        self.ret_elem = Some(elem);
+        self
     }
 
     /// Canonical signature text `(i64, f64) -> dyn` — the byte form whose digest is compared
@@ -1631,7 +1661,7 @@ impl HostSigTable {
             ("std.io.log", vec![dyn_], Unit),
             ("std.io.warn", vec![dyn_], Unit),
             ("std.iter.len", vec![dyn_], Usize),
-            ("std.iter.range", vec![Usize], Instance),
+            ("std.iter.range", vec![Usize], List),
             ("std.iter.contains", vec![dyn_, dyn_], Bool),
             ("std.iter.collect", vec![dyn_], List),
             ("std.math.abs", vec![Int], Int),
@@ -1644,7 +1674,11 @@ impl HostSigTable {
             ("std.embed.to_str", vec![dyn_], Str),
             ("std.embed.to_list", vec![dyn_], List),
         ] {
-            t.register(HostSig::new(name, &params, ret));
+            let sig = match name {
+                "std.iter.range" => HostSig::new(name, &params, ret).with_elem(Int),
+                _ => HostSig::new(name, &params, ret),
+            };
+            t.register(sig);
         }
         t
     }
@@ -2539,6 +2573,84 @@ fn hex32(h: &[u8; 32]) -> String {
     s
 }
 
+// ------------------------------------------------------------------------ mnemonics
+
+/// Every opcode defined by appendix D, in byte order (the order the tables are walked, so
+/// `parse_mnemonic` is deterministic).
+pub fn all_ops() -> Vec<Op> {
+    (0u32..=255).filter_map(|b| Op::from_byte(b as u8)).collect()
+}
+
+impl TyKind {
+    /// Inverse of [`TyKind::suffix`]; accepts `dyn`/`object` as the B-track boxed value.
+    pub fn from_suffix(s: &str) -> Option<TyKind> {
+        let k = match s {
+            "unit" => TyKind::Unit,
+            "i64" | "int" => TyKind::Int,
+            "f64" | "float" => TyKind::Float,
+            "str" => TyKind::Str,
+            "bytes" => TyKind::Bytes,
+            "list" => TyKind::List,
+            "tuple" => TyKind::Tuple,
+            "dict" => TyKind::Dict,
+            "bool" => TyKind::Bool,
+            "func" => TyKind::Func,
+            "coro" => TyKind::Coro,
+            "object" | "dyn" | "instance" => TyKind::Instance,
+            "i8" => TyKind::I8,
+            "i16" => TyKind::I16,
+            "i32" => TyKind::I32,
+            "u8" => TyKind::U8,
+            "u16" => TyKind::U16,
+            "u32" => TyKind::U32,
+            "u64" => TyKind::U64,
+            "f32" => TyKind::F32,
+            "char" => TyKind::Char,
+            "usize" => TyKind::Usize,
+            "isize" => TyKind::Isize,
+            "never" => TyKind::Never,
+            _ => return None,
+        };
+        Some(k)
+    }
+}
+
+/// `add` + `Some(Int)` = `add.i64`; the form written into a capability table (appendix E.3).
+pub fn mnemonic(op: Op, ty: Option<TyKind>) -> String {
+    match ty {
+        Some(t) => format!("{}.{}", op.base(), t.suffix()),
+        None => op.base().to_string(),
+    }
+}
+
+/// Parse a capability-table mnemonic into (opcode, optional type suffix). Dotted names that are part
+/// of the base (`push.b`, `call.host`, `guard.nonzero`, …) are matched longest-first over
+/// [`all_ops`], so `push.b` is never mistaken for `push` with suffix `b`.
+pub fn parse_mnemonic(text: &str) -> Option<(Op, Option<TyKind>)> {
+    let text = text.trim();
+    let mut best: Option<Op> = None;
+    for op in all_ops() {
+        let b = op.base();
+        if text == b {
+            return Some((op, None));
+        }
+        if let Some(rest) = text.strip_prefix(b) {
+            if rest.starts_with('.') {
+                let cur_len = best.map(|o| o.base().len()).unwrap_or(0);
+                if b.len() > cur_len {
+                    best = Some(op);
+                }
+            }
+        }
+    }
+    let op = best?;
+    let suffix = text[op.base().len() + 1..].trim();
+    if suffix.is_empty() {
+        return Some((op, None));
+    }
+    Some((op, TyKind::from_suffix(suffix)))
+}
+
 // ------------------------------------------------------------------------ §7.8.3 verifier
 
 /// One loader-time violation. `code` is the `R-07xx` the runtime reports (§7.8.3, appendix D.10).
@@ -2657,7 +2769,7 @@ fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<Ve
                 Some(x) => *x,
                 None => break,
             };
-            let (pops, pushes) = effect(m, fi, &ins, hosts, out);
+            let (pops, pushes) = effect(m, fi, &ins, off, hosts, out);
             if h < pops as i64 {
                 push(
                     out,
@@ -2671,7 +2783,7 @@ fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<Ve
                 break;
             }
             h = h - pops as i64 + pushes as i64;
-            check_operands(m, &ins, &f, off, fi, out);
+            check_operands(m, &ins, f, off, fi, out);
             check_adjacency(m, &instrs, idx, off, fi, out);
 
             match ins.op {
@@ -2759,13 +2871,13 @@ fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<Ve
 
     // ---- item 5: every host call target must exist and match IFABI
     for (off, ins) in &instrs {
-        if *ins.op == Op::CallHost {
+        if ins.op == Op::CallHost {
             let idx = ins.ops[0] as usize;
             if let Err(msg) = hosts.check_import(m, idx) {
                 push(out, VerifyViolation::new("R-0708", fi as u32, *off, msg));
             }
         }
-        if *ins.op == Op::InvokeDynamic {
+        if ins.op == Op::InvokeDynamic {
             let t = ins.ops[0];
             if t as usize >= m.funcs.len() {
                 push(
@@ -2817,6 +2929,8 @@ fn effect(
     match ins.op {
         // `new.list elem_ty, count` pops `count` elements.
         Op::NewList => (ins.ops[1] as usize, 1),
+        Op::NewTuple => (ins.ops[0] as usize, 1),
+        Op::NewSet => (ins.ops[0] as usize, 1),
         // `new.dict k_ty, v_ty, count` pops `2 * count` (the verifier caps the literal size).
         Op::NewDict => {
             let n = ins.ops[2] as usize;
@@ -2881,6 +2995,20 @@ fn effect(
                 (0, 1)
             }
         },
+        // D.5/D.7 dynamic dispatch: the callee's arity is not static, so validation item 2 cannot
+        // be completed. v2.0's capability tables therefore leave these unimplemented.
+        Op::CallVirt | Op::CallEmbed | Op::InvokeDynamic => {
+            push(
+                out,
+                VerifyViolation::new(
+                    "R-0705",
+                    fi as u32,
+                    off,
+                    format!("{} 的被调元数无法静态确定，校验项 2 无法完成（能力表未覆盖）", ins.op.base()),
+                ),
+            );
+            (0, 0)
+        }
         _ => ins.op.stack_effect(),
     }
 }

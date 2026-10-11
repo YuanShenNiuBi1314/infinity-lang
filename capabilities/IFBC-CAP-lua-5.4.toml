@@ -1,0 +1,137 @@
+# appendix E.3 - INFY v2.0 B-track capability table (IFBC-CAP-<lang>-<minor>.toml).
+# Normative data for the capability scan of 7.7.2; it REPLACED the old hand-written subset list.
+# Generated from the toolchain actually installed on the build host, not from guesses:
+#   PROVISIONAL: no luac is installed on this host, so this table is written from the Lua 5.4
+#   opcode NAMES (lmoplist in lopcodes.h, stable across 5.4.x) with no numbered rows. The Lua
+#   header number (Lua 5.4 = 0x19 / signature 19) is what luac's own header must match, and
+#   7.7.3's version lock applies to it the same way as to a .pyc magic.
+#
+# [opcode] rows appear under BOTH forms of the same key: the numeric form E.3 mandates
+# (0xNN, the value CPython's dis.opmap reports for that minor) and the OPNAME alias.
+# The scanner looks up the number first and the name second, and refuses a table whose two
+# rows disagree (CapTable::check_alias_agreement) - 7.7.2 wants a table an auditor can trust.
+#
+# Value grammar (mirrored in docs/internals/ifbc-encoding-rust.md):
+#   "-"          unmapped on purpose  -> E-0712 naming this exact item
+#   "ignore"     no IFBC counterpart; the instruction is dropped
+#   "<mnemonic>" one-to-one mapping onto an appendix-D instruction
+#   "<op>._"     the `_` is the type suffix the lowering inferred (add._ -> add.i64/add.f64)
+#   "arg:k->v,…"  dispatch on the instruction argument; "else->v" is the default branch
+#   "a|b"        candidate list, first applicable one wins (e.g. add._|host:std.str.concat)
+#   "host:<path>" emits call.host and creates the import_table row (7.8.3 check item 5)
+
+[cap]
+lang = "lua"
+format = "LUA-54"
+cap_version = 1
+table_hash = "sha256:bd2722b02c316e497969a363107f6ba72887c443efe5048452bd9fd314ff3cf6"   # sha256 over every line that does not start with table_hash
+
+[opcode]   # scan item 1 (7.7.2)
+ADD = "add._"
+ADDI = "add._"
+BAND = "and._"
+BANDK = "-"
+BNOT = "-"
+BOR = "or._"
+BORK = "-"
+BXOR = "xor._"
+BXORK = "-"
+CALL = "call.host"
+CLOSE = "-"
+CLOSURE = "-"
+CONCAT = "str.concat"
+DIV = "div._"
+DIVK = "-"
+EQ = "cmpeq._|host:std.embed.eq"
+EQK = "-"
+FORLOOP = "seq.next"
+FORLOOPJ = "-"
+FORPREP = "seq.iter"
+FORPREPJ = "-"
+GETI = "idx.get"
+GETTABLE = "idx.get"
+GETTABUP = "inst.get"
+IDIV = "-"
+IDIVK = "-"
+JEQ = "br"
+JLE = "br"
+JLT = "br"
+JMP = "jmp"
+LASTLINE = "ignore"
+LE = "cmple._"
+LINE = "ignore"
+LOADK = "push"
+LOADKX = "push"
+LT = "cmplt._"
+MCLOSE = "-"
+MMB = "-"
+MMBKI = "-"
+MOD = "-"
+MODK = "-"
+MOVE = "ldl"
+MPASS = "ignore"
+MUL = "mul._"
+MULK = "mul._"
+NEWTABLE = "new.list"
+NOT = "not.bool"
+POW = "-"
+POWK = "-"
+RET = "ret"
+RET1 = "ret"
+RETO = "ret"
+SELF = "-"
+SETI = "idx.set"
+SETTABLE = "idx.set"
+SETTABUP = "inst.set"
+SHL = "shl._"
+SHLI = "-"
+SHR = "shr._"
+SHRI = "-"
+SUB = "sub._"
+TBC = "-"
+TEST = "brf"
+TESTSET = "brf"
+UNM = "neg._"
+VARARG = "-"
+VARARGN = "-"
+
+[builtin]   # scan item 2: co_names intersect LOAD_GLOBAL
+_ENV = "-"
+_G = "-"
+assert = "-"
+error = "-"
+getmetatable = "-"
+io = "-"
+ipairs = "-"
+load = "-"
+loadstring = "-"
+math = "-"
+next = "-"
+os = "-"
+pairs = "-"
+pcall = "-"
+print = "host:std.io.log"
+rawequal = "-"
+rawget = "-"
+rawlen = "-"
+rawset = "-"
+require = "-"
+select = "-"
+setmetatable = "-"
+string = "-"
+table = "-"
+tonumber = "-"
+tostring = "-"
+type = "-"
+unpack = "-"
+xpcall = "-"
+
+[import]   # scan item 3: the module-name constant of the import instruction
+allow = []
+deny = []   # native extensions -> E-0712 plus the three ways out of 7.7.4
+
+[exception]   # scan item 5: co_exceptiontable entry classes
+entry = ["push", "setup", "with"]
+# Note: handler-class entries are additionally gated by [opcode] -
+# PUSH_EXC_INFO / CHECK_EXC_MATCH / RERAISE are "-" in this table, so a Python
+# try/except still fails the build; this section only declares which entry SHAPES map.

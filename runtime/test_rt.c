@@ -61,10 +61,14 @@ static void section(const char* name) { printf("-- %s\n", name); }
 
 /* ============================ panic plumbing ============================ */
 
-static InfyNodeLoc LOC(uint32_t line, uint32_t col, uint32_t node) {
-    InfyNodeLoc l;
-    l.file = "test/harness.infy";
-    l.line = line; l.col = col; l.node_idx = node; l.linkage_count = 0;
+/* A node location for the calls under test: the runtime only ever reads through the pointer, so a
+ * small rotating static pool keeps `LOC(...)` usable inline without taking the address of a value. */
+static InfyNodeLoc* LOC(uint32_t line, uint32_t col, uint32_t node) {
+    static InfyNodeLoc pool[32];
+    static unsigned idx = 0;
+    InfyNodeLoc* l = &pool[idx++ & 31u];
+    l->file = "test/harness.infy";
+    l->line = line; l->col = col; l->node_idx = node; l->linkage_count = 0;
     return l;
 }
 
@@ -1723,6 +1727,9 @@ static void test_fs(void) {
 
 /* ============================ 15. mem stats + log + inits (§10.14, §7.7.1) ============================ */
 
+static void e_leak_check(void);
+static void e_free_leaky(void);
+
 static int g_init_order[4];
 static int g_init_n;
 static void init0(void) { g_init_order[g_init_n++] = 0; }
@@ -1786,7 +1793,6 @@ static void test_misc(void) {
     infy_run_package_inits(0, 0);
 }
 
-void e_leak_check(void) { infy_leak_check(); }
 static void e_leak_check(void) { infy_leak_check(); }
 static void e_free_leaky(void) {
     static uint64_t c = 2;

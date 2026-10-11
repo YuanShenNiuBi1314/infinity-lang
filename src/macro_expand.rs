@@ -490,53 +490,52 @@ fn collect_expr_sites(e: &Expr, idx: usize, out: &mut Vec<Site>, counter: &mut u
         });
         return;
     }
-    let mut kid = |e: &Expr| collect_expr_sites(e, idx, out, counter);
     match &e.kind {
-        ExprKind::Unary { expr, .. } => kid(expr),
+        ExprKind::Unary { expr, .. } => collect_expr_sites(expr, idx, out, counter),
         ExprKind::Binary { lhs, rhs, .. } => {
-            kid(lhs);
-            kid(rhs);
+            collect_expr_sites(lhs, idx, out, counter);
+            collect_expr_sites(rhs, idx, out, counter);
         }
         ExprKind::Assign { target, value, .. } => {
-            kid(target);
-            kid(value);
+            collect_expr_sites(target, idx, out, counter);
+            collect_expr_sites(value, idx, out, counter);
         }
         ExprKind::Call { callee, args } => {
-            kid(callee);
+            collect_expr_sites(callee, idx, out, counter);
             for a in args {
-                kid(&a.expr);
+                collect_expr_sites(&a.expr, idx, out, counter);
             }
         }
         ExprKind::Method { recv, args, .. } => {
-            kid(recv);
+            collect_expr_sites(recv, idx, out, counter);
             for a in args {
-                kid(&a.expr);
+                collect_expr_sites(&a.expr, idx, out, counter);
             }
         }
-        ExprKind::Field { base, .. } => kid(base),
+        ExprKind::Field { base, .. } => collect_expr_sites(base, idx, out, counter),
         ExprKind::Index { base, index } => {
-            kid(base);
-            kid(index);
+            collect_expr_sites(base, idx, out, counter);
+            collect_expr_sites(index, idx, out, counter);
         }
         ExprKind::Tuple(v) | ExprKind::Array(v) => {
             for x in v {
-                kid(x);
+                collect_expr_sites(x, idx, out, counter);
             }
         }
         ExprKind::ArrayRepeat { value, len } => {
-            kid(value);
-            kid(len);
+            collect_expr_sites(value, idx, out, counter);
+            collect_expr_sites(len, idx, out, counter);
         }
         ExprKind::StructLit { fields, rest, .. } => {
             for (_, v) in fields {
-                kid(v);
+                collect_expr_sites(v, idx, out, counter);
             }
             if let Some(r) = rest {
-                kid(r);
+                collect_expr_sites(r, idx, out, counter);
             }
         }
         ExprKind::If { cond, then, else_ } => {
-            kid(cond);
+            collect_expr_sites(cond, idx, out, counter);
             collect_block_sites(then, idx, out, counter);
             if let Some(eb) = else_ {
                 match &**eb {
@@ -546,27 +545,27 @@ fn collect_expr_sites(e: &Expr, idx: usize, out: &mut Vec<Site>, counter: &mut u
             }
         }
         ExprKind::Match { scrut, arms } => {
-            kid(scrut);
+            collect_expr_sites(scrut, idx, out, counter);
             for a in arms {
                 if let Some(g) = &a.guard {
-                    kid(g);
+                    collect_expr_sites(g, idx, out, counter);
                 }
                 match &a.body {
-                    ArmBody::Expr(x) => kid(x),
+                    ArmBody::Expr(x) => collect_expr_sites(x, idx, out, counter),
                     ArmBody::Block(b) => collect_block_sites(b, idx, out, counter),
                 }
             }
         }
         ExprKind::Block(b) | ExprKind::Unsafe(b) => collect_block_sites(b, idx, out, counter),
         ExprKind::Closure { body, .. } => collect_block_sites(body, idx, out, counter),
-        ExprKind::Ref { expr, .. } | ExprKind::Deref { expr } | ExprKind::Try { expr } | ExprKind::Move { expr } => kid(expr),
-        ExprKind::Cast { expr, .. } | ExprKind::Is { expr, .. } => kid(expr),
+        ExprKind::Ref { expr, .. } | ExprKind::Deref { expr } | ExprKind::Try { expr } | ExprKind::Move { expr } => collect_expr_sites(expr, idx, out, counter),
+        ExprKind::Cast { expr, .. } | ExprKind::Is { expr, .. } => collect_expr_sites(expr, idx, out, counter),
         ExprKind::Range { lo, hi, .. } => {
             if let Some(l) = lo {
-                kid(l);
+                collect_expr_sites(l, idx, out, counter);
             }
             if let Some(h) = hi {
-                kid(h);
+                collect_expr_sites(h, idx, out, counter);
             }
         }
         _ => {}
@@ -1422,7 +1421,7 @@ enum Want {
 fn parse_fragment(sources: &Sources, file: FileId, anchor_span: Span, toks: &[Tok], want: Want) -> Option<Fragment> {
     let anchor = Span::new(file, anchor_span.start, anchor_span.start);
     let kw = |s: &'static str| Kind::Keyword(Kw::from_text(s).unwrap_or(Kw::Fn));
-    let probe_file = |s| Kind::Ident(s);
+    let probe_file = |s: &str| Kind::Ident(s.to_string());
     let pu = |p: Punct| Kind::Punct(p);
     let head: Vec<(&str, Kind)> = match want {
         Want::Ty => vec![
@@ -1508,7 +1507,7 @@ fn parse_fragment(sources: &Sources, file: FileId, anchor_span: Span, toks: &[To
             if let Some(t) = b.tail {
                 let span = t.span;
                 stmts.push(Stmt {
-                    kind: StmtKind::Expr { expr: *t, linkage: Vec::new() },
+                    kind: StmtKind::Expr { expr: t, linkage: Vec::new() },
                     attrs: Vec::new(),
                     docs: Default::default(),
                     span,
@@ -1520,8 +1519,8 @@ fn parse_fragment(sources: &Sources, file: FileId, anchor_span: Span, toks: &[To
         Want::Expr => {
             let b = first_fn_block(&parsed)?;
             if b.stmts.is_empty() {
-                let t = b.tail?;
-                return Some(Fragment::Expr(*t));
+                let t = b.tail.clone()?;
+                return Some(Fragment::Expr(t));
             }
             if b.stmts.len() == 1 && b.tail.is_none() {
                 if let StmtKind::Expr { expr, .. } = &b.stmts[0].kind {
@@ -1529,7 +1528,7 @@ fn parse_fragment(sources: &Sources, file: FileId, anchor_span: Span, toks: &[To
                 }
             }
             // multi-statement expansion in expression position ⇒ block expression (§6.1 vec!)
-            Some(Fragment::Expr(Expr::new(ExprKind::Block(Box::new(b)), b.span)))
+            { let bs = b.span; Some(Fragment::Expr(Expr::new(ExprKind::Block(Box::new(b)), bs))) }
         }
     }
 }

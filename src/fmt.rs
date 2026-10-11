@@ -63,7 +63,7 @@ use crate::diag::{Diagnostic, Handler, Phase};
 use crate::lexer::{self, Lexed};
 use crate::parser;
 use crate::span::{FileId, SourceFile, Sources, Span};
-use crate::token::{Comment, CommentKind, Delim, Kind, Punct, Tok, Tree, Kw};
+use crate::token::{Comment, CommentKind, Delim, Kind, Lit, Punct, Tok, Tree, Kw};
 
 // --------------------------------------------------------------------------------------------
 // §9.5 rule 1 + rule 14: options. There is no other configuration surface.
@@ -973,11 +973,35 @@ fn own_line(src: &SourceFile, off: u32) -> bool {
     true
 }
 
+/// What a gap between two nodes contributes to (§9.5 rule 6).
+///
+/// * `Items` — exactly one blank line between every pair (declarations);
+/// * `Statements` — keep a source blank line, folded to one;
+/// * `Fields` — no blank lines (fields and variants collapse onto one line when they fit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListMode {
+    Items,
+    Statements,
+    Fields,
+}
+
 /// A node of a list that can own comments: its code span and its rendered doc.
 struct NodeSpec {
     start: u32,
     end: u32,
     doc: Doc,
+}
+
+/// What sits in the gap before a list node (§9.5 rule 6).
+struct Gap {
+    /// Comments sharing the previous node's last line — they stay behind it.
+    trail: Vec<usize>,
+    /// Own-line comments above the node.
+    lead: Vec<usize>,
+    /// A blank line is owed before the node.
+    blank: bool,
+    /// The comment group is separated from the node below it, so it belongs to the region above.
+    detached: bool,
 }
 
 /// What a mark id refers to, for §9.5 rule 8's `infy-safety` adjacency check.
@@ -1034,7 +1058,7 @@ impl<'a> Printer<'a> {
 
     // ------------------------------------------------------------------ source helpers
 
-    fn span_text(&self, sp: Span) -> Option<&str> {
+    fn span_text(&self, sp: Span) -> Option<&'a str> {
         if sp.file != self.src.id {
             return None;
         }
@@ -1091,26 +1115,12 @@ impl<'a> Printer<'a> {
 
     // ------------------------------------------------------------------ §9.5 rule 6: list layout
 
-    /// What a gap between two nodes contributes to.
-    ///
-    /// * `Items` — exactly one blank line between every pair (§9.5 rule 6: declarations);
-    /// * `Statements` — keep a source blank line, folded to one (§9.5 rule 6);
-    /// * `Fields` — no blank lines (fields and variants collapse onto one line when they fit).
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum ListMode {
-        Items,
-        Statements,
-        Fields,
-    }
-
-    /// Lay out a list of nodes: leading comments above the node, a comment that shares the previous
-    /// node's last line stays behind it, at most one blank line in between (§9.5 rule 6).
-    ///
-    /// `list_end` is the offset that closes the list; comments up to it trail the last node.
-    fn list_doc(&mut self, nodes: Vec<NodeSpec>, list_end: u32, mode: ListMode) -> Doc {
-        let mut out: Vec<Doc> = Vec::new();
+    /// Scan the comment gaps of a list. Returns one [`Gap`] per node plus the comments that sit
+    /// after the last node but before `list_end`.
+    fn gap_scan(&mut self, nodes: &[NodeSpec], list_end: u32, mode: ListMode) -> (Vec<Gap>, Vec<usize>) {
+        let mut gaps: Vec<Gap> = Vec::with_capacity(nodes.len());
         let mut prev_end: Option<u32> = None;
-        for (i, n) in nodes.into_iter().enumerate() {
+        for n in nodes {
             let hole = self.pool.take_before(n.start);
             let (trail, lead, detached) = self.split_hole(&hole, prev_end, n.start);
             let blank = match mode {
@@ -1122,86 +1132,182 @@ impl<'a> Printer<'a> {
                 }
                 ListMode::Fields => false,
             };
+            gaps.push(Gap { trail, lead, blank, detached });
+            prev_end = Some(n.end);
+        }
+        let tail = self.pool.take_before(list_end);
+        (gaps, tail)
+    }
+
+    /// Lay out a list of nodes: leading comments above the node, a comment that shares the previous
+    /// node's last line stays behind it, at most one blank line in between (§9.5 rule 6).
+    ///
+    /// `list_end` is the offset that closes the list; comments up to it trail the last node.
+    fn list_doc(&mut self, nodes: Vec<NodeSpec>, list_end: u32, mode: ListMode) -> Doc {
+        let (gaps, tail) = self.gap_scan(&nodes, list_end, mode);
+        let mut out: Vec<Doc> = Vec::new();
+        for (i, n) in nodes.into_iter().enumerate() {
+            let g = &gaps[i];
             if i > 0 {
-                for c in trail {
-                    out.push(Doc::Text(" ".to_string()));
-                    let idx = c;
-                    self.push_comment_doc(&mut out, idx, true);
+                // Trailing comment of the node above, then the break.
+                let mut trail_docs: Vec<Doc> = Vec::new();
+                for &idx in &g.trail {
+                    trail_docs.push(Doc::Text(" ".to_string()));
+                    self.push_comment_doc(&mut trail_docs, idx, true);
                 }
+                out.push(Doc::Cat(trail_docs));
                 out.push(Doc::HardLine);
-                if detached {
-                    // The group is separated from the node below it by a blank line: emit it first,
-                    // then the blank, then the node. Stable under re-parse (rule 12).
-                    for (j, &idx) in lead.iter().enumerate() {
-                        if j > 0 {
-                            out.push(Doc::HardLine);
-                        }
-                        self.push_comment_doc(&mut out, idx, false);
+                let mut lead_docs: Vec<Doc> = Vec::new();
+                for (j, &idx) in g.lead.iter().enumerate() {
+                    if j > 0 {
+                        lead_docs.push(Doc::HardLine);
                     }
-                    if !lead.is_empty() {
+                    self.push_comment_doc(&mut lead_docs, idx, false);
+                }
+                if g.detached {
+                    // The group is separated from the node below it by a blank line: emit it first,
+                    // then the blank, then the node. Stable under a re-parse (rule 12).
+                    out.push(Doc::Cat(lead_docs));
+                    if !g.lead.is_empty() {
                         out.push(Doc::Blank);
                     }
                     out.push(Doc::HardLine);
                 } else {
-                    if blank {
+                    if g.blank {
                         out.push(Doc::Blank);
                     }
                     out.push(Doc::HardLine);
-                    for (j, &idx) in lead.iter().enumerate() {
-                        if j > 0 {
-                            out.push(Doc::HardLine);
-                        }
-                        self.push_comment_doc(&mut out, idx, false);
-                    }
-                    if !lead.is_empty() {
+                    if !g.lead.is_empty() {
+                        out.push(Doc::Cat(lead_docs));
                         out.push(Doc::HardLine);
                     }
                 }
             } else {
-                for c in trail {
-                    out.push(Doc::Text(" ".to_string()));
-                    self.push_comment_doc(&mut out, c, true);
-                    out.push(Doc::HardLine);
+                let mut pre: Vec<Doc> = Vec::new();
+                for &idx in &g.trail {
+                    pre.push(Doc::Text(" ".to_string()));
+                    self.push_comment_doc(&mut pre, idx, true);
+                    pre.push(Doc::HardLine);
                 }
-                for (j, &idx) in lead.iter().enumerate() {
+                for (j, &idx) in g.lead.iter().enumerate() {
                     if j > 0 {
-                        out.push(Doc::HardLine);
+                        pre.push(Doc::HardLine);
                     }
-                    self.push_comment_doc(&mut out, idx, false);
+                    self.push_comment_doc(&mut pre, idx, false);
                 }
-                if !lead.is_empty() {
-                    out.push(Doc::HardLine);
+                if !g.lead.is_empty() {
+                    pre.push(Doc::HardLine);
                 }
+                out.push(Doc::Cat(pre));
             }
             out.push(n.doc);
-            prev_end = Some(n.end);
         }
-        let tail = self.pool.take_before(list_end);
         if !tail.is_empty() {
-            let first_own = tail
-                .first()
-                .map(|&idx| self.pool.items[idx].own_line)
-                .unwrap_or(false);
-            if first_own {
-                for (j, &idx) in tail.iter().enumerate() {
-                    if j > 0 {
-                        out.push(Doc::HardLine);
-                    }
-                    self.push_comment_doc(&mut out, idx, false);
-                }
-            } else {
-                for &idx in &tail {
-                    if self.pool.items[idx].own_line {
-                        out.push(Doc::HardLine);
-                        self.push_comment_doc(&mut out, idx, false);
-                    } else {
-                        out.push(Doc::Text(" ".to_string()));
-                        self.push_comment_doc(&mut out, idx, true);
-                    }
+            for &idx in &tail {
+                if self.pool.items[idx].own_line {
+                    out.push(Doc::HardLine);
+                    let mut one: Vec<Doc> = Vec::new();
+                    self.push_comment_doc(&mut one, idx, false);
+                    out.push(Doc::Cat(one));
+                } else {
+                    out.push(Doc::Text(" ".to_string()));
+                    let mut one: Vec<Doc> = Vec::new();
+                    self.push_comment_doc(&mut one, idx, true);
+                    out.push(Doc::Cat(one));
                 }
             }
         }
         Doc::Cat(out)
+    }
+
+    /// A `,`-separated list that may collapse onto one line (§9.5 rules 4/5) while still carrying
+    /// every comment of its gap (§2.11: a comment may never be dropped).
+    fn delimited_list(
+        &mut self,
+        open: &str,
+        nodes: Vec<NodeSpec>,
+        close: &str,
+        list_end: u32,
+        pad: bool,
+    ) -> Doc {
+        if nodes.is_empty() {
+            let (gaps, tail) = self.gap_scan(&nodes, list_end, ListMode::Fields);
+            let _ = gaps;
+            if tail.is_empty() {
+                return Doc::Text(format!("{open}{close}"));
+            }
+            // Only comments live here: the list must break to host them.
+            let mut v: Vec<Doc> = vec![Doc::Text(open.to_string()), Doc::HardLine];
+            for (j, &idx) in tail.iter().enumerate() {
+                if j > 0 {
+                    v.push(Doc::HardLine);
+                }
+                let mut one: Vec<Doc> = Vec::new();
+                self.push_comment_doc(&mut one, idx, false);
+                v.push(Doc::Cat(one));
+            }
+            v.push(Doc::HardLine);
+            v.push(Doc::Text(close.to_string()));
+            return group(Doc::Cat(v));
+        }
+        let (gaps, tail) = self.gap_scan(&nodes, list_end, ListMode::Fields);
+        let pad_doc = if pad { Doc::Line } else { Doc::SoftLine };
+        let sep = Doc::Line;
+        let mut inner: Vec<Doc> = vec![pad_doc.clone()];
+        let last = nodes.len() - 1;
+        for (i, n) in nodes.into_iter().enumerate() {
+            let g = &gaps[i];
+            let mut lead_docs: Vec<Doc> = Vec::new();
+            for (j, &idx) in g.lead.iter().enumerate() {
+                if j > 0 {
+                    lead_docs.push(Doc::HardLine);
+                }
+                self.push_comment_doc(&mut lead_docs, idx, false);
+            }
+            if !g.lead.is_empty() {
+                inner.push(Doc::Cat(lead_docs));
+                inner.push(Doc::HardLine);
+            }
+            inner.push(n.doc);
+            if i < last {
+                inner.push(Doc::Text(",".to_string()));
+            }
+            let mut trail_docs: Vec<Doc> = Vec::new();
+            for &idx in &g.trail {
+                trail_docs.push(Doc::Text(" ".to_string()));
+                self.push_comment_doc(&mut trail_docs, idx, true);
+            }
+            inner.push(Doc::Cat(trail_docs));
+            if i < last {
+                inner.push(sep.clone());
+            }
+        }
+        // §9.5 rule 5: a multi-line list carries the trailing comma, a single-line one must not.
+        inner.push(Doc::IfBreak(",".to_string(), String::new()));
+        for (j, &idx) in tail.iter().enumerate() {
+            if j == 0 {
+                inner.push(Doc::Text(",".to_string()));
+            }
+            let mut one: Vec<Doc> = Vec::new();
+            if self.pool.items[idx].own_line {
+                inner.push(Doc::HardLine);
+                self.push_comment_doc(&mut one, idx, false);
+            } else {
+                inner.push(Doc::Text(" ".to_string()));
+                self.push_comment_doc(&mut one, idx, true);
+            }
+            inner.push(Doc::Cat(one));
+            if j + 1 < tail.len() {
+                inner.push(Doc::Text(",".to_string()));
+            }
+        }
+        let body = Doc::Cat(vec![
+            Doc::Text(open.to_string()),
+            nest(INDENT, Doc::Cat(inner)),
+            pad_doc,
+            Doc::Text(close.to_string()),
+        ]);
+        group(body)
     }
 
     /// Split a gap's comments into (trailing of the previous node, leading of the next node,
@@ -1270,17 +1376,17 @@ impl<'a> Printer<'a> {
     /// imports · items).
     pub fn print_file(&mut self, f: &ParsedFile) -> String {
         let mut v: Vec<Doc> = Vec::new();
+        let mut brk = false;
+        let mut blk = false;
 
         // shebang, then the build constraint pinned to the first content line (rules 8/11).
         if let Some(sb) = &f.shebang {
-            v.push(Doc::Text(sb.trim_end_matches(['\r', '\n']).to_string()));
-            v.push(Doc::HardLine);
+            push_line(&mut v, &mut brk, &mut blk, Doc::Text(sb.trim_end_matches(['\r', '\n']).to_string()));
         }
         if let Some(bc) = &f.build_constraint {
-            v.push(Doc::Text(format!("//infy:build {bc}")));
-            v.push(Doc::HardLine);
-            // Rule 8 also deletes the blank line that used to follow it — the layout below never
-            // emits one, and the comment itself must not be re-emitted from the pool.
+            push_line(&mut v, &mut brk, &mut blk, Doc::Text(format!("//infy:build {bc}")));
+            // Rule 8 also deletes the blank line that used to follow it: `blk` stays false, and the
+            // comment itself must not be re-emitted from the pool.
             if let Some(sp) = f.build_constraint_span {
                 self.pool.mark_consumed(sp.start, sp.end);
             }
@@ -1289,7 +1395,7 @@ impl<'a> Printer<'a> {
         // Everything above the first real construct, including comments that precede it.
         let first_off = [
             f.file_attrs.first().map(|a| a.span.start),
-            f.package_span,
+            f.package_span.map(|s| s.start),
             f.imports.first().map(|i| i.span.start),
             f.items.first().map(|i| i.span.start),
         ]
@@ -1298,48 +1404,41 @@ impl<'a> Printer<'a> {
         .min()
         .unwrap_or(u32::MAX);
         let pre = self.pool.take_before(first_off);
-        for (j, &idx) in pre.iter().enumerate() {
-            if j > 0 {
-                v.push(Doc::HardLine);
-            }
-            self.push_comment_doc(&mut v, idx, false);
-        }
-        if !pre.is_empty() {
-            v.push(Doc::HardLine);
+        for &idx in &pre {
+            let mut one: Vec<Doc> = Vec::new();
+            self.push_comment_doc(&mut one, idx, false);
+            push_line(&mut v, &mut brk, &mut blk, Doc::Cat(one));
         }
 
         for a in &f.file_attrs {
             // §9.5 rule 10: every attribute sits on its own line.
-            v.push(self.attr_doc(a));
-            v.push(Doc::HardLine);
+            let d = self.attr_doc(a);
+            if is_empty_doc(&d) {
+                continue;
+            }
+            push_line(&mut v, &mut brk, &mut blk, d);
         }
         if let Some(p) = &f.package {
-            v.push(Doc::Text(format!("package {p}")));
+            push_line(&mut v, &mut brk, &mut blk, Doc::Text(format!("package {p}")));
         }
         if !f.imports.is_empty() {
             if f.package.is_some() {
-                // §9.5 rule 6: exactly one blank line between `package` and the import block.
-                v.push(Doc::Blank);
-            } else {
-                v.push(Doc::HardLine);
+                // §9.5 rule 6: exactly one blank line between `package` and the `import` block.
+                blk = true;
             }
             let imp = self.imports_doc(&f.imports);
-            v.push(imp);
+            push_line(&mut v, &mut brk, &mut blk, imp);
         }
-        let end_off = self
-            .src
-            .text
-            .len()
-            .try_into()
-            .unwrap_or(u32::MAX);
+        let end_off = self.src.text.len().try_into().unwrap_or(u32::MAX);
         let nodes = self.item_nodes(&f.items);
         let items = self.list_doc(nodes, end_off, ListMode::Items);
         if !is_empty_doc(&items) {
-            if f.package.is_some() || !f.imports.is_empty() || !f.file_attrs.is_empty() {
-                // One blank line between the header block and the first declaration.
-                v.push(Doc::Blank);
+            if brk {
+                // One blank line between the header block and the first declaration; when the file
+                // has no header at all, "文件内首个声明前 0 个" applies and `brk` is still false.
+                blk = true;
             }
-            v.push(items);
+            push_line(&mut v, &mut brk, &mut blk, items);
         }
         let doc = Doc::Cat(v);
         let (mut out, offsets) = render(&doc, self.opts.width());
@@ -1474,11 +1573,10 @@ impl<'a> Printer<'a> {
         let mut parts: Vec<String> = Vec::new();
         for arg in &a.args {
             if let Some(n) = &arg.name {
-                let v = arg
-                    .value
-                    .as_ref()
-                    .map(|v| self.attr_value_text(v))
-                    .unwrap_or_default();
+                let v = match &arg.value {
+                    Some(val) => self.attr_value_text(val),
+                    None => String::new(),
+                };
                 parts.push(format!("{n} = {v}"));
             }
         }
@@ -1494,7 +1592,7 @@ impl<'a> Printer<'a> {
         Doc::Text(format!("{body}]"))
     }
 
-    fn attr_value_text(&self, v: &AttrValue) -> String {
+    fn attr_value_text(&mut self, v: &AttrValue) -> String {
         match v {
             AttrValue::Str(s) => format!("\"{}\"", escape_minimal(s)),
             AttrValue::Int(i) => i.to_string(),
@@ -1642,7 +1740,7 @@ impl<'a> Printer<'a> {
                 Doc::Cat(v)
             }
             ItemKind::Const { name, ty, init, .. } => self.const_like_doc("const", name, ty, init, false),
-            ItemKind::Static { name, ty, init, is_mut } => {
+            ItemKind::Static { name, ty, init, is_mut, .. } => {
                 self.const_like_doc(if *is_mut { "static mut" } else { "static" }, name, ty, init, true)
             }
             ItemKind::MacroRules { name, arms } => {
@@ -1657,15 +1755,11 @@ impl<'a> Printer<'a> {
                 if inner.is_empty() {
                     v.push(Doc::Text("{}".to_string()));
                 } else {
-                    v.push(braces(Doc::Cat(vec![
-                        Doc::HardLine,
-                        Doc::Cat(inner),
-                        Doc::HardLine,
-                    ])));
+                    v.push(braces(Doc::Cat(vec![Doc::HardLine, Doc::Cat(inner)])));
                 }
                 Doc::Cat(v)
             }
-            ItemKind::Chain { name, stmts } => {
+            ItemKind::Chain { name, stmts, .. } => {
                 let nodes = self.stmt_nodes(stmts);
                 let last = stmts.last().map(|s| s.span.end).unwrap_or(0);
                 let list = self.list_doc(nodes, self.close_brace_after(last), ListMode::Statements);
@@ -1674,7 +1768,7 @@ impl<'a> Printer<'a> {
                 } else {
                     Doc::Cat(vec![
                         Doc::Text(format!("chain {name} ")),
-                        braces(Doc::Cat(vec![Doc::HardLine, list, Doc::HardLine])),
+                        braces(Doc::Cat(vec![Doc::HardLine, list])),
                     ])
                 }
             }
@@ -1691,7 +1785,7 @@ impl<'a> Printer<'a> {
         let last = items.last().map(|i| i.span.end).unwrap_or(0);
         let nodes = self.item_nodes(items);
         let list = self.list_doc(nodes, self.close_brace_after(last), ListMode::Items);
-        braces(Doc::Cat(vec![Doc::HardLine, list, Doc::HardLine]))
+        braces(Doc::Cat(vec![Doc::HardLine, list]))
     }
 
     /// The offset just past the `}` that closes a list beginning after `from`.
@@ -1730,7 +1824,6 @@ impl<'a> Printer<'a> {
         if v.is_empty() {
             return Doc::Text("{}".to_string());
         }
-        v.push(Doc::HardLine);
         braces(Doc::Cat(v))
     }
 
@@ -1762,16 +1855,14 @@ impl<'a> Printer<'a> {
                     x.push(self.ty_doc(t));
                 }
                 if let Some(i) = init {
-                    x.push(Doc::Text(" =".to_string()));
-                    x.push(self.value_doc(i, 2));
+                    x.push(self.assign_tail(" =", i));
                 }
                 x.push(Doc::Text(";".to_string()));
                 Doc::Cat(x)
             }
             StmtKind::Assign { target, op, value } => {
                 let mut x = vec![self.expr_doc(target, 3)];
-                x.push(Doc::Text(format!(" {} ", punct_text(*op))));
-                x.push(self.value_doc(value, 2));
+                x.push(self.assign_tail(&format!(" {}", punct_text(*op)), value));
                 x.push(Doc::Text(";".to_string()));
                 Doc::Cat(x)
             }
@@ -1781,9 +1872,9 @@ impl<'a> Printer<'a> {
                     x.push(Doc::Text(" ".to_string()));
                     x.push(self.linkage_doc(lb));
                 }
-                if s.terminated && !blockish(expr) {
-                    x.push(Doc::Text(";".to_string()));
-                } else if s.terminated && blockish(expr) && needs_semi_after(expr) {
+                // §2.11 has no automatic semicolon insertion, so the terminator the source wrote is
+                // the terminator that is printed: dropping or adding one would change the AST.
+                if s.terminated {
                     x.push(Doc::Text(";".to_string()));
                 }
                 Doc::Cat(x)
@@ -1910,7 +2001,7 @@ impl<'a> Printer<'a> {
             nodes.push(NodeSpec { start: a.span.start, end: a.span.end, doc: self.arm_doc(a) });
         }
         let list = self.list_doc(nodes, end, ListMode::Fields);
-        v.push(braces(Doc::Cat(vec![Doc::HardLine, list, Doc::HardLine])));
+        v.push(braces(Doc::Cat(vec![Doc::HardLine, list])));
         Doc::Cat(v)
     }
 
@@ -1953,7 +2044,7 @@ impl<'a> Printer<'a> {
             }
             v.push(self.linkage_stmt_doc(s));
         }
-        braces(Doc::Cat(vec![Doc::HardLine, Doc::Cat(v), Doc::HardLine]))
+        braces(Doc::Cat(vec![Doc::HardLine, Doc::Cat(v)]))
     }
 
     fn linkage_stmt_doc(&mut self, s: &LinkageStmt) -> Doc {
@@ -2018,7 +2109,7 @@ impl<'a> Printer<'a> {
             }
             v.push(self.linkage_stmt_doc(s));
         }
-        braces(Doc::Cat(vec![Doc::HardLine, Doc::Cat(v), Doc::HardLine]))
+        braces(Doc::Cat(vec![Doc::HardLine, Doc::Cat(v)]))
     }
 
     // ------------------------------------------------------------------ §3.4 types
@@ -2190,6 +2281,16 @@ impl<'a> Printer<'a> {
 
     // ------------------------------------------------------------------ §3.11 / §4.4 expressions
 
+    /// `= value` (or `+= value`): flat it is one space; over the soft limit the line breaks after
+    /// the operator with one indent unit of continuation (§9.5 rule 3).
+    fn assign_tail(&mut self, op: &str, value: &Expr) -> Doc {
+        group(Doc::Cat(vec![
+            Doc::Text(op.to_string()),
+            Doc::Line,
+            nest(INDENT, self.expr_doc(value, 2)),
+        ]))
+    }
+
     /// The value side of `let` / assignment / `return`. §9.5 rule 3 gives every construct its own
     /// break points; nothing is force-broken after `=`.
     fn value_doc(&mut self, e: &Expr, min: u8) -> Doc {
@@ -2251,9 +2352,7 @@ impl<'a> Printer<'a> {
             ExprKind::Move { expr } => {
                 Doc::Cat(vec![Doc::Text("move ".to_string()), self.expr_doc(expr, 14)])
             }
-            ExprKind::Try { expr } => {
-                Doc::Cat(vec![self.chain_doc(expr, true), Doc::Text("?".to_string())])
-            }
+            ExprKind::Try { .. } => self.chain_doc(e, false),
             ExprKind::Cast { expr, ty } => {
                 let mut v = vec![self.expr_doc(expr, 2), Doc::Text(" as ".to_string())];
                 v.push(self.ty_doc(ty));
@@ -2264,42 +2363,9 @@ impl<'a> Printer<'a> {
                 v.push(self.ty_doc(ty));
                 Doc::Cat(v)
             }
-            ExprKind::Call { callee, args } => self.call_doc(e, callee, args),
-            ExprKind::Method { recv, name, turbofish, args } => {
-                let mut head = format!(".{name}");
-                if !turbofish.is_empty() {
-                    head.push_str("::");
-                }
-                let mut v = vec![Doc::Text(head)];
-                if !turbofish.is_empty() {
-                    let items: Vec<Doc> = turbofish.iter().map(|t| self.ty_doc(t)).collect();
-                    v.push(Doc::Text("<".to_string()));
-                    let mut inner: Vec<Doc> = Vec::new();
-                    for (i, d) in items.into_iter().enumerate() {
-                        if i > 0 {
-                            inner.push(Doc::Text(", ".to_string()));
-                        }
-                        inner.push(d);
-                    }
-                    v.push(Doc::Cat(inner));
-                    v.push(Doc::Text(">".to_string()));
-                }
-                v.push(self.args_doc(args));
-                let _ = recv;
-                Doc::Cat(v)
-            }
-            ExprKind::Field { base, name } => {
-                let f = match name {
-                    FieldName::Named(n) => format!(".{n}"),
-                    FieldName::Index(i) => format!(".{i}"),
-                };
-                Doc::Cat(vec![self.expr_doc(base, 16), Doc::Text(f)])
-            }
-            ExprKind::Index { base, index } => {
-                let mut v = vec![self.expr_doc(base, 16), Doc::Text("[".to_string())];
-                v.push(self.expr_doc(index, 2));
-                v.push(Doc::Text("]".to_string()));
-                Doc::Cat(v)
+            ExprKind::Call { .. } => self.chain_doc(e, false),
+            ExprKind::Method { .. } | ExprKind::Field { .. } | ExprKind::Index { .. } => {
+                self.chain_doc(e, false)
             }
             ExprKind::Tuple(items) => {
                 if items.is_empty() {
@@ -2411,7 +2477,7 @@ impl<'a> Printer<'a> {
                     Delim::Bracket => ("[", "]"),
                     Delim::Brace => ("{", "}"),
                 };
-                let inner = tokens_text(tokens);
+                let inner = trees_text(tokens);
                 Doc::Text(format!("{name}!{open}{inner}{close}"))
             }
         }
@@ -2419,11 +2485,10 @@ impl<'a> Printer<'a> {
 
     /// §9.5 rule 3: a chain that does not fit breaks **before every `.`**, 8 columns in; one that
     /// fits stays on a single line (§9.5 rule 4's collapse requirement).
-    fn chain_doc(&mut self, e: &Expr, stop_at_try: bool) -> Doc {
+    fn chain_doc(&mut self, e: &Expr, _stop_at_try: bool) -> Doc {
         let mut segs: Vec<Seg<'_>> = Vec::new();
-        let base = flatten_chain(e, &mut segs, stop_at_try);
+        let base = flatten_chain(e, &mut segs, false);
         if segs.len() < 2 {
-            let _ = base;
             return self.postfix_doc(e);
         }
         let base_start = base.span;
@@ -2486,6 +2551,8 @@ impl<'a> Printer<'a> {
                 Doc::Cat(v)
             }
             Seg::Try => Doc::Text("?".to_string()),
+            Seg::Glue(t) => Doc::Text(t),
+            Seg::Leaf(_) => Doc::Nil,
         }
     }
 
@@ -2521,6 +2588,46 @@ impl<'a> Printer<'a> {
         }
         v.push(self.args_doc(args));
         Doc::Cat(v)
+    }
+
+    /// The value text of every embed argument, taken from the `( … )` region of the source so that
+    /// `timeout_ms = 5_000` keeps its underscores (§9.5 rule 9). `None` for an argument means the
+    /// region could not be matched and the AST value has to do.
+    fn embed_arg_chunks(&self, args: &[EmbedArg]) -> Vec<Option<String>> {
+        let none = || args.iter().map(|_| None).collect::<Vec<Option<String>>>();
+        let region = match args.first().and_then(|a| self.span_text(a.span)) {
+            Some(r) => r.trim_matches(|c: char| c.is_whitespace()),
+            None => return none(),
+        };
+        let inner = match region.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+            Some(r) => r,
+            None => return none(),
+        };
+        let chunks = split_top_commas(inner);
+        if chunks.len() != args.len() {
+            return none();
+        }
+        let mut out: Vec<Option<String>> = Vec::new();
+        for (chunk, a) in chunks.iter().zip(args.iter()) {
+            let c = chunk.trim_matches(|ch: char| ch.is_whitespace());
+            match c.split_once('=') {
+                Some((name, value)) if name.trim() == a.name => {
+                    out.push(Some(value.trim().to_string()))
+                }
+                _ => out.push(None),
+            }
+        }
+        out
+    }
+
+    /// An expression whose spans are not in this file (embed argument values are parsed out of a
+    /// synthetic token stream): render it from AST values only.
+    fn expr_doc_no_source(&mut self, e: &Expr) -> Doc {
+        match &e.kind {
+            ExprKind::Lit(l) => Doc::Text(lit_text(l)),
+            ExprKind::Int(i) => Doc::Text(lit_text(&crate::token::Lit::Int(i.clone()))),
+            _ => self.expr_doc(e, 2),
+        }
     }
 
     fn turbofish_between(&self, callee_span: Span) -> String {
@@ -2674,6 +2781,20 @@ fn line_of_byte(text: &str, off: usize) -> u32 {
     1 + text[..off.min(text.len())].matches('\n').count() as u32
 }
 
+/// Append one top-level line of the file, honouring §9.5 rule 6's blank-line ledger: `brk` records
+/// that a line has already been written, `blk` that a blank line is owed before the next one.
+fn push_line(v: &mut Vec<Doc>, brk: &mut bool, blk: &mut bool, d: Doc) {
+    if *brk {
+        if *blk {
+            v.push(Doc::Blank);
+        }
+        v.push(Doc::HardLine);
+    }
+    *blk = false;
+    *brk = true;
+    v.push(d);
+}
+
 /// One link of a postfix chain.
 enum Seg<'x> {
     Method(String, Vec<Type>, Vec<CallArg>),
@@ -2817,8 +2938,15 @@ fn is_empty_doc(d: &Doc) -> bool {
     }
 }
 
+/// `{` … `}` where `inner` already begins with a `HardLine`. The body is nested by one indent unit
+/// (§9.5 rule 2) and the closing brace returns to the enclosing column.
 fn braces(inner: Doc) -> Doc {
-    Doc::Cat(vec![Doc::Text("{".to_string()), inner, Doc::Text("}".to_string())])
+    Doc::Cat(vec![
+        Doc::Text("{".to_string()),
+        nest(INDENT, inner),
+        Doc::HardLine,
+        Doc::Text("}".to_string()),
+    ])
 }
 
 /// Render a doc with no line breaks at all — used for the one-line positions of attribute values
@@ -2967,14 +3095,29 @@ fn lit_text(l: &Lit) -> String {
             f.suffix.clone().unwrap_or_default()
         ),
         Lit::Str(s) => format!("\"{}\"", escape_minimal(s)),
-        Lit::ByteStr(bs) => format!(
-            "b\"{}\"",
-            bs.iter().map(|b| b.escape_ascii().collect::<String>()).collect::<String>()
-        ),
+        Lit::ByteStr(bs) => format!("b\"{}\"", byte_str_text(bs)),
         Lit::Cord(s) => format!("c\"{}\"", escape_minimal(s)),
         Lit::Char(c) => format!("'{}'", c.escape_debug()),
         Lit::Bool(b) => b.to_string(),
     }
+}
+
+/// The canonical spelling of a byte string when its source bytes are unreachable: printable ASCII
+/// stays as-is, anything else becomes `\xNN`. Only the fallback path of §9.5 rule 9 uses it.
+fn byte_str_text(bs: &[u8]) -> String {
+    let mut out = String::new();
+    for b in bs {
+        match b {
+            0x20..=0x7e if *b != b'"' && *b != b'\\' => out.push(*b as char),
+            _ => {
+                let hex = format!("{b:02X}");
+                out.push('\\');
+                out.push('x');
+                out.push_str(&hex);
+            }
+        }
+    }
+    out
 }
 
 /// Re-escape a string *value* only when the source bytes are unavailable; §9.5 rule 9 forbids
@@ -3061,9 +3204,24 @@ pub fn ast_fingerprint(f: &ParsedFile) -> String {
     for a in &f.file_attrs {
         fp_attr(a, &mut s);
     }
-    s.push_str(&format!("imports{}", f.imports.len()));
+    // §9.5 rule 7 legitimately sorts and merges the import block, so §9.5 rule 13's digest reads it
+    // as a set: one entry per path, carrying the alias the formatter would keep (the last one).
+    let mut dedup: Vec<(String, String)> = Vec::new();
     for i in &f.imports {
-        s.push_str(&format!("[pub={}path={}alias={}]", i.pub_, i.path, fp_alias(&i.alias)));
+        let entry = format!("[pub={}alias={}]", i.pub_, fp_alias(&i.alias));
+        match dedup.iter().position(|(p, _)| p == &i.path) {
+            Some(pos) => dedup[pos].1 = entry,
+            None => dedup.push((i.path.clone(), entry)),
+        }
+    }
+    let mut lines: Vec<String> = dedup
+        .into_iter()
+        .map(|(p, e)| format!("path={p}{e}"))
+        .collect();
+    lines.sort();
+    s.push_str(&format!("imports{}", lines.len()));
+    for x in lines {
+        s.push_str(&x);
     }
     s.push_str("items");
     for it in &f.items {
@@ -3593,7 +3751,350 @@ fn fp_block(b: &Block, s: &mut String) {
     s.push('}');
 }
 
-fn fp_stmt(st: &Stmt) -> (String, String);
+fn fp_stmt(st: &Stmt, s: &mut String) {
+    s.push_str("st{");
+    for a in &st.attrs {
+        fp_attr(a, s);
+    }
+    match &st.kind {
+        StmtKind::Let { is_var, name, ty, init, .. } => {
+            s.push_str(&format!("let{}{name}", if *is_var { "var" } else { "" }));
+            if let Some(t) = ty {
+                fp_type(t, s);
+            }
+            if let Some(i) = init {
+                fp_expr(i, s);
+            }
+        }
+        StmtKind::Assign { target, op, value } => {
+            s.push_str(&format!("assign{}", punct_text(*op)));
+            fp_expr(target, s);
+            fp_expr(value, s);
+        }
+        StmtKind::Expr { expr, linkage } => {
+            s.push_str(&format!("expr{};", if st.terminated { "semi" } else { "none" }));
+            fp_expr(expr, s);
+            for l in linkage {
+                s.push_str("link[");
+                for ls in &l.stmts {
+                    fp_linkage(ls, s);
+                }
+                s.push(']');
+            }
+        }
+        StmtKind::If { cond, then, else_ } => {
+            s.push_str("if[");
+            fp_expr(cond, s);
+            fp_block(then, s);
+            fp_else(else_.as_deref(), s);
+            s.push(']');
+        }
+        StmtKind::While { cond, body } => {
+            s.push_str("while[");
+            fp_expr(cond, s);
+            fp_block(body, s);
+            s.push(']');
+        }
+        StmtKind::Loop { body, label } => {
+            s.push_str(&format!("loop[{}", label.clone().unwrap_or_default()));
+            fp_block(body, s);
+            s.push(']');
+        }
+        StmtKind::For { pat, iter, body, label } => {
+            s.push_str(&format!("for[{}", label.clone().unwrap_or_default()));
+            fp_pat(pat, s);
+            fp_expr(iter, s);
+            fp_block(body, s);
+            s.push(']');
+        }
+        StmtKind::Match { scrut, arms } => {
+            s.push_str("match[");
+            fp_expr(scrut, s);
+            for a in arms {
+                fp_pat(&a.pat, s);
+                if let Some(g) = &a.guard {
+                    fp_expr(g, s);
+                }
+                match &a.body {
+                    ArmBody::Expr(x) => fp_expr(x, s),
+                    ArmBody::Block(b) => fp_block(b, s),
+                }
+            }
+            s.push(']');
+        }
+        StmtKind::Break { label, value } => {
+            s.push_str(&format!("brk{}", label.clone().unwrap_or_default()));
+            if let Some(v) = value {
+                fp_expr(v, s);
+            }
+        }
+        StmtKind::Continue { label } => {
+            s.push_str(&format!("cont{}", label.clone().unwrap_or_default()));
+        }
+        StmtKind::Return { value } => {
+            s.push_str("ret");
+            if let Some(v) = value {
+                fp_expr(v, s);
+            }
+        }
+        StmtKind::Unsafe(b) => {
+            s.push_str("unsafe");
+            fp_block(b, s);
+        }
+        StmtKind::Defer(b) => {
+            s.push_str("defer");
+            fp_block(b, s);
+        }
+        StmtKind::ConstAssert { cond, msg } => {
+            s.push_str("cassert[");
+            fp_expr(cond, s);
+            s.push_str(&format!("{}]", msg.clone().unwrap_or_default()));
+        }
+        StmtKind::Label { name, .. } => s.push_str(&format!("label{name}")),
+        StmtKind::Pause => s.push_str("pause"),
+        StmtKind::Stop => s.push_str("stop"),
+        StmtKind::Resume => s.push_str("resume"),
+        StmtKind::NestedItem(it) => {
+            s.push_str("nested");
+            fp_item(it, s);
+        }
+    }
+    s.push('}');
+}
+
+fn fp_else(e: Option<&ElseBranch>, s: &mut String) {
+    match e {
+        None => s.push_str("noelse"),
+        Some(ElseBranch::Block(b)) => {
+            s.push_str("else-b[");
+            fp_block(b, s);
+            s.push(']');
+        }
+        Some(ElseBranch::If(st)) => {
+            s.push_str("else-i[");
+            fp_stmt(st, s);
+            s.push(']');
+        }
+    }
+}
+
+fn fp_linkage(ls: &LinkageStmt, s: &mut String) {
+    s.push_str("L[");
+    match ls {
+        LinkageStmt::Goto(g) => match g {
+            GotoTarget::Named(n) => s.push_str(&format!("g{n}")),
+            GotoTarget::Abs(i) => s.push_str(&format!("gA{i}")),
+            GotoTarget::Rel(r) => s.push_str(&format!("gR{r}")),
+        },
+        LinkageStmt::Start { chain, node, .. } => {
+            s.push_str(&format!("start{chain}"));
+            match node {
+                Some(StartNode::Index(i)) => s.push_str(&format!("N{i}")),
+                Some(StartNode::Anchor(a)) => s.push_str(&format!("A{a}")),
+                Some(StartNode::Ident(i)) => s.push_str(&format!("I{i}")),
+                None => s.push('_'),
+            }
+        }
+        LinkageStmt::StartFlag => s.push_str("start_flag"),
+        LinkageStmt::Pause => s.push_str("pause"),
+        LinkageStmt::Stop => s.push_str("stop"),
+        LinkageStmt::Resume => s.push_str("resume"),
+        LinkageStmt::If { cond, then, else_ } => {
+            s.push_str("if[");
+            fp_expr(cond, s);
+            for x in then {
+                fp_linkage(x, s);
+            }
+            if let Some(e) = else_ {
+                s.push_str("else[");
+                for x in e {
+                    fp_linkage(x, s);
+                }
+                s.push(']');
+            }
+            s.push(']');
+        }
+        LinkageStmt::Plain(st) => {
+            s.push_str("plain[");
+            fp_stmt(st, s);
+            s.push(']');
+        }
+    }
+    s.push(']');
+}
+
+fn fp_field(f: &Field, s: &mut String) {
+    s.push_str("F[");
+    fp_vis(&f.vis, s);
+    for a in &f.attrs {
+        fp_attr(a, s);
+    }
+    s.push_str(&f.name);
+    s.push(':');
+    fp_type(&f.ty, s);
+    s.push(']');
+}
+
+fn fp_variant(v: &Variant, s: &mut String) {
+    s.push_str("V[");
+    for a in &v.attrs {
+        fp_attr(a, s);
+    }
+    s.push_str(&v.name);
+    for (vis, t) in &v.tuple {
+        fp_vis(vis, s);
+        fp_type(t, s);
+    }
+    for f in &v.struct_fields {
+        fp_field(f, s);
+    }
+    if let Some(d) = v.disc {
+        s.push_str(&format!("={d}"));
+    }
+    s.push(']');
+}
+
+fn fp_item(it: &Item, s: &mut String) {
+    s.push_str("I{");
+    fp_vis(&it.vis, s);
+    for a in &it.attrs {
+        fp_attr(a, s);
+    }
+    match &it.kind {
+        ItemKind::Event { sig, body } => {
+            s.push_str("event");
+            fp_sig(sig, s);
+            fp_body(body, s);
+        }
+        ItemKind::Fn { sig, body } => {
+            s.push_str("fn");
+            fp_sig(sig, s);
+            fp_body(body, s);
+        }
+        ItemKind::Struct { name, generics, fields, tuple, where_preds } => {
+            s.push_str(&format!("struct{name}"));
+            for g in generics {
+                fp_generic(g, s);
+            }
+            for (vis, t) in tuple {
+                fp_vis(vis, s);
+                fp_type(t, s);
+            }
+            for f in fields {
+                fp_field(f, s);
+            }
+            for w in where_preds {
+                fp_type(&w.ty, s);
+                for b in &w.bounds {
+                    fp_bound(b, s);
+                }
+            }
+        }
+        ItemKind::Enum { name, generics, variants, where_preds } => {
+            s.push_str(&format!("enum{name}"));
+            for g in generics {
+                fp_generic(g, s);
+            }
+            for v in variants {
+                fp_variant(v, s);
+            }
+            for w in where_preds {
+                fp_type(&w.ty, s);
+                for b in &w.bounds {
+                    fp_bound(b, s);
+                }
+            }
+        }
+        ItemKind::Union { name, generics, fields } => {
+            s.push_str(&format!("union{name}"));
+            for g in generics {
+                fp_generic(g, s);
+            }
+            for f in fields {
+                fp_field(f, s);
+            }
+        }
+        ItemKind::Trait { name, generics, is_unsafe, items } => {
+            s.push_str(&format!("trait{name}u{is_unsafe}"));
+            for g in generics {
+                fp_generic(g, s);
+            }
+            for i in items {
+                fp_item(i, s);
+            }
+        }
+        ItemKind::Impl { generics, trait_, trait_args, self_ty, items } => {
+            s.push_str("impl");
+            for g in generics {
+                fp_generic(g, s);
+            }
+            if let Some(p) = trait_ {
+                s.push_str(&format!("for-{}", p.join("::")));
+                for a in trait_args {
+                    fp_type(a, s);
+                }
+            }
+            fp_type(self_ty, s);
+            for i in items {
+                fp_item(i, s);
+            }
+        }
+        ItemKind::TypeAlias { name, generics, ty } => {
+            s.push_str(&format!("alias{name}"));
+            for g in generics {
+                fp_generic(g, s);
+            }
+            fp_type(ty, s);
+        }
+        ItemKind::ExternBlock { abi, decls } => {
+            s.push_str(&format!("extern{}", abi.clone().unwrap_or_default()));
+            for d in decls {
+                fp_item(d, s);
+            }
+        }
+        ItemKind::Const { name, ty, init, .. } => {
+            s.push_str(&format!("const{name}"));
+            if let Some(t) = ty {
+                fp_type(t, s);
+            }
+            if let Some(i) = init {
+                fp_expr(i, s);
+            }
+        }
+        ItemKind::Static { name, ty, init, is_mut, .. } => {
+            s.push_str(&format!("static{is_mut}{name}"));
+            if let Some(t) = ty {
+                fp_type(t, s);
+            }
+            if let Some(i) = init {
+                fp_expr(i, s);
+            }
+        }
+        ItemKind::MacroRules { name, arms } => {
+            s.push_str(&format!("macro{name}"));
+            for a in arms {
+                s.push_str("arm[");
+                fp_trees(&a.matcher, s);
+                s.push('>');
+                fp_trees(&a.expander, s);
+                match a.separator {
+                    Some(p) => s.push_str(punct_text(p)),
+                    None => s.push('_'),
+                }
+                s.push(']');
+            }
+        }
+        ItemKind::Chain { name, stmts, .. } => {
+            s.push_str(&format!("chain{name}"));
+            for st in stmts {
+                fp_stmt(st, s);
+            }
+        }
+        ItemKind::Mod { name } => s.push_str(&format!("mod{name}")),
+    }
+    s.push('}');
+}
+
 
 
 
@@ -3659,8 +4160,7 @@ impl<'a> Printer<'a> {
             v.push(self.ty_doc(t));
         }
         if let Some(i) = init {
-            v.push(Doc::Text(" =".to_string()));
-            v.push(self.value_doc(i, 2));
+            v.push(self.assign_tail(" =", i));
         }
         v.push(Doc::Text(";".to_string()));
         Doc::Cat(v)
@@ -3680,10 +4180,7 @@ impl<'a> Printer<'a> {
         v.push(self.where_doc(&sig.where_preds));
         v.push(Doc::Text(" ".to_string()));
         match body {
-            Body::Block(b) => {
-                let _ = b;
-                v.push(self.block_doc_ref(b));
-            }
+            Body::Block(b) => v.push(self.block_doc(b)),
             Body::Embed(e) => v.push(self.embed_doc(e)),
             Body::Foreign => v.push(Doc::Text(";".to_string())),
         }
@@ -3704,8 +4201,7 @@ impl<'a> Printer<'a> {
         v.push(Doc::Text(": ".to_string()));
         v.push(self.ty_doc(&p.ty));
         if let Some(d) = &p.default {
-            v.push(Doc::Text(" =".to_string()));
-            v.push(self.value_doc(d, 2));
+            v.push(self.assign_tail(" =", d));
         }
         Doc::Cat(v)
     }
@@ -3815,16 +4311,18 @@ impl<'a> Printer<'a> {
         let mut v: Vec<Doc> = Vec::new();
         v.push(Doc::Text(format!("@{}", e.lang)));
         if !e.args.is_empty() {
-            let items: Vec<Doc> = e
-                .args
-                .iter()
-                .map(|a| {
-                    Doc::Cat(vec![
+            let chunks = self.embed_arg_chunks(&e.args);
+            let mut items: Vec<Doc> = Vec::new();
+            for (chunk, a) in chunks.into_iter().zip(e.args.iter()) {
+                let d = match chunk {
+                    Some(text) => Doc::Text(format!("{} = {}", a.name, text)),
+                    None => Doc::Cat(vec![
                         Doc::Text(format!("{} = ", a.name)),
-                        self.expr_doc(&a.value, 2),
-                    ])
-                })
-                .collect();
+                        self.expr_doc_no_source(&a.value),
+                    ]),
+                };
+                items.push(d);
+            }
             v.push(delimited("(", items, ")", INDENT, false));
         }
         // §2.11 + §9.5 rule 2: the body is lexically opaque. Only the block's own first line is
@@ -3891,7 +4389,8 @@ fn delimited(open: &str, items: Vec<Doc>, close: &str, indent: usize, pad: bool)
         return text(&format!("{open}{close}"));
     }
     let pad_doc = if pad { Doc::Line } else { Doc::SoftLine };
-    let sep = if pad { Doc::Line } else { Doc::SoftLine };
+    // The separator is always a `Line`: flat gives ", ", broken gives "," then the newline.
+    let sep = Doc::Line;
     let mut inner = vec![pad_doc.clone()];
     for (i, it) in items.into_iter().enumerate() {
         if i > 0 {
@@ -4268,3 +4767,482 @@ pub fn derive_host_prefix(file: &ParsedFile) -> String {
     best
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Format `text` and return `(output, diagnostic codes)`.
+    fn run(text: &str, path: &str) -> (Option<String>, Vec<String>) {
+        run_w(text, path, &FmtOptions::default())
+    }
+
+    fn run_w(text: &str, path: &str, opts: &FmtOptions) -> (Option<String>, Vec<String>) {
+        let mut sources = Sources::default();
+        let f = sources.add(path.to_string(), text.to_string());
+        let mut h = Handler::default();
+        let out = format_file(&sources, f, &mut h, opts);
+        (out, h.diags.iter().map(|d| d.code.clone()).collect())
+    }
+
+    /// The canonical bytes of `text`, asserting the two self-checks stayed silent.
+    fn canon(text: &str) -> String {
+        let (out, codes) = run(text, "t/a.infy");
+        assert!(codes.is_empty(), "diagnostics {codes:?} for input:\n{text}");
+        out.unwrap_or_default()
+    }
+
+    /// Rule 12: fmt(fmt(x)) == fmt(x). Rule 13: the fingerprint survives.
+    fn idempotent(text: &str) -> String {
+        let first = canon(text);
+        let (second, codes) = run(&first, "t/a.infy");
+        assert!(codes.is_empty(), "diagnostics {codes:?} on the second pass");
+        assert_eq!(first, second.clone().unwrap_or_default(), "not idempotent");
+        let mut s1 = Sources::default();
+        let a = s1.add("t/a.infy".to_string(), text.to_string());
+        let mut s2 = Sources::default();
+        let b = s2.add("t/a.infy".to_string(), first.clone());
+        let mut h1 = Handler::default();
+        let l1 = lexer::lex_file(&s1, a, &mut h1);
+        let p1 = parser::parse(&s1, a, &l1, &mut h1);
+        let mut h2 = Handler::default();
+        let l2 = lexer::lex_file(&s2, b, &mut h2);
+        let p2 = parser::parse(&s2, b, &l2, &mut h2);
+        assert_eq!(
+            ast_fingerprint(&p1),
+            ast_fingerprint(&p2),
+            "AST changed by formatting\n--- input ---\n{text}\n--- output ---\n{first}"
+        );
+        first
+    }
+
+    fn hdr(body: &str) -> String {
+        format!("package t\n\n{body}")
+    }
+
+    // ---------------------------------------------------------------------------- rule 1: columns
+
+    #[test]
+    fn width_cjk_is_two_columns() {
+        // 50 Chinese characters are 100 columns (§9.5 rule 1).
+        let s: String = "语".repeat(50);
+        assert_eq!(display_width(&s), 100);
+        assert_eq!(display_width("语"), 2);
+        assert_eq!(display_width("a"), 1);
+        assert_eq!(display_width("アウ"), 4); // katakana
+        assert_eq!(display_width("한글"), 4); // hangul syllables
+        assert_eq!(display_width("，。"), 4); // CJK punctuation U+3000..
+        assert_eq!(display_width("ＡＢ"), 4); // fullwidth forms U+FF00..FF60
+    }
+
+    #[test]
+    fn width_combining_and_emoji_are_clusters() {
+        assert_eq!(display_width("e\u{301}"), 1); // one grapheme cluster
+        assert_eq!(display_width("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"), 2); // family emoji
+        assert_eq!(display_width("\u{1F1F0}\u{1F1FF}"), 2); // one regional-indicator pair
+        assert_eq!(display_width("a\u{FE0F}"), 1); // variation selector is zero width
+    }
+
+    #[test]
+    fn width_unicode_table_is_declared() {
+        assert_eq!(crate::VERSION.unicode_data, "Unicode 16.0.0");
+        assert!(is_wide_or_fullwidth('语'));
+        assert!(!is_wide_or_fullwidth('a'));
+    }
+
+    #[test]
+    fn cjk_arguments_break_at_one_hundred_columns() {
+        // 50 CJK characters are 100 columns, so a list of them must be considered over the 100
+        // column soft limit once the surrounding syntax is counted (§9.5 rule 1 + rule 4).
+        let cjk: String = "语".repeat(50);
+        assert_eq!(display_width(&cjk), 100);
+        let src = format!("package t\n\nfn f() {{\n    g({cjk});\n}}\n");
+        let out = idempotent(&src);
+        assert!(out.contains("    g(\n"), "CJK width was measured as 50 columns, not 100:\n{out}");
+    }
+
+    // ---------------------------------------------------------------------------- rule 2: indent
+
+    #[test]
+    fn indent_is_four_spaces_never_tabs() {
+        let out = canon(&hdr("fn f() {\n\tlet x = 1;\n\tx\n}\n"));
+        assert!(!out.contains('\t'), "tabs survive: {out}");
+        assert!(out.contains("    let x = 1;"), "{out}");
+    }
+
+    #[test]
+    fn embed_body_is_verbatim() {
+        let src = "package t\n\nfn f() {\n    @c(name = \"d\") {\n      // \"not a comment\" { }\n        int  x = 1;   \\ backslash\n    }\n}\n";
+        let out = idempotent(src);
+        assert!(out.contains("// \"not a comment\" { }"), "{out}");
+        assert!(out.contains("\\ backslash"), "{out}");
+        assert!(out.contains("int  x = 1;"), "{out}");
+    }
+
+    // ---------------------------------------------------------------------------- rules 3/4/5
+
+    #[test]
+    fn long_chain_breaks_before_every_dot() {
+        let src = hdr("fn f(j: &Job) -> u32 {\n    j.fetch().compile().link().publish().report().finish()\n}\n");
+        let out = idempotent(&src);
+        assert!(out.contains("\n        .compile()"), "{out}");
+        assert!(out.contains("\n        .publish()"), "{out}");
+        assert!(out.contains("        ."), "{out}");
+    }
+
+    #[test]
+    fn question_mark_stays_glued() {
+        let src = hdr("fn f(j: &Job) -> u32 {\n    j.fetch().compile().link().publish().report().finish().await_all()? as u32\n}\n");
+        let out = idempotent(&src);
+        assert!(out.contains("?"), "{out}");
+        assert!(!out.contains("\n        ?"), "? broke onto its own line: {out}");
+    }
+
+    #[test]
+    fn short_chain_collapses_to_one_line() {
+        let src = "package t\n\nfn f(j: &Job) -> u32 {\n    j\n        .fetch()\n        .compile()\n}\n";
+        let out = canon(src);
+        assert_eq!(out, hdr("fn f(j: &Job) -> u32 {\n    j.fetch().compile()\n}\n"));
+    }
+
+    #[test]
+    fn multiline_args_collapse_when_they_fit() {
+        let src = "package t\n\nfn f() {\n    g(\n        1,\n        2,\n    );\n}\n";
+        let out = canon(src);
+        assert_eq!(out, hdr("fn f() {\n    g(1, 2);\n}\n"));
+    }
+
+    #[test]
+    fn trailing_comma_only_when_multi_line() {
+        let one = hdr("fn f() {\n    g(1, 2);\n}\n");
+        assert_eq!(canon(&one), one);
+        let many = hdr(&format!(
+            "fn f() {{\n    g({}, 22334455667788990011223344556677889900112233445566778899001122334455667788990011,\n    );\n}}\n",
+            "1".repeat(0) + "1"
+        ));
+        let _ = many;
+        let long = hdr("fn f() {\n    gaaaaaaaaaaaaaaaaaaaaa(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21);\n}\n");
+        let out = idempotent(&long);
+        assert!(out.contains("    21,\n"), "multi-line list lacks the trailing comma: {out}");
+        let short = hdr("fn f() {\n    g(1, 2);\n}\n");
+        assert!(!canon(&short).contains(", )"), "single-line list has a trailing comma");
+    }
+
+    // ---------------------------------------------------------------------------- rule 6: blank lines
+
+    #[test]
+    fn blank_lines_fold_and_edges_are_clean() {
+        let src = "package t\n\n\n\nfn f() {\n\n    let x = 1;\n\n\n    let y = 2;\n\n}\n";
+        let out = canon(src);
+        assert_eq!(out, "package t\n\nfn f() {\n    let x = 1;\n\n    let y = 2;\n}\n");
+    }
+
+    #[test]
+    fn exactly_one_blank_between_declarations() {
+        let src = "package t\n\nfn a() {}\nfn b() {}\n\n\nfn c() {}\n";
+        let out = canon(src);
+        assert_eq!(out, "package t\n\nfn a() {}\n\nfn b() {}\n\nfn c() {}\n");
+    }
+
+    #[test]
+    fn package_head_has_no_leading_blank_and_one_before_imports() {
+        let src = "\n\npackage t\nimport \"std/io\" as io;\nfn a() {}\n";
+        let out = canon(src);
+        assert_eq!(out, "package t\n\nimport \"std/io\" as io;\n\nfn a() {}\n");
+    }
+
+    // ---------------------------------------------------------------------------- rule 7: imports
+
+    #[test]
+    fn import_groups_sort_and_merge() {
+        let src = "package t\n\nimport \"github.com/acme/ci/util\" as u1;\nimport \"example.com/x\";\nimport \"std/sync\" as sync;\nimport \"github.com/acme/ci/build\" as first;\nimport \"github.com/acme/ci/build\" as last;\nimport \"std/io\";\n\nfn a() {}\n";
+        let out = canon(src);
+        let want = "package t\n\n\
+import \"std/io\";\n\
+import \"std/sync\" as sync;\n\n\
+import \"github.com/acme/ci/build\" as last;\n\
+import \"github.com/acme/ci/util\" as u1;\n\n\
+import \"example.com/x\";\n\n\
+fn a() {}\n";
+        assert_eq!(out, want);
+    }
+
+    // ---------------------------------------------------------------------------- rule 8: comments
+
+    #[test]
+    fn line_comment_gains_a_leading_space() {
+        let src = "package t\n\n//hello\nfn a() {}\n";
+        let out = canon(src);
+        assert!(out.contains("// hello"), "{out}");
+        assert_eq!(out, "package t\n\n// hello\nfn a() {}\n");
+    }
+
+    #[test]
+    fn doc_comment_content_is_untouched() {
+        let src = "package t\n\n///   keeps   spacing   \npub fn a() {}\n";
+        let out = canon(src);
+        assert!(out.contains("///   keeps   spacing   "), "{out}");
+    }
+
+    #[test]
+    fn block_comment_keeps_place_and_bytes() {
+        let src = "package t\n\nfn a() {\n    let x = 1; /* inner   text */\n}\n";
+        let out = idempotent(src);
+        assert!(out.contains("/* inner   text */"), "{out}");
+    }
+
+    #[test]
+    fn build_constraint_is_pinned_to_line_one() {
+        let src = "//infy:build linux\n\n\npackage t\n\nfn a() {}\n";
+        let out = canon(src);
+        assert!(out.starts_with("//infy:build linux\npackage t\n"), "{out}");
+    }
+
+    #[test]
+    fn comments_are_never_dropped() {
+        let src = "package t\n\n// one\nfn a() { // two\n    let x = 1; // three\n    // four\n}\n\n// five\n";
+        let out = canon(src);
+        for c in ["// one", "// two", "// three", "// four", "// five"] {
+            assert!(out.contains(c), "{c} lost:\n{out}");
+        }
+    }
+
+    // ---------------------------------------------------------------------------- rule 9: never rewritten
+
+    #[test]
+    fn literal_underscores_and_escapes_survive() {
+        let src = "package t\n\nfn a() {\n    let x = 1_000;\n    let y = \"a\\tb\";\n    let z = 0xFF_AA;\n}\n";
+        let out = canon(src);
+        assert!(out.contains("1_000"), "{out}");
+        assert!(out.contains("\"a\\tb\""), "{out}");
+        assert!(out.contains("0xFF_AA"), "{out}");
+    }
+
+    // ---------------------------------------------------------------------------- rule 10
+
+    #[test]
+    fn attrs_and_pub_each_get_their_own_line() {
+        let src = "package t\n\n#[inline] #[cold]\npub fn a() {}\n";
+        let out = canon(src);
+        assert_eq!(out, "package t\n\n#[inline]\n#[cold]\npub\nfn a() {}\n");
+    }
+
+    #[test]
+    fn repr_c_stays_on_the_struct() {
+        let src = "package t\n\n#[repr(C)]\npub struct P { pub x: u32 }\n\nimpl P { fn q() {} }\n";
+        let out = idempotent(src);
+        assert!(out.contains("#[repr(C)]\npub\nstruct P"), "{out}");
+        assert!(!out.contains("#[repr(C)]\nimpl"), "repr(C) moved onto the impl: {out}");
+    }
+
+    // ---------------------------------------------------------------------------- rule 11/12/13/14
+
+    #[test]
+    fn empty_file_is_e0090() {
+        let (_, codes) = run("", "t/a.infy");
+        assert_eq!(codes, vec!["E-0090".to_string()]);
+    }
+
+    #[test]
+    fn crlf_becomes_lf_with_w0001() {
+        let src = "package t\r\n\r\nfn a() {}\r\n";
+        let (out, codes) = run(src, "t/a.infy");
+        assert!(codes.contains(&"W-0001".to_string()), "{codes:?}");
+        assert_eq!(out, Some("package t\n\nfn a() {}\n".to_string()));
+    }
+
+    #[test]
+    fn missing_final_lf_is_w0002_and_fixed() {
+        let src = "package t\n\nfn a() {}";
+        let (out, codes) = run(src, "t/a.infy");
+        assert!(codes.contains(&"W-0002".to_string()), "{codes:?}");
+        assert_eq!(out, Some("package t\n\nfn a() {}\n".to_string()));
+    }
+
+    #[test]
+    fn non_infy_files_are_skipped() {
+        let (out, codes) = run("package t\n\nfn a() {}\n", "t/a.txt");
+        assert!(out.is_none());
+        assert!(codes.is_empty(), "{codes:?}");
+        assert!(!is_infy_path("a.txt"));
+        assert!(is_infy_path("dir/a.infy"));
+    }
+
+    #[test]
+    fn output_ends_with_exactly_one_newline() {
+        let out = canon("package t\n\nfn a() {}\n\n\n\n");
+        assert!(out.ends_with("}\n") && !out.ends_with("\n\n"), "{out:?}");
+        assert!(!out.contains('\r'));
+    }
+
+    #[test]
+    fn options_reject_illegal_widths() {
+        assert!(FmtOptions::with_width(80).validate().is_ok());
+        assert!(FmtOptions::with_width(100).validate().is_ok());
+        assert!(FmtOptions::with_width(120).validate().is_ok());
+        assert!(FmtOptions::with_width(99).validate().is_err());
+        assert!(FmtOptions::with_width(0).validate().is_err());
+    }
+
+    #[test]
+    fn idempotence_across_the_three_width_bands() {
+        let src = hdr("fn f(a: u32, b: u32, c: u32) -> u32 {\n    a + b + c\n}\n");
+        for w in LEGAL_WIDTHS {
+            let opts = FmtOptions::with_width(w);
+            let (o1, c1) = run_w(&src, "t/a.infy", &opts);
+            assert!(c1.is_empty(), "{c1:?} at width {w}");
+            let a = o1.clone().unwrap_or_default();
+            let (o2, c2) = run_w(&a, "t/a.infy", &opts);
+            assert!(c2.is_empty(), "{c2:?} at width {w}");
+            assert_eq!(a, o2.unwrap_or_default(), "width {w} not idempotent");
+        }
+    }
+
+    // ---------------------------------------------------------------------------- check / config
+
+    #[test]
+    fn check_reports_canonical_and_dirty() {
+        let good = "package t\n\nfn a() {}\n";
+        let mut s = Sources::default();
+        let f = s.add("t/a.infy".to_string(), good.to_string());
+        let mut h = Handler::default();
+        assert_eq!(check_file(&s, f, &mut h, &FmtOptions::default()), FmtStatus::Canonical);
+        let mut s2 = Sources::default();
+        let f2 = s2.add("t/a.infy".to_string(), "package t\nfn a() {\n        let x=1;\n   }\n".to_string());
+        let mut h2 = Handler::default();
+        assert_eq!(check_file(&s2, f2, &mut h2, &FmtOptions::default()), FmtStatus::NeedsFormatting);
+    }
+
+    #[test]
+    fn check_uses_the_trailing_comma_rule() {
+        let dirty = hdr("fn f() {\n    g(\n        1,\n        2\n    );\n}\n");
+        let mut s = Sources::default();
+        let f = s.add("t/a.infy".to_string(), dirty);
+        let mut h = Handler::default();
+        assert_eq!(check_file(&s, f, &mut h, &FmtOptions::default()), FmtStatus::NeedsFormatting);
+    }
+
+    #[test]
+    fn exclude_glob_skips_the_file() {
+        let opts = FmtOptions { exclude: vec!["gen/**".to_string()], ..FmtOptions::default() };
+        let (out, codes) = run_w("package t\nfn a() {}\n", "gen/x.infy", &opts);
+        assert!(out.is_none());
+        assert!(codes.is_empty());
+        assert!(glob_matches("gen/**", "gen/deep/x.infy"));
+        assert!(!glob_matches("gen/*", "gen/deep/x.infy"));
+    }
+
+    #[test]
+    fn infyfmt_admits_only_two_keys() {
+        let ok = InfyfmtConfig::parse("exclude = [\"gen/**\", \"x.infy\"]\nmax_width = 80\n").unwrap();
+        assert_eq!(ok.max_width, Some(80));
+        assert_eq!(ok.exclude.len(), 2);
+        let bad = InfyfmtConfig::parse("tab_spaces = 4").unwrap_err();
+        assert_eq!(bad.len(), 1);
+        let bad2 = InfyfmtConfig::parse("max_width = 90").unwrap_err();
+        assert!(bad2[0].contains("80/100/120"), "{bad2:?}");
+    }
+
+    // ---------------------------------------------------------------------------- safety / structs
+
+    #[test]
+    fn safety_comment_above_unsafe_is_clean() {
+        let src = hdr("fn f() {\n    // infy-safety: p is non-null\n    unsafe { g() };\n}\n");
+        let (_, codes) = run(&src, "t/a.infy");
+        assert!(!codes.contains(&"W-1030".to_string()), "{codes:?}");
+    }
+
+    #[test]
+    fn stray_safety_comment_is_w1030() {
+        let src = hdr("fn f() {\n    // infy-safety: nothing here\n    let x = 1;\n    unsafe { g() };\n}\n");
+        let (_, codes) = run(&src, "t/a.infy");
+        assert!(codes.contains(&"W-1030".to_string()), "{codes:?}");
+    }
+
+    // ---------------------------------------------------------------------------- corpus
+
+    fn corpus() -> Vec<(String, String)> {
+        let v: Vec<(&str, &str)> = vec![
+            ("empty-ish", "package t\n"),
+            ("fn", "package t\n\nfn a() {}\n"),
+            ("struct", "package t\n\npub struct J {\n    pub id: u32,\n    pub src: String,\n}\n"),
+            ("enum", "package t\n\npub enum Why { A, B(u32), C { x: u32 } }\n"),
+            ("trait+impl", "package t\n\npub trait Run {\n    fn run(&mut self) -> u32;\n}\n\nimpl Run for J {\n    fn run(&mut self) -> u32 { 0 }\n}\n"),
+            ("match", "package t\n\nfn d(j: &J) -> String {\n    match (j.phase) {\n        Phase::Fetch => \"a\",\n        Phase::Compile => \"b\",\n    }\n}\n"),
+            ("chain", "package t\n\nchain P {\n    label begin:\n    spawn();\n    {\n        goto(\"begin\");\n    }\n}\n"),
+            ("embed", "package t\n\nfn n(b: &[f32]) {\n    @py(timeout_ms = 5_000) {\n        if b == 0:\n            raise ValueError(\"x\")\n    }\n}\n"),
+            ("unsafe", "package t\n\nfn o(p: &str) -> u32 {\n    // infy-safety: p outlives the call\n    unsafe { dec(p) }\n}\n"),
+            ("generics", "package t\n\nfn f<T: Clone + Debug>(x: T) -> T\n    where\n        T: Default,\n{\n    x\n}\n"),
+            ("closure", "package t\n\nfn f() { let g = |a: u32| -> u32 { a + 1 }; }\n"),
+            ("comments-everywhere", "package t\n\n// head\nfn a() { // inline\n    let x = 1; // tail\n}\n// foot\n"),
+            ("long-args", "fn f() {\n    build::run_one(alpha, beta, gamma, delta, epsilon, zeta, eta, theta, iota, kappa, lambda, mu, nu);\n}\n"),
+            ("wide-literal", "fn f() {\n    let s = \"一段很长的中文字符串用来测试格式化器的换行行为是否稳定并且不会产生二义性结果是的这里\";\n}\n"),
+            ("extern", "package t\n\nextern \"C\" {\n    fn dec_open(p: *const u8) -> *mut u8;\n}\n"),
+            ("const", "package t\n\npub const MAX: u32 = 1_024;\n\npub static mut CUR: u32 = 0;\n"),
+            ("macro", "package t\n\nmacro_rules! v {\n    ($($x:expr),*) => { [ $x ] };\n}\n"),
+            ("attrs-order", "package t\n\n#[derive(Debug)]\n#[repr(C)]\npub struct P { pub a: u32 }\n"),
+            ("nested-if", "fn f() {\n    if (a) { b(); } else if (c) { d(); } else { e(); }\n}\n"),
+            ("try-chain", "fn f(j: &J) -> u32 {\n    let n = j.pull()?.compile()?.link()?;\n    n\n}\n"),
+            ("for/while", "fn f(n: u32) {\n    let i = 0;\n    while (i < n) { i += 1; }\n    for x in items { use(x); }\n}\n"),
+            ("defer", "fn f() {\n    let g = lock();\n    defer { g.release(); }\n}\n"),
+        ];
+        v.into_iter()
+            .map(|(n, b)| {
+                let body = if b.starts_with("package") { b.to_string() } else { hdr(b) };
+                (n.to_string(), body)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn corpus_is_idempotent_and_ast_stable() {
+        for (name, src) in corpus() {
+            let _ = idempotent_with(&name, &src);
+        }
+    }
+
+    fn idempotent_with(name: &str, text: &str) -> String {
+        let first = {
+            let (out, codes) = run(text, "t/a.infy");
+            assert!(codes.is_empty(), "[{name}] diagnostics {codes:?} on input:\n{text}\n--- got ---\n{:?}", out);
+            out.unwrap_or_default()
+        };
+        let (second, codes2) = run(&first, "t/a.infy");
+        assert!(codes2.is_empty(), "[{name}] diagnostics {codes2:?} on the second pass:\n{first}");
+        assert_eq!(first, second.unwrap_or_default(), "[{name}] not idempotent");
+        first
+    }
+
+    #[test]
+    fn corpus_keeps_every_comment() {
+        for (name, src) in corpus() {
+            let mut s = Sources::default();
+            let a = s.add("t/a.infy".to_string(), src.clone());
+            let mut h = Handler::default();
+            let l = lexer::lex_file(&s, a, &mut h);
+            let before: Vec<String> = l.comments.iter().map(|c| c.text.trim().to_string()).filter(|t| !t.is_empty()).collect();
+            let out = idempotent_with(&name, &src);
+            let mut s2 = Sources::default();
+            let b = s2.add("t/a.infy".to_string(), out.clone());
+            let mut h2 = Handler::default();
+            let l2 = lexer::lex_file(&s2, b, &mut h2);
+            let after: Vec<String> = l2.comments.iter().map(|c| c.text.trim().to_string()).filter(|t| !t.is_empty()).collect();
+            assert_eq!(before, after, "[{name}] comments changed count/order");
+        }
+    }
+
+    #[test]
+    fn corpus_is_clean_under_all_three_widths() {
+        for (name, src) in corpus() {
+            for w in LEGAL_WIDTHS {
+                let opts = FmtOptions::with_width(w);
+                let (o1, c1) = run_w(&src, "t/a.infy", &opts);
+                assert!(c1.is_empty(), "[{name}@{w}] {c1:?}");
+                let a = o1.unwrap_or_default();
+                let (o2, c2) = run_w(&a, "t/a.infy", &opts);
+                assert!(c2.is_empty(), "[{name}@{w}] second pass {c2:?}");
+                assert_eq!(a, o2.unwrap_or_default(), "[{name}@{w}] not idempotent");
+            }
+        }
+    }
+}
