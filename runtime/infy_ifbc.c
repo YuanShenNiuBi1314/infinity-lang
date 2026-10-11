@@ -425,9 +425,12 @@ void infy_ifbc_bind_host(InfyIfbcModule* m, uint32_t import_idx, InfyHostThunk f
 }
 
 /* =========================================================================== diagnostics */
-typedef struct { uint16_t code; uint32_t func_idx; uint32_t off; char msg[160]; } Finding;
+/* A Finding carries a `warn` level so the line-map notice (displayed as W-0705) can share the
+ * numeric code 0x0705 with the blocking error R_IFBC_STACK without first_error_code confusing
+ * them: R- and W- diagnostics reuse the same 4-digit number, only the letter differs. */
+typedef struct { uint16_t code; uint32_t func_idx; uint32_t off; uint8_t warn; char msg[160]; } Finding;
 typedef struct { Finding* v; uint32_t n, cap; } Findings;
-static void findings_add(Findings* f, uint16_t code, uint32_t fi, uint32_t off, const char* fmt, ...) {
+static void findings_push(Findings* f, uint16_t code, uint32_t fi, uint32_t off, uint8_t warn, const char* msg) {
     if (f->n == f->cap) {
         uint32_t nc = f->cap ? f->cap * 2 : 16;
         Finding* nv = (Finding*)realloc(f->v, nc * sizeof(Finding));
@@ -435,10 +438,17 @@ static void findings_add(Findings* f, uint16_t code, uint32_t fi, uint32_t off, 
         f->v = nv; f->cap = nc;
     }
     Finding* e = &f->v[f->n++];
-    e->code = code; e->func_idx = fi; e->off = off;
-    va_list ap; va_start(ap, fmt);
-    vsnprintf(e->msg, sizeof e->msg, fmt, ap);
-    va_end(ap);
+    e->code = code; e->func_idx = fi; e->off = off; e->warn = warn;
+    strncpy(e->msg, msg, sizeof e->msg - 1);
+    e->msg[sizeof e->msg - 1] = 0;
+}
+static void findings_add(Findings* f, uint16_t code, uint32_t fi, uint32_t off, const char* fmt, ...) {
+    char tmp[160]; va_list ap; va_start(ap, fmt); vsnprintf(tmp, sizeof tmp, fmt, ap); va_end(ap);
+    findings_push(f, code, fi, off, 0, tmp);
+}
+static void findings_warn(Findings* f, uint16_t code, uint32_t fi, uint32_t off, const char* fmt, ...) {
+    char tmp[160]; va_list ap; va_start(ap, fmt); vsnprintf(tmp, sizeof tmp, fmt, ap); va_end(ap);
+    findings_push(f, code, fi, off, 1, tmp);
 }
 
 /* =========================================================================== validation */
@@ -772,21 +782,20 @@ static int check_boundary(const struct InfyIfbcModule* m, uint32_t fi, const uin
 /* validation 6 (line-map completeness) -> W-0705, non-blocking. Every executable instruction
  * boundary must be covered by a line_map entry. */
 static int check_linemap(const struct InfyIfbcModule* m, uint32_t fi, const uint32_t* b, uint32_t nb, Findings* rep) {
-    if (m->n_lines == 0) { findings_add(rep, IFBC_W_LINEMAP, fi, m->funcs[fi].code_off, "no line_map: %u instructions uncovered", nb); return 0; }
+    if (m->n_lines == 0) { findings_warn(rep, IFBC_W_LINEMAP, fi, m->funcs[fi].code_off, "no line_map: %u instructions uncovered", nb); return 0; }
     for (uint32_t i = 0; i < nb; i++) {
         int covered = 0;
         for (uint32_t k = 0; k < m->n_lines; k++) if (m->lines[k].off == b[i]) { covered = 1; break; }
-        if (!covered) { findings_add(rep, IFBC_W_LINEMAP, fi, b[i], "instruction at 0x%X has no line_map entry", b[i]); break; /* report once per function */ }
+        if (!covered) { findings_warn(rep, IFBC_W_LINEMAP, fi, b[i], "instruction at 0x%X has no line_map entry", b[i]); break; /* report once per function */ }
     }
     return 0;
 }
 
-/* first code (by validation order) among findings; ignore warnings. */
+/* first code (by validation order) among findings; warnings (W-) never block. */
 static uint16_t first_error_code(const Findings* rep) {
     for (uint32_t i = 0; i < rep->n; i++) {
-        uint16_t c = rep->v[i].code;
-        if (c == IFBC_W_LINEMAP) continue;
-        return c;
+        if (rep->v[i].warn) continue;
+        return rep->v[i].code;
     }
     return 0;
 }
@@ -795,7 +804,7 @@ static void write_findings(FILE* report, const Findings* rep) {
     if (!report) return;
     for (uint32_t i = 0; i < rep->n; i++) {
         const Finding* e = &rep->v[i];
-        const char* lvl = (e->code == IFBC_W_LINEMAP) ? "W" : "R";
+        const char* lvl = e->warn ? "W" : "R";
         fprintf(report, "%s-%04X func[%u] @0x%X: %s\n", lvl, e->code, e->func_idx, e->off, e->msg);
     }
     fflush(report);
@@ -838,18 +847,18 @@ int infy_ifbc_load(const uint8_t* image, uint64_t len, InfyIfbcModule** out, uin
         check_linemap(m, fi, b, nb, &local);
     collect:
         free(b);
-        /* merge: append and possibly decide reject */
-        for (uint32_t i = 0; i < local.n; i++) findings_add(&rep, local.v[i].code, local.v[i].func_idx, local.v[i].off, "%s", local.v[i].msg);
+        /* merge: append preserving warn level, and possibly decide reject */
+        for (uint32_t i = 0; i < local.n; i++) findings_push(&rep, local.v[i].code, local.v[i].func_idx, local.v[i].off, local.v[i].warn, local.v[i].msg);
         free(local.v);
         uint16_t e = first_error_code(&rep);
         if (e && !all_errors) reject = e;    /* first-failure rejects the whole module */
     }
 
     if (all_errors && report) write_findings(report, &rep);
-    else if (!all_errors) { /* keep only the first failing function's messages in default mode */
+    else if (!all_errors && report) { /* default mode: emit only the first blocking finding */
         for (uint32_t i = 0; i < rep.n; i++) {
-            if (rep.v[i].code == IFBC_W_LINEMAP) continue;
-            if (report) write_findings(report, &(Findings){ &rep.v[i], 1, 1 });
+            if (rep.v[i].warn) continue;
+            write_findings(report, &(Findings){ &rep.v[i], 1, 1 });
             break;
         }
     }

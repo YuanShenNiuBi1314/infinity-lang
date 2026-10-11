@@ -3295,6 +3295,42 @@ mod tests {
     // -- stream shape / recovery ---------------------------------------------------------------
 
     #[test]
+    fn never_panics_on_arbitrary_fragments() {
+        // Every unterminated / half-written construct must degrade into diagnostics, not a panic.
+        let fragments = [
+            "/*", "\"", "r#", "r##\"", "b\"", "c\"", "'", "'\\", "\\", "@", "@py(", "@py{",
+            "@forth", "..", "<<=", "\u{200b}", "\u{feff}", "漢", "$", "#![", "](", "0x", "0b_",
+            "1.", "1._", "1e", "1e_", "123abc", "1__0", "\"\\", "\"\\u{", "\"\\x", "\'", "r\"",
+            "///", "//infy:build", "\u{a0}", "`", "\u{202e}/*",
+        ];
+        for a in fragments {
+            for b in fragments {
+                let src = format!("{a}{b}\n");
+                let (lx, _c) = lex_raw(&src);
+                assert!(lx.toks.last().map(|t| t.is_eof()).unwrap_or(false), "{src:?}");
+                let (ts, n) = build_token_tree(&lx.toks);
+                assert!(n <= lx.toks.len(), "{src:?}: {n} > {}", lx.toks.len());
+                let _ = ts;
+            }
+        }
+    }
+
+    #[test]
+    fn hash_bang_without_bracket_is_not_an_attribute() {
+        // only `#![` opens an inner attribute; a shebang elsewhere is `#` + `!`
+        let ks = kinds("fn f() {}\n#!/bin/sh\n");
+        assert_eq!(ks[8], pu(Punct::Hash));
+        assert_eq!(ks[9], pu(Punct::Bang));
+    }
+
+    #[test]
+    fn crlf_at_eof_still_warns_about_both() {
+        let (_lx, c) = lex_raw("package a\r\n");
+        assert!(c.iter().any(|x| x.as_str() == "W-0001"), "{c:?}");
+        assert!(!c.iter().any(|x| x.as_str() == "W-0002"), "{c:?}");
+    }
+
+    #[test]
     fn stream_always_ends_with_eof_and_recovers_after_errors() {
         let lx = lex("fn f( { }\n").0;
         assert!(lx.toks.last().map(|t| t.is_eof()).unwrap_or(false));
@@ -3590,7 +3626,6 @@ fn bench_open(b: &mut test::Bench) {
             .windows(2)
             .any(|w| w[0] == id("fmt") && w[1] == pu(Punct::Bang));
         assert!(bang_after_fmt, "`fmt!` must lex as Ident + Bang");
-        assert!(!ks.iter().any(|k| *k == kw(Kw::Fn) && false));
         let lx = clean(TOUR_14_2);
         assert_eq!(
             lx.toks.iter().filter(|t| t.kind == Kind::AttrOpen { inner: false }).count(),

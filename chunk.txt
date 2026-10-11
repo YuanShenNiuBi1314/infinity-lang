@@ -1,0 +1,278 @@
+    fn field_nodes(&mut self, fields: &[Field]) -> Vec<NodeSpec> {
+        let mut out = Vec::with_capacity(fields.len());
+        for f in fields {
+            let mut v: Vec<Doc> = Vec::new();
+            for a in &f.attrs {
+                let d = self.attr_doc(a);
+                if !is_empty_doc(&d) {
+                    v.push(d);
+                    v.push(Doc::HardLine);
+                }
+            }
+            let pre = vis_text(&f.vis);
+            v.push(Doc::Cat(vec![
+                Doc::Text(format!("{pre}{}: ", f.name)),
+                self.ty_doc(&f.ty),
+            ]));
+            out.push(NodeSpec { start: f.span.start, end: f.span.end, doc: Doc::Cat(v) });
+        }
+        out
+    }
+
+    fn variant_doc(&mut self, var: &Variant) -> Doc {
+        let mut v: Vec<Doc> = Vec::new();
+        for a in &var.attrs {
+            let d = self.attr_doc(a);
+            if !is_empty_doc(&d) {
+                v.push(d);
+                v.push(Doc::HardLine);
+            }
+        }
+        v.push(Doc::Text(var.name.clone()));
+        if !var.tuple.is_empty() {
+            let items: Vec<Doc> = var
+                .tuple
+                .iter()
+                .map(|(vis, ty)| {
+                    let pre = vis_text(vis);
+                    Doc::Cat(vec![Doc::Text(pre), self.ty_doc(ty)])
+                })
+                .collect();
+            v.push(delimited("(", items, ")", INDENT, false));
+        } else if !var.struct_fields.is_empty() {
+            let nodes = self.field_nodes(&var.struct_fields);
+            let end = var.struct_fields.last().map(|f| f.span.end).unwrap_or(var.span.end);
+            let list = self.list_doc(nodes, end, ListMode::Fields);
+            v.push(Doc::Cat(vec![Doc::Text(" ".to_string()), braces(list)]));
+        }
+        if let Some(d) = var.disc {
+            v.push(Doc::Text(format!(" = {d}")));
+        }
+        Doc::Cat(v)
+    }
+
+    fn const_like_doc(&mut self, kw: &str, name: &str, ty: &Option<Type>, init: &Option<Expr>, _semi: bool) -> Doc {
+        let mut v = vec![Doc::Text(format!("{kw} {name}"))];
+        if let Some(t) = ty {
+            v.push(Doc::Text(": ".to_string()));
+            v.push(self.ty_doc(t));
+        }
+        if let Some(i) = init {
+            v.push(Doc::Text(" =".to_string()));
+            v.push(self.value_doc(i, 2));
+        }
+        v.push(Doc::Text(";".to_string()));
+        Doc::Cat(v)
+    }
+
+    fn fn_like_doc(&mut self, kw: &str, sig: &FnSig, body: &Body, attrs: &[Attr]) -> Doc {
+        let leading_unsafe = sig.is_unsafe
+            || attrs.iter().any(|a| a.path.len() == 1 && a.path[0] == "unsafe");
+        let head = if leading_unsafe { format!("unsafe {kw}") } else { kw.to_string() };
+        let mut v = vec![Doc::Text(format!("{head} {}", sig.name)), self.generics_doc(&sig.generics)];
+        let params: Vec<Doc> = sig.params.iter().map(|p| self.param_doc(p)).collect();
+        v.push(delimited("(", params, ")", INDENT, false));
+        if let Some(r) = &sig.ret {
+            v.push(Doc::Text(" -> ".to_string()));
+            v.push(self.ty_doc(r));
+        }
+        v.push(self.where_doc(&sig.where_preds));
+        v.push(Doc::Text(" ".to_string()));
+        match body {
+            Body::Block(b) => {
+                let _ = b;
+                v.push(self.block_doc_ref(b));
+            }
+            Body::Embed(e) => v.push(self.embed_doc(e)),
+            Body::Foreign => v.push(Doc::Text(";".to_string())),
+        }
+        Doc::Cat(v)
+    }
+
+    fn param_doc(&mut self, p: &Param) -> Doc {
+        let mut s = String::new();
+        if p.mutable {
+            s.push_str("mut ");
+        }
+        if p.name == "self" {
+            // Receiver shorthand (§4.14): the parser rebuilt it as a `Self` reference type.
+            return self.receiver_doc(p);
+        }
+        s.push_str(&p.name);
+        let mut v = vec![Doc::Text(s)];
+        v.push(Doc::Text(": ".to_string()));
+        v.push(self.ty_doc(&p.ty));
+        if let Some(d) = &p.default {
+            v.push(Doc::Text(" =".to_string()));
+            v.push(self.value_doc(d, 2));
+        }
+        Doc::Cat(v)
+    }
+
+    fn receiver_doc(&mut self, p: &Param) -> Doc {
+        if let TypeKind::Ref { lifetime, mutable, inner } = &p.ty.kind {
+            let is_self = matches!(&inner.kind, TypeKind::Named { path, .. } if path.len() == 1 && (path[0] == "Self" || path[0] == "self"));
+            if is_self {
+                let lt = lifetime.as_ref().map(|l| format!(" {l}")).unwrap_or_default();
+                let m = if *mutable { "mut " } else { "" };
+                return Doc::Text(format!("&{lt}{m}self"));
+            }
+        }
+        if matches!(&p.ty.kind, TypeKind::Named { path, .. } if path.len() == 1 && path[0] == "self") {
+            return Doc::Text("self".to_string());
+        }
+        Doc::Text("self".to_string())
+    }
+
+    fn generics_doc(&mut self, gs: &[GenericParam]) -> Doc {
+        if gs.is_empty() {
+            return Doc::Nil;
+        }
+        let items: Vec<Doc> = gs
+            .iter()
+            .map(|g| {
+                let mut s = if g.is_lifetime {
+                    format!("'{}", g.name)
+                } else {
+                    g.name.clone()
+                };
+                let _ = &mut s;
+                let mut v: Vec<Doc> = Vec::new();
+                if g.is_lifetime {
+                    v.push(Doc::Text(format!("'{}", g.name)));
+                } else {
+                    v.push(Doc::Text(g.name.clone()));
+                }
+                if !g.bounds.is_empty() {
+                    v.push(Doc::Text(": ".to_string()));
+                    v.push(self.bounds_doc(&g.bounds));
+                }
+                if let Some(d) = &g.default {
+                    v.push(Doc::Text(" = ".to_string()));
+                    v.push(self.ty_doc(d));
+                }
+                Doc::Cat(v)
+            })
+            .collect();
+        self.angle_doc(items)
+    }
+
+    fn angle_doc(&mut self, items: Vec<Doc>) -> Doc {
+        if items.is_empty() {
+            return Doc::Nil;
+        }
+        delimited("<", items, ">", INDENT, false)
+    }
+
+    fn bounds_doc(&mut self, bs: &[Bound]) -> Doc {
+        let mut v: Vec<Doc> = Vec::new();
+        for (i, b) in bs.iter().enumerate() {
+            if i > 0 {
+                v.push(Doc::Text(" + ".to_string()));
+            }
+            if b.negated {
+                v.push(Doc::Text("!".to_string()));
+            }
+            if b.is_lifetime {
+                v.push(Doc::Text(format!("'{}", b.path.join("'"))));
+                continue;
+            }
+            v.push(Doc::Text(b.path.join("::")));
+            if !b.args.is_empty() {
+                let items: Vec<Doc> = b.args.iter().map(|t| self.ty_doc(t)).collect();
+                v.push(self.angle_doc(items));
+            }
+        }
+        Doc::Cat(v)
+    }
+
+    /// §9.5 rule 4: a `where` clause goes one-per-line only when the signature does not fit.
+    fn where_doc(&mut self, preds: &[WherePred]) -> Doc {
+        if preds.is_empty() {
+            return Doc::Nil;
+        }
+        let mut inner: Vec<Doc> = Vec::new();
+        for (i, p) in preds.iter().enumerate() {
+            if i > 0 {
+                inner.push(Doc::Text(",".to_string()));
+                inner.push(Doc::Line);
+            }
+            inner.push(self.ty_doc(&p.ty));
+            inner.push(Doc::Text(": ".to_string()));
+            inner.push(self.bounds_doc(&p.bounds));
+        }
+        inner.push(Doc::IfBreak(",".to_string(), String::new()));
+        group(Doc::Cat(vec![
+            Doc::Text(" where".to_string()),
+            nest(INDENT, Doc::Cat(vec![Doc::SoftLine, Doc::Cat(inner)])),
+        ]))
+    }
+
+    // ------------------------------------------------------------------ §3.6 embed blocks
+
+    fn embed_doc(&mut self, e: &EmbedBlock) -> Doc {
+        let mut v: Vec<Doc> = Vec::new();
+        v.push(Doc::Text(format!("@{}", e.lang)));
+        if !e.args.is_empty() {
+            let items: Vec<Doc> = e
+                .args
+                .iter()
+                .map(|a| {
+                    Doc::Cat(vec![
+                        Doc::Text(format!("{} = ", a.name)),
+                        self.expr_doc(&a.value, 2),
+                    ])
+                })
+                .collect();
+            v.push(delimited("(", items, ")", INDENT, false));
+        }
+        // §2.11 + §9.5 rule 2: the body is lexically opaque. Only the block's own first line is
+        // placed at the current indentation; the interior bytes are copied verbatim.
+        let lines: Vec<&str> = e.body.split('\n').collect();
+        let mut start = 0usize;
+        while start < lines.len() && lines[start].trim().is_empty() {
+            start += 1;
+        }
+        let mut end = lines.len();
+        while end > start && lines[end - 1].trim().is_empty() {
+            end -= 1;
+        }
+        if start >= end {
+            v.push(Doc::Text(" {}".to_string()));
+            return Doc::Cat(v);
+        }
+        // Everything from the `{` to the last body line is opaque, so the whole run is consumed and
+        // can never be re-emitted as a comment.
+        self.pool.mark_consumed(e.body_span.start.saturating_sub(1), e.body_span.end + 1);
+        let mut body: Vec<Doc> = Vec::new();
+        for l in &lines[start..end] {
+            body.push(Doc::Text("\n".to_string()));
+            body.push(Doc::Text(l.to_string()));
+        }
+        v.push(Doc::Text(" {".to_string()));
+        v.push(Doc::Cat(body));
+        v.push(Doc::Text("\n".to_string()));
+        v.push(Doc::HardLine);
+        v.push(Doc::Text("}".to_string()));
+        Doc::Cat(v)
+    }
+
+    // ------------------------------------------------------------------ §3.9 macro arms (verbatim)
+
+    fn macro_arm_doc(&mut self, a: &MacroArm) -> Doc {
+        if let Some(s) = self.span_text(a.span) {
+            let t = s.trim_matches(|c: char| c.is_whitespace());
+            if !t.is_empty() {
+                self.pool.mark_consumed(a.span.start, a.span.end);
+                return Doc::Text(normalise_ws_outside_literals(t));
+            }
+        }
+        let mut v: Vec<Doc> = Vec::new();
+        v.push(Doc::Text(trees_text(&a.matcher)));
+        v.push(Doc::Text(" => ".to_string()));
+        v.push(Doc::Text(trees_text(&a.expander)));
+        if let Some(sep) = a.separator {
+            v.push(Doc::Text(punct_text(sep).to_string()));
+        }
+        Doc::Cat(v)
+    }

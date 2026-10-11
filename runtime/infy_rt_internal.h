@@ -90,11 +90,22 @@ typedef struct InfyCleanup {
     void*        obj;        /* object for a drop, closure env for a defer */
     InfyDeferFn  defer_fn;   /* non-NULL for defer entries (typed path) */
     uint8_t      is_defer;
+    uint8_t      is_scope;   /* scope sentinel (see infy_scope_mark) */
     uint8_t      must_drop;  /* `#[must_drop]`: pop_noop is R-0730 (§9.7) */
     struct InfyCleanup* next;
 } InfyCleanup;
 
-/* Drain rule implemented by infy_cleanup_drain(): phase 1 = drops LIFO, phase 2 = defers LIFO. */
+/* Drain rule implemented by infy_cleanup_drain(): phase 1 = drops LIFO, phase 2 = defers LIFO.
+ *
+ * Scope markers: `infy_cleanup_pop_run()` runs one entry (as declared in infy_rt.h), which cannot
+ * express §3.13 by itself — a `defer` declared between two locals must still run *after both* of
+ * their drops. So codegen brackets each scope with infy_scope_mark() / infy_scope_end(), and the
+ * scope end runs that scope's drops in reverse declaration order, then its defers in reverse
+ * declaration order, and nothing outside the scope. */
+void infy_scope_mark(void);
+void infy_scope_end(void);      /* run this scope's drops then its defers, then drop the marker */
+void infy_scope_end_noop(void); /* abandon the scope without running anything (§4.7.4 #[no_drop]) */
+/* Drain one deque head with the two-phase rule (used by the scheduler's unwinding path). */
 void infy_rt_cleanup_drain_scope(InfyCleanup** head, uint8_t run_defers);
 
 /* ---------------- profile / policy state ----------------
@@ -141,6 +152,8 @@ void infy_test_set_report_observer(InfyReportObserver obs);
 /* Replaces exit(3) on the `process` radius so tests can observe it. Must not return. */
 typedef void (*InfyExitHook)(int code);
 void infy_test_set_exit_hook(InfyExitHook hook);
+/* Drives the §11.1 nesting limit (R-0902) without a re-entrant host callback. */
+void infy_test_set_host_nesting(int32_t depth);
 
 /* ---------------- allocation header ----------------
  * §3 of runtime-abi.md: every heap block carries a 16-byte header {size, chain_id, flags}.
@@ -301,9 +314,10 @@ typedef struct {
 } InfyArtTrailer;
 
 /* `.inf meta` fixed record — written by the front end, parsed by infy_art_read_file().
- * Little-endian; string fields are (u32 off, u32 len) into the blob's string pool. */
+ * Little-endian, INFY_META_FIXED_BYTES long; the five string fields carry (u32 pool index,
+ * u32 reserved) and are resolved against the blob's string pool by meta_resolve_strings(). */
 #define INFY_META_MAGIC "INFYMETA"
-#define INFY_META_FIXED_BYTES 200u
+#define INFY_META_FIXED_BYTES 208u
 /* Byte offsets inside the fixed `.inf meta` record (little-endian). This is the layout the
  * front end must emit; runtime/test/tooling share it from here so they can never drift. */
 enum {

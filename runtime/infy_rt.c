@@ -381,6 +381,44 @@ void infy_rt_cleanup_drain_scope(InfyCleanup** head, uint8_t run_defers) {
 
 void infy_cleanup_drain(void) { infy_rt_cleanup_drain_scope(&infy_tls_cleanup, 1); }
 
+/* Scope bracket: codegen marks the entry of every block that owns destructors, so the §3.13 order
+ * (all of the scope's variable drops first, then its defers, both reverse declaration order) can be
+ * honoured without touching the entries of an enclosing scope. */
+void infy_scope_mark(void) {
+    InfyCleanup* e = (InfyCleanup*)calloc(1, sizeof(InfyCleanup));
+    if (!e) return;
+    e->is_scope = 1;
+    e->next = infy_tls_cleanup;
+    infy_tls_cleanup = e;
+}
+
+static void scope_end_common(int run) {
+    /* The entries of this scope are the contiguous run from the deque head up to the scope marker,
+     * in reverse declaration order (the deque is LIFO). Two passes over that run give §3.13/§4.7.4:
+     * first every variable drop, then every `defer`. */
+    InfyCleanup* first = infy_tls_cleanup;
+    if (!first) return;
+    InfyCleanup* t = first;
+    while (t && !t->is_scope) t = t->next;
+    if (!t) return;                       /* unbalanced bracket — a codegen contract break */
+    infy_tls_cleanup = t->next;
+    t->next = 0;
+    if (run) {
+        infy_tls_unwinding = 1;
+        for (InfyCleanup* e = first; e && e != t; e = e->next)
+            if (!e->is_defer) run_entry(e);
+        for (InfyCleanup* e = first; e && e != t; e = e->next)
+            if (e->is_defer) run_entry(e);
+        infy_tls_unwinding = 0;
+    }
+    InfyCleanup* e = first;
+    while (e && e != t) { InfyCleanup* nx = e->next; free(e); e = nx; }
+    free(t);
+}
+
+void infy_scope_end(void) { scope_end_common(1); }
+void infy_scope_end_noop(void) { scope_end_common(0); }
+
 /* ======================= panic + radius (§4.16) ======================= */
 
 static void process_radius_exit(void) {
@@ -2008,7 +2046,7 @@ uint32_t infy_focus_spawn(uint32_t chain_id, uint32_t start_node, const InfyNode
     else infy_sched.n_throttled++;
     infy_cv_signal(&infy_sched.cv);
     uint32_t id = f->id;
-    g_chains_started = 1;        /* §11.1: after this the HostApi is immutable */
+    infy_host_mark_chains_started();   /* §11.1: after this the HostApi is immutable */
     sched_unlock();
     return id;
 }
@@ -2153,19 +2191,25 @@ void infy_sched_mark_failed(uint32_t focus_id, uint32_t code, uint8_t whole_chai
     if (fp) {
         fp->fail_code = code;
         if (whole_chain) {
-            /* §4.16 `chain`: every focus of that chain is marked Failed; the chain's on_fail
-             * linkage (when declared) is codegen's job and runs inside the failing node. */
+            /* §4.16 `chain`: every focus of that chain is marked Failed and the chain's on_fail
+             * linkage (when declared) runs — on_fail is a linkage statement, so it is codegen's
+             * job inside the failing node. Each other focus also releases its own ownership scope
+             * (§4.7.4), unless it is mid-node on another worker, which single-worker runs — the
+             * deterministic configuration — never hits. */
             for (uint32_t i = 0; i < infy_sched.n_focuses; i++) {
                 InfyFocus* f = infy_sched.focuses[i];
-                if (!f || f->chain_id != cid) continue;
+                if (!f || f->chain_id != cid || f == fp) continue;
                 if (f->state == INFY_F_READY || f->state == INFY_F_THROTTLED ||
-                    f->state == INFY_F_PAUSED || f->state == INFY_F_RUNNING) {
+                    f->state == INFY_F_PAUSED) {
                     if (f->state == INFY_F_READY) infy_sched.n_runnable--;
                     if (f->state == INFY_F_THROTTLED) infy_sched.n_throttled--;
                     f->state = INFY_F_FAILED;
                     f->fail_code = code;
                     infy_sched.n_failed++;
                     infy_sched.n_alive--;
+                    infy_rt_cleanup_drain_scope(&f->cleanup, 1);
+                    infy_free(f->frame);
+                    f->frame = 0;
                 }
             }
         } else {
@@ -2849,6 +2893,7 @@ void infy_host_clear_query(void) {
 uint8_t infy_host_is_registered(void) { return g_host_registered; }
 uint8_t infy_host_handshake_done(void) { return g_handshake_done; }
 void infy_host_mark_chains_started(void) { g_chains_started = 1; }
+void infy_test_set_host_nesting(int32_t n) { g_host_nesting = n; }
 /* ======================= artifact container (§7.4) ======================= */
 
 int infy_art_parse_trailer(const uint8_t* file, uint64_t len, InfyArtTrailer* t, const char** why) {
