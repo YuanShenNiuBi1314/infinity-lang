@@ -34,12 +34,17 @@
 ### 阶段 A：止血 —— 让树可信
 
 - [x] A1 主树 `cargo check --offline --lib` 零错误（提交 `725042a`：补 `ifbc.rs` 截断的 `mod tests` 括号、修 builder 移动后取 `marks`）
-- [ ] A2 `cargo test --offline --lib` 全绿。现状 **274 passed / 11 failed**，失败集中在 `fmt::tests`（8）与 `derive`/`ifbc`/`cli` 各 1。
-      验收：`cargo test --offline --lib 2>&1 | grep "^test result"` 输出 `0 failed`。
-      提示：`fmt` 剩余失败根因已定位——`E-0092`（格式化改变 AST）在含 `pub struct J {…}` 与 `@embed` 的输入上触发，
-      怀疑方向是 §9.5 的 AST 指纹把"注释/属性位置元数据"算进去了，以及单元名结构体字面量的解析归一。
+- [x] A2 `cargo test --offline --lib` 全绿。实测 **285 passed / 0 failed**（提交见 RUNLOG 本轮行；`cargo check --offline --lib` 仍 0 error、51 warning）。
+      实际修掉的根因（每条有回归测试，细节见 `docs/status.md` 与 `docs/spec-deviations.md` D-13…D-16）：
+      属性路径/参数名不接受保留字（`#[link(…, static = true)]` 整条被丢）、`impl Trait for Type` 丢掉 `Type`、
+      `.` 后不接受保留字成员（`.link()`）、`macro_rules!` 首臂吞掉整条记号流（曾把宏打印成 `v {}` 假成功）、
+      列表凭空双 `HardLine`（缩进空行破坏 rule 12）、struct/enum/match 列表丢逗号、注释归属由单调游标改为按字节区间、
+      `@embed` 闭包前多空行与参数被拆行、`where` 粘连、`for` 多加括号、链续行绝对 8 列、RI 旗帜宽度、`is.dyn T` 反汇编形态。
+      附带发现（未修，见 D4）：Rust/C 的 IFBC **操作数个数**不一致。
 - [ ] A3 把 `docs/status.md` 与 `README.md` 的覆盖表更新成与 A2 实测一致（不许留旧数字）。
-      验收：README 里出现的每个数字都能在 `cargo test` 输出里找到。
+      本轮已同步主数字（285 passed / 0 failed、check 0 error/51 warning、tour exit 0，`docs/status.md` 重写）。
+      验收：README 与 status 里出现的**每个**数字都能在 `cargo test`/`gcc` 输出里找到——剩余工作是逐条核对覆盖表的
+      非计数类断言（例如各条款的 ✅ 是否仍与实现相符）。
 
 ### 阶段 B：运行时可测（C 侧）
 
@@ -70,6 +75,13 @@
 - [ ] D2 `infy ifbc dump|verify` 接线（Rust 侧编码 ↔ C 侧虚拟机**交叉验证**：同一镜像两边读出的反汇编一致）。
 - [ ] D3 `src/atrack.rs`：`#[link]` + `@c` 配对、`infy_binding.h` 生成、`infy_e_<name>_<8hex>` 包装、缺 `unsafe` 报 `E-0721`、缺 `#[owns]/#[borrows]` 报 `E-0723`。
       验收：一个最小 `@c` 单元被 gcc 编译、链接、在产物里被调通。
+- [ ] D4 **Rust 编码 ↔ C 虚拟机操作数个数对齐**（A2 本轮静态比对发现，未修；D2 的交叉验证必然踩到）：
+      `push` Rust 2 个操作数（池索引 + 类型，`DEV-IFBC-13`）vs `runtime/infy_ifbc.c` 的 `OPS[OP_PUSH].nops = 1`；
+      `box.dyn` Rust 1 vs C 0（附录 D.7 与 `runtime/IFBC.md` 都写 0 操作数，Rust 侧不符规范）；
+      `guard.nonzero`/`guard.shift` Rust 1 vs C 0；`ldw` Rust 1 vs C 2（`/* ldw i, ty */`）。
+      字节宽度 = `1 + 4*nops`，任一条不一致都让两边对同一镜像的指令流错位。
+      验收：以附录 D 为唯一权威逐条判定哪侧改（`push k` 的类型操作数若保留，必须同时进 D.2 与 C 表），
+      再让 D2 的双侧反汇编逐指令相等测试通过；结论与选择写进 `docs/spec-deviations.md`。
 
 ### 阶段 E：§12 合规套件（这是唯一能声称"兼容"的东西）
 
@@ -86,6 +98,8 @@
 
 ## 2. 当前指针
 
-> **下一轮从 A2 开始。** 已验证事实：`infy check` 在 `examples/tour`（§14 导览）上退出码 0；
-> 测试 274 passed / 11 failed；`ifbc-vm`（C 侧 VM）79 断言通过；诊断码 210 全表；
+> **下一轮从 A3 开始**（把 `docs/status.md`/`README.md` 覆盖表逐条核对到实测；主数字已在 A2 轮同步）。
+> 已验证事实：`cargo test --offline --lib` **285 passed / 0 failed**；`cargo check --offline --lib` 0 error / 51 warning；
+> `infy check` 在 `examples/tour`（§14 导览）上退出码 0；`ifbc-vm`（C 侧 VM）79 断言通过；诊断码 210 全表；
 > `main` 与本地分叉（另一会话推了 `faa34ad`/`05da606`），**合并主干由人决定**。
+> 阶段 A 之后优先级最高的已知地雷：**D4**（Rust/C 的 IFBC 操作数个数不一致）与 **B1**（C 侧 harness 未收敛）。

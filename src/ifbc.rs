@@ -2369,18 +2369,16 @@ impl Instr {
     /// Render `add.i64 3` given the module's tables.
     pub fn render(&self, m: &IfbcModule) -> String {
         let mut s = String::new();
-        let base = self.op.base().to_string();
         if self.op.is_typed_family() {
+            // D.3: the type suffix *is* operand 0, shown inline (`add.i64`).
             let t = m.ty_kind(self.ops[0]).map(|k| k.suffix()).unwrap_or("?");
-            s.push_str(&base);
+            s.push_str(self.op.base());
             s.push('.');
             s.push_str(t);
-        } else if matches!(self.op, Op::IsDyn | Op::CastDyn | Op::BoxDyn) {
-            s.push_str(&base);
-            s.push('.');
-            s.push_str(m.ty_kind(self.ops[0]).map(|k| k.suffix()).unwrap_or("?"));
         } else {
-            s.push_str(&base);
+            // D.7 writes `is.dyn T` / `cast.dyn T` with the type as an ordinary operand, so those
+            // render as `is.dyn i64`; only D.3's families get a dotted suffix.
+            s.push_str(self.op.base());
         }
         let kinds = self.op.operand_kinds();
         for (i, o) in self.operands().iter().enumerate() {

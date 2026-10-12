@@ -45,7 +45,8 @@ infy conformance --report
 | §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ✅ |
 | 运行时 | 检查型算术、Vec/String 增长因子（ABI 可观察）、Cleanup deque 实现的确定性 drop 顺序与 `focus` 终止半径、焦点调度器与 ResourceLock FIFO、`xxHash64`、SplitMix64+PCG32 与无偏 Fisher–Yates | ✅ |
 
-进行中（`cargo test` 可能因这些模块尚未收敛而失败；`cargo check --offline --lib` 为主干门禁）：
+进行中（`cargo test --offline --lib` 目前 **285 passed / 0 failed**，但"绿灯"只表示已写模块自洽，
+不等于 §12 合规；下列模块仍有未实现的端到端环节）：
 
 `src/macro_expand.rs` · `src/derive.rs`（§6）、`src/fmt.rs`（§9.5 十四条规则）、`src/btrack.rs` + `src/ifbc.rs`（§7.7 B 轨摄取与 lowering）、`runtime/*.c`（C 侧 VM 与运行时）、`src/codegen.rs`（C11 发射）、`src/artifact.rs`、`src/cli.rs`、`src/borrow.rs`（§4.7 借用检查独立模块）、`src/conformance.rs`（§12 用例集）。
 

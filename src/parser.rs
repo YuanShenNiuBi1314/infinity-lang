@@ -52,6 +52,17 @@ impl<'a> P<'a> {
     fn nth(&self, k: usize) -> &Tok {
         self.toks.get(self.pos + k).unwrap_or_else(|| self.toks.last().unwrap())
     }
+    /// A word token (identifier *or* keyword) at offset `k`, exactly as written. Accepted in the
+    /// three positions where the spec's own examples put a keyword where its grammar says `ident`:
+    /// attribute paths, attribute argument names, and the member after `.` (§9.5 rule 3's chain
+    /// breaks on `.link()`, and `link` is reserved by §2.4) — see docs/spec-deviations.md D-13/D-14.
+    fn word_at(&self, k: usize) -> Option<String> {
+        let t = self.nth(k);
+        match &t.kind {
+            Kind::Ident(_) | Kind::Keyword(_) => Some(t.text.clone()),
+            _ => None,
+        }
+    }
     fn at_end(&self) -> bool {
         self.peek().is_eof()
     }
@@ -319,13 +330,13 @@ impl<'a> P<'a> {
         let start = self.toks[self.pos.saturating_sub(1)].span.start;
         let mut path: Vec<String> = Vec::new();
         let first = self.peek().clone();
-        match first.ident() {
+        match self.word_at(0) {
             Some(s) => {
-                path.push(s.to_string());
+                path.push(s);
                 self.bump();
             }
             None => {
-                // `#[repr(C)]`, `#[derive(...)]` always start with an ident; anything else is a
+                // `#[repr(C)]`, `#[derive(...)]` always start with a word; anything else is a
                 // malformed attribute and §6.6's closed list makes it E-0410 later.
                 self.syntax_err(&first, "属性路径");
                 return None;
@@ -335,9 +346,9 @@ impl<'a> P<'a> {
             if self.at_p(Punct::ColonColon) || self.at_p(Punct::Dot) {
                 self.bump();
                 let t = self.peek().clone();
-                match t.ident() {
+                match self.word_at(0) {
                     Some(s) => {
-                        path.push(s.to_string());
+                        path.push(s);
                         self.bump();
                     }
                     None => {
@@ -367,11 +378,12 @@ impl<'a> P<'a> {
                     break;
                 }
                 let arg_start = self.peek().span.start;
-                let name_tok = self.peek().clone();
+                // §3.1 writes `attr_args = ident ("=" …)?`, but the spec's own `#[link(…)]` examples
+                // (§7.6.3, §14) name an argument `static`, which is a keyword (§2.4) — see D-13.
                 let mut name: Option<String> = None;
-                if let Some(n) = name_tok.ident() {
+                if let Some(w) = self.word_at(0) {
                     if self.nth(1).is_p(Punct::Eq) {
-                        name = Some(n.to_string());
+                        name = Some(w);
                         self.bump();
                         self.bump();
                     }
@@ -708,23 +720,26 @@ impl<'a> P<'a> {
             Kw::Impl => {
                 self.bump();
                 let generics = self.generic_params();
-                let self_ty = self.ty();
-                let mut trait_ = None;
+                let lhs = self.ty();
                 let mut trait_args = Vec::new();
-                if self.eat_kw(Kw::For) {
-                    // The spec writes `type_ "for" type_`; the trait side is a path with optional
-                    // generic arguments, so split it back out here.
-                    match self_ty.kind.clone() {
+                // The spec writes `type_ "for" type_`; the trait side is a path with optional
+                // generic arguments, so split it back out here and parse the *right* side as the
+                // implementing type (`impl Drop for C` must record `C`, not `Drop`).
+                let (trait_, self_ty) = if self.eat_kw(Kw::For) {
+                    match lhs.kind.clone() {
                         TypeKind::Named { path, args } => {
-                            trait_ = Some(path);
                             trait_args = args;
+                            (Some(path), self.ty())
                         }
                         _ => {
                             let t = self.peek().clone();
                             self.err_at(&t, "E-0053", "impl 目标非法".to_string(), "trait 侧必须是具名类型路径", None);
+                            (None, lhs)
                         }
                     }
-                }
+                } else {
+                    (None, lhs)
+                };
                 let mut items = Vec::new();
                 if self.eat_p(Punct::LBrace) {
                     while !self.at_p(Punct::RBrace) && !self.at_end() {
@@ -968,23 +983,19 @@ impl<'a> P<'a> {
             return None;
         }
         // `= expr | block | expr` (§3.9 macro_expander)
-        let mut expander = Vec::new();
-        if self.at_p(Punct::LBrace) || self.at_p(Punct::LParen) || self.at_p(Punct::LBracket) {
-            let (ts, n) = crate::lexer::build_token_tree(&self.toks[self.pos..]);
-            if ts.is_empty() {
-                return None;
+        let expander: Vec<Tree> = if self.at_p(Punct::LBrace) || self.at_p(Punct::LParen) || self.at_p(Punct::LBracket) {
+            match self.one_tree() {
+                Some(t) => vec![t],
+                None => return None,
             }
-            expander = ts;
-            self.pos += n;
         } else {
             self.eat_p(Punct::Eq);
-            let (ts, n) = crate::lexer::build_token_tree(&self.toks[self.pos..]);
-            if ts.is_empty() {
-                return None;
+            // A bare expander expression runs to the arm separator, not to the end of the file.
+            match self.tt_seq(&[Kind::Punct(Punct::Semi), Kind::Punct(Punct::Comma)]) {
+                Some(ts) => ts,
+                None => return None,
             }
-            expander = ts;
-            self.pos += n;
-        }
+        };
         let sep = if self.at_p(Punct::Semi) {
             self.bump();
             Some(Punct::Semi)
@@ -995,6 +1006,58 @@ impl<'a> P<'a> {
             None
         };
         Some(MacroArm { matcher, expander, separator: sep, span: Span::new(self.file, start, self.prev_end()) })
+    }
+
+    /// The index of the closer matching the opener at `open`, or `None` when the stream ends first.
+    fn matching_close(&self, open: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut i = open;
+        while i < self.toks.len() {
+            match &self.toks[i].kind {
+                Kind::Punct(Punct::LParen) | Kind::Punct(Punct::LBracket) | Kind::Punct(Punct::LBrace) => depth += 1,
+                Kind::Punct(Punct::RParen) | Kind::Punct(Punct::RBracket) | Kind::Punct(Punct::RBrace) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Consume exactly one token tree at the cursor: a balanced group (delimiters included, so
+    /// `macro_rules!` matchers keep their outermost group) or a single leaf.
+    ///
+    /// `lexer::build_token_tree` deliberately scans the whole slice it is handed, so calling it on
+    /// "the rest of the file" — as this function used to do — swallowed every arm after the first
+    /// one (the bug stage [2] reported from `macro_expand.rs`).
+    fn one_tree(&mut self) -> Option<Tree> {
+        let is_open = matches!(self.peek().kind, Kind::Punct(Punct::LParen) | Kind::Punct(Punct::LBracket) | Kind::Punct(Punct::LBrace));
+        if !is_open {
+            if self.at_end() {
+                return None;
+            }
+            return Some(Tree::Leaf(self.bump()));
+        }
+        let open = self.pos;
+        match self.matching_close(open) {
+            Some(close) => {
+                let (ts, _n) = crate::lexer::build_token_tree(&self.toks[open..=close]);
+                self.pos = close + 1;
+                ts.into_iter().next()
+            }
+            None => {
+                let (ts, n) = crate::lexer::build_token_tree(&self.toks[open..]);
+                if n == 0 {
+                    return None;
+                }
+                self.pos += n;
+                ts.into_iter().next()
+            }
+        }
     }
 
     /// Collect token trees up to (not including) one of `stops` at depth 0.
@@ -1008,23 +1071,9 @@ impl<'a> P<'a> {
             if stops.iter().any(|s| *s == k) {
                 return Some(out);
             }
-            match k {
-                Kind::Punct(Punct::LParen) | Kind::Punct(Punct::LBracket) | Kind::Punct(Punct::LBrace) => {
-                    let (ts, n) = crate::lexer::build_token_tree(&self.toks[self.pos..]);
-                    if n == 0 {
-                        return None;
-                    }
-                    let mut g = ts.into_iter();
-                    if let Some(first) = g.next() {
-                        out.push(first);
-                    }
-                    out.extend(g);
-                    self.pos += n;
-                }
-                _ => {
-                    let t = self.bump();
-                    out.push(Tree::Leaf(t));
-                }
+            match self.one_tree() {
+                Some(t) => out.push(t),
+                None => return None,
             }
         }
     }
@@ -2317,37 +2366,34 @@ impl<'a> P<'a> {
                 Kind::Punct(Punct::Dot) => {
                     self.bump();
                     let field_tok = self.peek().clone();
-                    match &field_tok.kind {
-                        Kind::Ident(s) => {
-                            let s = s.clone();
+                    if let Some(s) = self.word_at(0) {
+                        // `.link()`, `.static` …: after a dot a keyword cannot start any other
+                        // production, so it is read as the member name (see D-14).
+                        self.bump();
+                        if self.at_p(Punct::ColonColon) && self.nth(1).is_p(Punct::Lt) {
                             self.bump();
-                            if self.at_p(Punct::ColonColon) && self.nth(1).is_p(Punct::Lt) {
-                                self.bump();
-                                let tf = self.generic_args();
-                                self.expect_p(Punct::LParen);
-                                let args = self.call_args();
-                                lhs = Expr::new(ExprKind::Method { recv: Box::new(lhs), name: s, turbofish: tf, args }, Span::new(self.file, start, self.prev_end()));
-                                continue;
-                            }
-                            if self.at_p(Punct::LParen) {
-                                self.bump();
-                                let args = self.call_args();
-                                lhs = Expr::new(ExprKind::Method { recv: Box::new(lhs), name: s, turbofish: Vec::new(), args }, Span::new(self.file, start, self.prev_end()));
-                            } else {
-                                lhs = Expr::new(ExprKind::Field { base: Box::new(lhs), name: FieldName::Named(s) }, Span::new(self.file, start, self.prev_end()));
-                            }
+                            let tf = self.generic_args();
+                            self.expect_p(Punct::LParen);
+                            let args = self.call_args();
+                            lhs = Expr::new(ExprKind::Method { recv: Box::new(lhs), name: s, turbofish: tf, args }, Span::new(self.file, start, self.prev_end()));
+                            continue;
                         }
-                        Kind::Lit(Lit::Int(i)) => {
-                            // `t.0` is a tuple field; `1.0` was lexed as a single float (§3.11)
-                            let d: u32 = i.digits.parse().unwrap_or(0);
+                        if self.at_p(Punct::LParen) {
                             self.bump();
-                            lhs = Expr::new(ExprKind::Field { base: Box::new(lhs), name: FieldName::Index(d) }, Span::new(self.file, start, self.prev_end()));
+                            let args = self.call_args();
+                            lhs = Expr::new(ExprKind::Method { recv: Box::new(lhs), name: s, turbofish: Vec::new(), args }, Span::new(self.file, start, self.prev_end()));
+                        } else {
+                            lhs = Expr::new(ExprKind::Field { base: Box::new(lhs), name: FieldName::Named(s) }, Span::new(self.file, start, self.prev_end()));
                         }
-                        _ => {
-                            self.pos = save;
-                            self.syntax_err(&field_tok, "字段名");
-                            return lhs;
-                        }
+                    } else if let Kind::Lit(Lit::Int(i)) = &field_tok.kind {
+                        // `t.0` is a tuple field; `1.0` was lexed as a single float (§3.11)
+                        let d: u32 = i.digits.parse().unwrap_or(0);
+                        self.bump();
+                        lhs = Expr::new(ExprKind::Field { base: Box::new(lhs), name: FieldName::Index(d) }, Span::new(self.file, start, self.prev_end()));
+                    } else {
+                        self.pos = save;
+                        self.syntax_err(&field_tok, "字段名");
+                        return lhs;
                     }
                 }
                 Kind::Punct(Punct::LParen) => {

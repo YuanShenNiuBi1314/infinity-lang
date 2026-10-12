@@ -77,8 +77,11 @@ pub const SOFT_WIDTH: u32 = 100;
 pub const HARD_WIDTH: u32 = 120;
 /// §9.5 rule 2: 4 spaces, never a tab.
 pub const INDENT: usize = 4;
-/// §9.5 rule 3: continuation indent of a broken call chain.
-pub const CHAIN_CONT: usize = 8;
+/// §9.5 rule 3: a broken call chain's continuation lines get one further indent level. The rule's
+/// literal "8 空格" is the canonical case (a statement already at 4), not an absolute column: an
+/// absolute 8 would put a continuation *left* of any statement nested deeper than level 1.
+/// See docs/spec-deviations.md D-15.
+pub const CHAIN_CONT: usize = INDENT;
 
 #[derive(Clone, Debug)]
 pub struct FmtOptions {
@@ -584,10 +587,12 @@ pub fn display_width(s: &str) -> usize {
                 break;
             }
             if is_regional_indicator(c) {
-                // GB12/GB13: RI pairs are a single cluster.
+                // GB12/GB13: RI pairs are a single cluster, and a cluster of two RI renders as one
+                // flag, i.e. two columns (a lone RI stays one column).
                 if ri == 1 {
                     ri = 0;
                     i += 1;
+                    w = 2;
                     continue;
                 }
                 break;
@@ -901,11 +906,14 @@ impl Cmt {
     }
 }
 
-/// Comments not yet emitted, in source order. Emission walks the tree in source order, so the
-/// cursor only ever moves forward and every comment is emitted exactly once (§2.11 hard rule).
+/// Comments not yet emitted, in source order. A scan claims the comments of *its own* byte range:
+/// the printer walks depth-first, so an inner region scans before its enclosing list and the
+/// innermost region wins. A monotonic cursor could not express that — a comment sitting above an
+/// `unsafe` statement was being swept into the block below it and re-emitted after the block's tail
+/// (§9.5 rule 8's adjacency then failed on the second pass, i.e. rule 12).
 struct Pool {
     items: Vec<Cmt>,
-    cursor: usize,
+    claimed: Vec<bool>,
     /// Ranges whose bytes are reprinted verbatim (macro arms, `@embed` bodies): comments inside
     /// them are already on their way out and must not be emitted a second time.
     consumed: Vec<(u32, u32)>,
@@ -932,7 +940,8 @@ impl Pool {
             });
         }
         items.sort_by_key(|c| (c.start, c.end));
-        Pool { items, cursor: 0, consumed: Vec::new() }
+        let claimed = vec![false; items.len()];
+        Pool { items, claimed, consumed: Vec::new() }
     }
 
     fn mark_consumed(&mut self, from: u32, to: u32) {
@@ -943,42 +952,59 @@ impl Pool {
         self.consumed.iter().any(|(a, b)| off >= *a && off <= *b)
     }
 
-    /// The index of the next un-consumed comment, if it starts before `off`.
-    fn take_before(&mut self, off: u32) -> Vec<usize> {
+    /// The index of the first comment whose start is >= `low` (items are sorted by start).
+    fn first_at_or_after(&self, low: u32) -> usize {
+        let (mut lo, mut hi) = (0usize, self.items.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.items[mid].start < low {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// Claim the comments that lie in `[low, off)`, in source order.
+    fn take_in(&mut self, low: u32, off: u32) -> Vec<usize> {
         let mut out = Vec::new();
-        while self.cursor < self.items.len() {
-            let c = &self.items[self.cursor];
+        let start = self.first_at_or_after(low);
+        for i in start..self.items.len() {
+            let c = &self.items[i];
             if c.start >= off {
                 break;
             }
-            let skip = self.in_consumed(c.start);
-            if !skip {
-                out.push(self.cursor);
+            if self.claimed[i] || self.in_consumed(c.start) {
+                continue;
             }
-            self.cursor += 1;
+            self.claimed[i] = true;
+            out.push(i);
         }
         out
     }
 
+    fn take_before(&mut self, off: u32) -> Vec<usize> {
+        self.take_in(0, off)
+    }
+
     fn take_rest(&mut self) -> Vec<usize> {
         let mut out = Vec::new();
-        while self.cursor < self.items.len() {
-            let c = &self.items[self.cursor];
-            if !self.in_consumed(c.start) {
-                out.push(self.cursor);
+        for i in 0..self.items.len() {
+            if self.claimed[i] || self.in_consumed(self.items[i].start) {
+                continue;
             }
-            self.cursor += 1;
+            self.claimed[i] = true;
+            out.push(i);
         }
         out
     }
 
     /// The byte offset where the next comment (that still has to be emitted) begins.
     fn next_start(&self) -> Option<u32> {
-        let mut i = self.cursor;
-        while i < self.items.len() && self.in_consumed(self.items[i].start) {
-            i += 1;
-        }
-        self.items.get(i).map(|c| c.start)
+        (0..self.items.len())
+            .find(|&i| !self.claimed[i] && !self.in_consumed(self.items[i].start))
+            .map(|i| self.items[i].start)
     }
 }
 
@@ -1140,12 +1166,14 @@ impl<'a> Printer<'a> {
     // ------------------------------------------------------------------ §9.5 rule 6: list layout
 
     /// Scan the comment gaps of a list. Returns one [`Gap`] per node plus the comments that sit
-    /// after the last node but before `list_end`.
-    fn gap_scan(&mut self, nodes: &[NodeSpec], list_end: u32, mode: ListMode) -> (Vec<Gap>, Vec<usize>) {
+    /// after the last node but before `list_end`. `low` is the offset the list itself starts at
+    /// (just past its `{`, or 0 at file level): comments above the list belong to the list's
+    /// *parent*, not to its first node.
+    fn gap_scan(&mut self, nodes: &[NodeSpec], low: u32, list_end: u32, mode: ListMode) -> (Vec<Gap>, Vec<usize>) {
         let mut gaps: Vec<Gap> = Vec::with_capacity(nodes.len());
         let mut prev_end: Option<u32> = None;
         for n in nodes {
-            let hole = self.pool.take_before(n.start);
+            let hole = self.pool.take_in(low, n.start);
             let (trail, lead, detached) = self.split_hole(&hole, prev_end, n.start);
             let blank = match mode {
                 ListMode::Items => true,
@@ -1159,7 +1187,7 @@ impl<'a> Printer<'a> {
             gaps.push(Gap { trail, lead, blank, detached });
             prev_end = Some(n.end);
         }
-        let tail = self.pool.take_before(list_end);
+        let tail = self.pool.take_in(low, list_end);
         (gaps, tail)
     }
 
@@ -1167,8 +1195,8 @@ impl<'a> Printer<'a> {
     /// node's last line stays behind it, at most one blank line in between (§9.5 rule 6).
     ///
     /// `list_end` is the offset that closes the list; comments up to it trail the last node.
-    fn list_doc(&mut self, nodes: Vec<NodeSpec>, list_end: u32, mode: ListMode) -> Doc {
-        let (gaps, tail) = self.gap_scan(&nodes, list_end, mode);
+    fn list_doc(&mut self, nodes: Vec<NodeSpec>, low: u32, list_end: u32, mode: ListMode) -> Doc {
+        let (gaps, tail) = self.gap_scan(&nodes, low, list_end, mode);
         let mut out: Vec<Doc> = Vec::new();
         for (i, n) in nodes.into_iter().enumerate() {
             let g = &gaps[i];
@@ -1197,10 +1225,14 @@ impl<'a> Printer<'a> {
                     }
                     out.push(Doc::HardLine);
                 } else {
+                    // The break above already ended the previous node's line. A blank line writes no
+                    // indentation, so it needs a break after it; with leading comments the break above
+                    // is the comment line's start. Pushing a second `HardLine` unconditionally here
+                    // fabricated an indentation-only "blank" line, which is not a fixpoint (rule 12).
                     if g.blank {
                         out.push(Doc::Blank);
+                        out.push(Doc::HardLine);
                     }
-                    out.push(Doc::HardLine);
                     if !g.lead.is_empty() {
                         out.push(Doc::Cat(lead_docs));
                         out.push(Doc::HardLine);
@@ -1251,11 +1283,12 @@ impl<'a> Printer<'a> {
         open: &str,
         nodes: Vec<NodeSpec>,
         close: &str,
+        low: u32,
         list_end: u32,
         pad: bool,
     ) -> Doc {
         if nodes.is_empty() {
-            let (gaps, tail) = self.gap_scan(&nodes, list_end, ListMode::Fields);
+            let (gaps, tail) = self.gap_scan(&nodes, low, list_end, ListMode::Fields);
             let _ = gaps;
             if tail.is_empty() {
                 return Doc::Text(format!("{open}{close}"));
@@ -1274,7 +1307,7 @@ impl<'a> Printer<'a> {
             v.push(Doc::Text(close.to_string()));
             return group(Doc::Cat(v));
         }
-        let (gaps, tail) = self.gap_scan(&nodes, list_end, ListMode::Fields);
+        let (gaps, tail) = self.gap_scan(&nodes, low, list_end, ListMode::Fields);
         let pad_doc = if pad { Doc::Line } else { Doc::SoftLine };
         let sep = Doc::Line;
         let mut inner: Vec<Doc> = vec![pad_doc.clone()];
@@ -1455,7 +1488,7 @@ impl<'a> Printer<'a> {
         }
         let end_off = self.src.text.len().try_into().unwrap_or(u32::MAX);
         let nodes = self.item_nodes(&f.items);
-        let items = self.list_doc(nodes, end_off, ListMode::Items);
+        let items = self.list_doc(nodes, 0, end_off, ListMode::Items);
         if !is_empty_doc(&items) {
             if brk {
                 // One blank line between the header block and the first declaration; when the file
@@ -1688,13 +1721,19 @@ impl<'a> Printer<'a> {
                         .collect();
                     v.push(delimited("(", items, ")", INDENT, false));
                 } else {
+                    // §9.5 rules 4/5: fields are a comma-separated list that collapses onto one line
+                    // when it fits and carries the trailing comma when it does not.
                     let last = fields.last().map(|f| f.span.end).unwrap_or(0);
                     let nodes = self.field_nodes(fields);
-                    let list = self.list_doc(nodes, self.close_brace_after(last), ListMode::Fields);
+                    let list_end = self.close_brace_after(last);
+                    let low = self.open_brace_before(fields.first().map(|f| f.span.start).unwrap_or(0));
                     v.push(if fields.is_empty() {
                         Doc::Text(" {}".to_string())
                     } else {
-                        Doc::Cat(vec![Doc::Text(" ".to_string()), braces(list)])
+                        Doc::Cat(vec![
+                            Doc::Text(" ".to_string()),
+                            self.delimited_list("{", nodes, "}", low, list_end, true),
+                        ])
                     });
                 }
                 v.push(self.where_doc(where_preds));
@@ -1708,11 +1747,15 @@ impl<'a> Printer<'a> {
                     nodes.push(NodeSpec { start: var.span.start, end: var.span.end, doc });
                 }
                 let last = variants.last().map(|x| x.span.end).unwrap_or(0);
-                let list = self.list_doc(nodes, self.close_brace_after(last), ListMode::Fields);
+                let list_end = self.close_brace_after(last);
+                let low = self.open_brace_before(variants.first().map(|x| x.span.start).unwrap_or(0));
                 v.push(if variants.is_empty() {
                     Doc::Text(" {}".to_string())
                 } else {
-                    Doc::Cat(vec![Doc::Text(" ".to_string()), braces(list)])
+                    Doc::Cat(vec![
+                        Doc::Text(" ".to_string()),
+                        self.delimited_list("{", nodes, "}", low, list_end, true),
+                    ])
                 });
                 v.push(self.where_doc(where_preds));
                 Doc::Cat(v)
@@ -1721,11 +1764,15 @@ impl<'a> Printer<'a> {
                 let mut v = vec![Doc::Text(format!("union {name}")), self.generics_doc(generics)];
                 let last = fields.last().map(|f| f.span.end).unwrap_or(0);
                 let nodes = self.field_nodes(fields);
-                let list = self.list_doc(nodes, self.close_brace_after(last), ListMode::Fields);
+                let list_end = self.close_brace_after(last);
+                let low = self.open_brace_before(fields.first().map(|f| f.span.start).unwrap_or(0));
                 v.push(if fields.is_empty() {
                     Doc::Text(" {}".to_string())
                 } else {
-                    Doc::Cat(vec![Doc::Text(" ".to_string()), braces(list)])
+                    Doc::Cat(vec![
+                        Doc::Text(" ".to_string()),
+                        self.delimited_list("{", nodes, "}", low, list_end, true),
+                    ])
                 });
                 Doc::Cat(v)
             }
@@ -1738,7 +1785,7 @@ impl<'a> Printer<'a> {
             ItemKind::Impl { generics, trait_, trait_args, self_ty, items } => {
                 let mut v = vec![Doc::Text("impl".to_string()), self.generics_doc(generics)];
                 if let Some(p) = trait_ {
-                    v.push(Doc::Text(p.join("::")));
+                    v.push(Doc::Text(format!(" {}", p.join("::"))));
                     if !trait_args.is_empty() {
                         let items: Vec<Doc> = trait_args.iter().map(|t| self.ty_doc(t)).collect();
                         v.push(self.angle_doc(items));
@@ -1790,7 +1837,7 @@ impl<'a> Printer<'a> {
             ItemKind::Chain { name, stmts, .. } => {
                 let nodes = self.stmt_nodes(stmts);
                 let last = stmts.last().map(|s| s.span.end).unwrap_or(0);
-                let list = self.list_doc(nodes, self.close_brace_after(last), ListMode::Statements);
+                let list = self.list_doc(nodes, self.open_brace_before(stmts.first().map(|s| s.span.start).unwrap_or(0)), self.close_brace_after(last), ListMode::Statements);
                 if stmts.is_empty() {
                     Doc::Text(format!("chain {name} {{}}"))
                 } else {
@@ -1812,8 +1859,23 @@ impl<'a> Printer<'a> {
         }
         let last = items.last().map(|i| i.span.end).unwrap_or(0);
         let nodes = self.item_nodes(items);
-        let list = self.list_doc(nodes, self.close_brace_after(last), ListMode::Items);
+        let list = self.list_doc(
+            nodes,
+            self.open_brace_before(items.first().map(|i| i.span.start).unwrap_or(0)),
+            self.close_brace_after(last),
+            ListMode::Items,
+        );
         braces(Doc::Cat(vec![Doc::HardLine, list]))
+    }
+
+    /// The offset just past the `{` that opens a list beginning after `from`. Comments before it
+    /// belong to the list's parent, not to its first node.
+    fn open_brace_before(&self, from: u32) -> u32 {
+        let a = (from as usize).min(self.src.text.len());
+        match self.src.text[..a].rfind('{') {
+            Some(i) => (i + 1) as u32,
+            None => 0,
+        }
     }
 
     /// The offset just past the `}` that closes a list beginning after `from`.
@@ -1836,14 +1898,26 @@ impl<'a> Printer<'a> {
         if !b.stmts.is_empty() {
             let nodes = self.stmt_nodes(&b.stmts);
             v.push(Doc::HardLine);
-            v.push(self.list_doc(nodes, b.span.end, ListMode::Statements));
+            v.push(self.list_doc(nodes, b.span.start + 1, b.span.end, ListMode::Statements));
         }
         if let Some(t) = &b.tail {
-            v.push(Doc::HardLine);
+            // The tail's own doc is built first so a nested region claims its comments before this
+            // block sweeps; the sweep then splits what is left into "above the tail" and "between
+            // the tail and `}`", which is where §9.5 rule 8 wants each comment to stay.
             let d = self.expr_doc(t, 2);
+            v.push(Doc::HardLine);
+            let lead = self.pool.take_in(b.span.start + 1, t.span.start);
+            for (j, &idx) in lead.iter().enumerate() {
+                if j > 0 {
+                    v.push(Doc::HardLine);
+                }
+                self.push_comment_doc(&mut v, idx, false);
+            }
+            if !lead.is_empty() {
+                v.push(Doc::HardLine);
+            }
             v.push(d);
-            // A comment between the tail expression and the closing brace still has to be emitted.
-            let tail = self.pool.take_before(b.span.end);
+            let tail = self.pool.take_in(t.span.end, b.span.end);
             for &idx in &tail {
                 v.push(Doc::HardLine);
                 self.push_comment_doc(&mut v, idx, false);
@@ -1930,9 +2004,12 @@ impl<'a> Printer<'a> {
                 }
                 x.push(Doc::Text("for ".to_string()));
                 x.push(self.pat_doc(pat));
-                x.push(Doc::Text(" in (".to_string()));
+                // §3.5 `for_stmt = "for" ident "in" expr block` — no parentheses around the
+                // iterator (only `if`/`while` carry them), so adding them here made every pass add
+                // one more layer (§9.5 rule 12).
+                x.push(Doc::Text(" in ".to_string()));
                 x.push(self.expr_doc(iter, 2));
-                x.push(Doc::Text(") ".to_string()));
+                x.push(Doc::Text(" ".to_string()));
                 x.push(self.block_doc(body));
                 Doc::Cat(x)
             }
@@ -2028,8 +2105,10 @@ impl<'a> Printer<'a> {
         for a in arms {
             nodes.push(NodeSpec { start: a.span.start, end: a.span.end, doc: self.arm_doc(a) });
         }
-        let list = self.list_doc(nodes, end, ListMode::Fields);
-        v.push(braces(Doc::Cat(vec![Doc::HardLine, list])));
+        // §3.7's `match_stmt` separates arms with `,` (and §9.5 rules 4/5 decide whether the list
+        // collapses); a `list_doc` layout drops the commas, so the output no longer re-parses.
+        let list = self.delimited_list("{", nodes, "}", self.open_brace_before(arms.first().map(|a| a.span.start).unwrap_or(0)), end, true);
+        v.push(list);
         Doc::Cat(v)
     }
 
@@ -4172,8 +4251,10 @@ impl<'a> Printer<'a> {
         } else if !var.struct_fields.is_empty() {
             let nodes = self.field_nodes(&var.struct_fields);
             let end = var.struct_fields.last().map(|f| f.span.end).unwrap_or(var.span.end);
-            let list = self.list_doc(nodes, end, ListMode::Fields);
-            v.push(Doc::Cat(vec![Doc::Text(" ".to_string()), braces(list)]));
+            let list_end = self.close_brace_after(end);
+            let low = self.open_brace_before(var.struct_fields.first().map(|f| f.span.start).unwrap_or(0));
+            let list = self.delimited_list("{", nodes, "}", low, list_end, true);
+            v.push(Doc::Cat(vec![Doc::Text(" ".to_string()), list]));
         }
         if let Some(d) = var.disc {
             v.push(Doc::Text(format!(" = {d}")));
@@ -4329,7 +4410,9 @@ impl<'a> Printer<'a> {
         inner.push(Doc::IfBreak(",".to_string(), String::new()));
         group(Doc::Cat(vec![
             Doc::Text(" where".to_string()),
-            nest(INDENT, Doc::Cat(vec![Doc::SoftLine, Doc::Cat(inner)])),
+            // `Doc::Line`, not `SoftLine`: flat must separate the keyword from its first predicate
+            // (`where T: Default`), a soft line would glue them into `whereT`.
+            nest(INDENT, Doc::Cat(vec![Doc::Line, Doc::Cat(inner)])),
         ]))
     }
 
@@ -4351,7 +4434,10 @@ impl<'a> Printer<'a> {
                 };
                 items.push(d);
             }
-            v.push(delimited("(", items, ")", INDENT, false));
+            // The `@embed` body's verbatim bytes contain newlines, which would force this group to
+            // break; the argument list stays on the `@lang(…)` line.
+            let head = delimited("(", items, ")", INDENT, false);
+            v.push(Doc::Text(flatten_doc(&head)));
         }
         // §2.11 + §9.5 rule 2: the body is lexically opaque. Only the block's own first line is
         // placed at the current indentation; the interior bytes are copied verbatim.
@@ -4378,7 +4464,8 @@ impl<'a> Printer<'a> {
         }
         v.push(Doc::Text(" {".to_string()));
         v.push(Doc::Cat(body));
-        v.push(Doc::Text("\n".to_string()));
+        // The break before `}` is the closing line itself: an extra `Text("\n")` here would combine
+        // with `HardLine` into a blank line *inside* the opaque body, which rule 2 forbids.
         v.push(Doc::HardLine);
         v.push(Doc::Text("}".to_string()));
         Doc::Cat(v)
@@ -4911,7 +4998,11 @@ mod tests {
 
     #[test]
     fn long_chain_breaks_before_every_dot() {
-        let src = hdr("fn f(j: &Job) -> u32 {\n    j.fetch().compile().link().publish().report().finish()\n}\n");
+        // §9.5 rule 3 breaks a chain only once the line passes the 100-column soft limit, so the
+        // input has to be over it: 4 columns of indent + 111 columns of chain.
+        let chain = "j.fetch().compile().link().publish().report().finish().verify().deploy().notify().archive().settle()";
+        assert!(display_width(chain) + 4 > 100, "test input must exceed the soft limit");
+        let src = hdr(&format!("fn f(j: &Job) -> u32 {{\n    {chain}\n}}\n"));
         let out = idempotent(&src);
         assert!(out.contains("\n        .compile()"), "{out}");
         assert!(out.contains("\n        .publish()"), "{out}");
@@ -5211,7 +5302,7 @@ fn a() {}\n";
             ("attrs-order", "package t\n\n#[derive(Debug)]\n#[repr(C)]\npub struct P { pub a: u32 }\n"),
             ("nested-if", "fn f() {\n    if (a) { b(); } else if (c) { d(); } else { e(); }\n}\n"),
             ("try-chain", "fn f(j: &J) -> u32 {\n    let n = j.pull()?.compile()?.link()?;\n    n\n}\n"),
-            ("for/while", "fn f(n: u32) {\n    let i = 0;\n    while (i < n) { i += 1; }\n    for x in items { use(x); }\n}\n"),
+            ("for/while", "fn f(n: u32) {\n    let i = 0;\n    while (i < n) { i += 1; }\n    for x in items { sink(x); }\n}\n"),
             ("defer", "fn f() {\n    let g = lock();\n    defer { g.release(); }\n}\n"),
         ];
         v.into_iter()
