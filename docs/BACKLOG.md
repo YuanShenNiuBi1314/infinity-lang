@@ -119,7 +119,10 @@
 
 ## 2. 当前指针
 
-> **下一轮从 A4 开始**（§1 里第一个 `[ ]`：给 `sema.rs`/`pkg.rs`/`E-0121` 补独立回归测试 —— A3 核对出的事实是这三个模块
+> **下一轮第一件事：补推。** 远端 `toolchain` 停在 `4429b25`，本地已领先 `816ae92`/`67e55fb`/`790c268`/`4244458`/`76c6785`/`81cb91b` 六个提交
+> （cron-01、cron-02 各两次 `git push` 都失败在 `github.com:443`，`api.github.com` 通道可回查但推不动）。
+>
+> **补推之后取 A4**（§1 里第一个 `[ ]`：给 `sema.rs`/`pkg.rs`/`E-0121` 补独立回归测试 —— A3 核对出的事实是这三个模块
 > 目前**一项单测都没有**，阶段 A 修掉的十个缺陷大多只有 tour 那一条端到端证据）。
 > 已验证事实（A3 轮全部复跑，非引用）：`cargo test --offline --lib` **285 passed / 0 failed**；
 > `cargo check --offline --lib` 0 error / 51 warning；`infy check examples/tour` exit 0；`infy build examples/tour` exit 6；
