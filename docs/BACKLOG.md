@@ -41,10 +41,22 @@
       列表凭空双 `HardLine`（缩进空行破坏 rule 12）、struct/enum/match 列表丢逗号、注释归属由单调游标改为按字节区间、
       `@embed` 闭包前多空行与参数被拆行、`where` 粘连、`for` 多加括号、链续行绝对 8 列、RI 旗帜宽度、`is.dyn T` 反汇编形态。
       附带发现（未修，见 D4）：Rust/C 的 IFBC **操作数个数**不一致。
-- [ ] A3 把 `docs/status.md` 与 `README.md` 的覆盖表更新成与 A2 实测一致（不许留旧数字）。
-      本轮已同步主数字（285 passed / 0 failed、check 0 error/51 warning、tour exit 0，`docs/status.md` 重写）。
-      验收：README 与 status 里出现的**每个**数字都能在 `cargo test`/`gcc` 输出里找到——剩余工作是逐条核对覆盖表的
-      非计数类断言（例如各条款的 ✅ 是否仍与实现相符）。
+- [x] A3 把 `docs/status.md` 与 `README.md` 的覆盖表更新成与 A2 实测一致（不许留旧数字）。
+      主数字（285 passed / 0 failed、check 0 error/51 warning、tour exit 0）与**非计数断言**都已对回证据：本轮把
+      `cargo test --offline --lib` 重新分组计数（`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `toml` 15 ·
+      `sha256` 12 · `borrow` 11 · `codes` 9 · `base64` 7 · `parser` 5 · `ifbc` 5 · `cli` 5 · `stdlib` 4 · `diag` 2 = 285），
+      C 侧用 `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/test_ifbc.c runtime/test_ifbc_stubs.c`
+      跑出 `IFBC harness: 79 asserts, 79 pass, 0 FAIL`（exit 0），CLI 退出码逐条实测（check 0 / build 6 / run·test·doc·ifbc·conformance 1 /
+      fmt --check 脏时 2 / artifact info 非产物 7 / init 0）。
+      核对出的**文档谎报**已改正：§11 `HostApi`（`src/host.rs` 是 1 行占位）此前被标 ✅；§7.4/§7.3 产物、§7.8/附录 D IFBC、
+      §9.2 金样、§9.4 `--diag-json`、§10、§4、§5、§3"全产生式"、运行时均降级为 🟡/⬜ 并写明证据类别；
+      README 目录树里不存在的 `tests/` 已删；README 指向的 `docs/coverage.md` 此前**根本不存在**，现已建成逐条款"实现 × 证据"矩阵。
+      遗留：A3 期间发现的两条真实缺陷登记为 F5/F6，零单测模块的补测登记为 A4。
+- [ ] A4 给**零单测模块**补独立回归测试：`src/sema.rs`（§4 类型检查、`E-0101` 内建构造、`E-0110` 字面量取型、
+      `E-0301` 的三条 `goto` 越界路径）、`src/pkg.rs`（清单/MVS/lock/dirhash）、`src/borrow.rs` 的 `E-0121`。
+      理由（A3 核对结论）：阶段 A 修掉的十个缺陷里绝大多数只有"`infy check examples/tour` exit 0"这一条端到端证据，
+      回归网是空的 —— 改坏 `sema.rs` 现在不会有测试变红。
+      验收：`cargo test --offline --lib` 里 `sema::tests` + `pkg::tests` 合计 ≥ 20 项，且每项能单独指出它锁住的是哪条条款。
 
 ### 阶段 B：运行时可测（C 侧）
 
@@ -95,11 +107,24 @@
 - [ ] F2 消 40 条编译告警（unused/dead code），每轮清一批，`cargo check` 输出为 0 warning 时勾掉。
 - [ ] F3 把 `push*.log`/`rt_tests`/`ifbc_tests` 等一次性产物加进 `.gitignore`，仓库里只留 `docs/RUNLOG.md` 这一份审计线。
 - [ ] F4 `infy lsp`、`std.net` TLS、`dyn Trait` vtable 偏移表：要么实现，要么在 `docs/spec-deviations.md` 里保持"明确未实现"的记录，不许静默。
+- [ ] F5 `infy fmt` / `infy expand` 的目录参数与 `infy check` 不一致（A3 实测）：
+      `infy fmt --check examples/tour` → `error: 无法读取 examples/tour: 拒绝访问。 (os error 5)`（把目录当文件读），
+      `infy expand --stage macro examples/tour` → `error: 找不到 module 根（§5.1）`；只有 `cd` 进 module 或直接给 `.infy` 文件才可用。
+      验收：三条命令（check/fmt/expand 各带目录参数）行为一致，且加进 `src/cli.rs` 的测试。
+- [ ] F6 **§14 导览源码不是 §9.5 的格式化不动点**（A3 实测）：`(cd examples/tour && infy fmt --check)` →
+      `2 file(s) are not canonical`，exit 2。必须先判定是"§9.5 与 §14 互相矛盾（规范级缺陷，写 `docs/spec-deviations.md`）"
+      还是"格式化器与 §14 样例之一写错了"（改实现/改样例）。裁决前，任何文档不得声称"§14 导览已是规范写法"。
+      验收：`infy fmt --check examples/tour` exit 0，或偏差条目里给出规范方认可的逐条理由。
 
 ## 2. 当前指针
 
-> **下一轮从 A3 开始**（把 `docs/status.md`/`README.md` 覆盖表逐条核对到实测；主数字已在 A2 轮同步）。
-> 已验证事实：`cargo test --offline --lib` **285 passed / 0 failed**；`cargo check --offline --lib` 0 error / 51 warning；
-> `infy check` 在 `examples/tour`（§14 导览）上退出码 0；`ifbc-vm`（C 侧 VM）79 断言通过；诊断码 210 全表；
+> **下一轮从 A4 开始**（§1 里第一个 `[ ]`：给 `sema.rs`/`pkg.rs`/`E-0121` 补独立回归测试 —— A3 核对出的事实是这三个模块
+> 目前**一项单测都没有**，阶段 A 修掉的十个缺陷大多只有 tour 那一条端到端证据）。
+> 已验证事实（A3 轮全部复跑，非引用）：`cargo test --offline --lib` **285 passed / 0 failed**；
+> `cargo check --offline --lib` 0 error / 51 warning；`infy check examples/tour` exit 0；`infy build examples/tour` exit 6；
+> `infy run|test|doc|ifbc|conformance|lsp` exit 1；`(cd examples/tour && infy fmt --check)` **exit 2（2 file(s) are not canonical，见 F6）**；
+> `infy artifact info <非产物>` exit 7；C 侧 `IFBC harness: 79 asserts, 79 pass, 0 FAIL`（链的是 `test_ifbc_stubs.c`，不是生产 `infy_rt.c`）；
+> 诊断码 210 全表；规范 §12 要求 2300 用例（1244+256+800），外部用例目前为 0。
 > `main` 与本地分叉（另一会话推了 `faa34ad`/`05da606`），**合并主干由人决定**。
-> 阶段 A 之后优先级最高的已知地雷：**D4**（Rust/C 的 IFBC 操作数个数不一致）与 **B1**（C 侧 harness 未收敛）。
+> 阶段 A 之后优先级最高的已知地雷：**D4**（Rust/C 的 IFBC 操作数个数不一致）与 **B1**（C 侧 harness 未收敛）；
+> **编译 C 侧测试时四个 .c 必须一起给**（少 `infy_dyn.c` 时 `ld` 只返回 `collect2: error: ld returned 5`，不打印任何 undefined reference）。
