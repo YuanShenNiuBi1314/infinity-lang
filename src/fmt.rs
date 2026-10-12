@@ -762,12 +762,17 @@ pub fn render(doc: &Doc, width: usize) -> (String, Vec<(u32, usize)>) {
     let mut out = String::new();
     let mut marks: Vec<(u32, usize)> = Vec::new();
     let mut col = 0usize;
+    // A `Blank` already terminated the current line and left one empty line; a `HardLine` right
+    // after it must therefore write only the indentation, otherwise the two combine into two empty
+    // lines (§9.5 rules 6/7 require exactly one).
+    let mut after_blank = false;
     let mut stack: Vec<(usize, Mode, &Doc)> = vec![(0, Mode::Break, doc)];
     while let Some((ind, mode, d)) = stack.pop() {
         match d {
             Doc::Nil => {}
             Doc::Mark(id) => marks.push((*id, out.len())),
             Doc::Text(t) => {
+                after_blank = false;
                 if t.contains('\n') {
                     let last = t.rsplit('\n').next().unwrap_or("");
                     col = col + display_width(last);
@@ -795,10 +800,29 @@ pub fn render(doc: &Doc, width: usize) -> (String, Vec<(u32, usize)>) {
                     newline(&mut out, &mut col, ind);
                 }
             }
-            Doc::HardLine => newline(&mut out, &mut col, ind),
+            Doc::HardLine => {
+                if after_blank {
+                    after_blank = false;
+                    for _ in 0..ind {
+                        out.push(' ');
+                    }
+                    col = ind;
+                } else {
+                    newline(&mut out, &mut col, ind);
+                }
+            }
             Doc::Blank => {
+                // Terminate the current line, dropping an indentation-only tail so the blank line
+                // carries no trailing whitespace, then leave exactly one empty line.
+                while out.ends_with(' ') {
+                    out.pop();
+                }
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
                 out.push('\n');
                 col = 0;
+                after_blank = true;
             }
             Doc::IfBreak(b, f) => {
                 let pick = if mode == Mode::Break { b } else { f };
@@ -1515,6 +1539,10 @@ impl<'a> Printer<'a> {
             }
             group.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
             if wrote_any {
+                // §9.5 rule 7: one blank line between import groups. The last statement of the
+                // previous group was written without a terminator, so the group separator is a hard
+                // line break plus the blank line itself.
+                out.push(Doc::HardLine);
                 out.push(Doc::Blank);
             }
             for (i, im) in group.iter().enumerate() {
