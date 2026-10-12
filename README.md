@@ -49,11 +49,15 @@ infy conformance --report   # 未实现：notice + exit 1
 | §7.4 / §7.3 | 产物容器：宿主可执行文件 + `INFYART2` 段尾 + `.inf meta/rodata 索引/ifbc/sum`；`build-id` | 🟡 `infy artifact info` 只识别段尾魔数；段写入器与 `.inf meta` 解析都不存在（BACKLOG C3） |
 | §7.8 / 附录 D | IFBC 编码、反汇编、装载期六项校验（`R-0704`…`R-0708`）、UB-019 | 🟡 Rust 侧 5 项 + C 侧 79 断言**各自**通过；两侧操作数个数不一致（BACKLOG D4），双侧交叉验证目前必然错位 |
 | §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ⬜ `src/host.rs` 是占位文件 —— **未实现** |
-| 运行时 | 检查型算术、Vec/String 增长因子、确定性 drop 顺序与 `focus` 终止半径、焦点调度器与 ResourceLock FIFO、`xxHash64`、SplitMix64+PCG32、无偏 Fisher–Yates | 🟡 代码在 `runtime/infy_rt.c`；`test_rt.c` harness 未收敛（B1），且 79 断言链的是 `test_ifbc_stubs.c` 替身而非生产运行时（B2） |
+| 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32303 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。仍不等于 §12 合规；IFBC 那 79 断言链的仍是 `test_ifbc_stubs.c` 替身（B2） |
 
 `cargo test --offline --lib` 目前 **332 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
 "绿灯"只表示已写测试的模块自洽：A4 轮之后 `sema`(22) 与 `pkg`(19) 已不再是零单测，
 但 `hir`、`codegen`、`host`、`btrack`、`atrack`、`conformance`、`doc` **一项单测都没有**，仍在进行中或未开始。
+C 侧另有两份独立 harness：`runtime/test_rt.c` 直接链**生产** `runtime/infy_rt.c` →
+**32303 assertions / 0 failures**（B1 轮收敛，`-Wall -Wextra` 零告警）；`runtime/test_ifbc.c` →
+`79 asserts, 79 pass, 0 FAIL`，但它链的是 `test_ifbc_stubs.c` 替身（真实链接 = B2）。
+以上都只说明"已写用例自洽"，**不等于 §12 合规**（外部用例仍为 0）。
 
 明确未实现（不使用即报错，不做静默降级）：`src/codegen.rs`（§7.5 C11 发射）、`src/hir.rs`、`src/atrack.rs`（A 轨绑定）、
 `src/host.rs`（§11 `HostApi`）、`src/doc.rs`（`infy doc`）、`src/conformance.rs`（§12 用例集）——这六个文件目前是 1 行占位；

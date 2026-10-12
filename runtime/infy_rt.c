@@ -357,17 +357,24 @@ void infy_rt_cleanup_drain_scope(InfyCleanup** head, uint8_t run_defers) {
     *head = 0;
     if (!e) return;
     /* Two normative phases: locals/fields drop in reverse declaration order (LIFO), then the
-     * `defer` closures in reverse declaration order (§3.13, §4.7.4). */
-    InfyCleanup* drops = 0; InfyCleanup* defers = 0;
+     * `defer` closures in reverse declaration order (§3.13, §4.7.4). The deque is already LIFO,
+     * so the partition keeps the traversal order (append at the tail); reversing it again would
+     * run both phases in declaration order. */
+    InfyCleanup* drops = 0; InfyCleanup* drops_tail = 0;
+    InfyCleanup* defers = 0; InfyCleanup* defers_tail = 0;
     while (e) {
         InfyCleanup* nx = e->next;
-        if (e->is_defer && run_defers) { e->next = defers; defers = e; }
-        else { e->next = drops; drops = e; }
+        e->next = 0;
+        if (e->is_defer && run_defers) {
+            if (defers_tail) defers_tail->next = e; else defers = e;
+            defers_tail = e;
+        } else {
+            if (drops_tail) drops_tail->next = e; else drops = e;
+            drops_tail = e;
+        }
         e = nx;
     }
     infy_tls_unwinding = 1;
-    /* the partition above already reversed push order; running `drops` then `defers` gives
-     * declaration-reverse order inside each phase, which is what §4.7.4 requires. */
     while (drops) {
         InfyCleanup* cur = drops; drops = cur->next;
         run_entry(cur); free(cur);
@@ -1529,10 +1536,8 @@ void infy_env_update(const InfyEnvSnapshot* s) {
 /* ======================= std.fmt (§10.11) + Debug (§6.7) =======================
  * The format string is parsed at compile time; codegen hands us an InfyFmtSpec per placeholder.
  * `lit` is the literal run *before* the placeholder. A format string can end with literal text and
- * InfyFmtSpec has no field for a trailing run, so a spec with arg_index == UINT32_MAX is accepted
- * as "literal only" (documented in runtime/README.md). */
-
-#define INFY_FMT_TAIL_ONLY 0xFFFFFFFFu
+ * InfyFmtSpec has no field for a trailing run, so a spec with arg_index == UINT32_MAX
+ * (INFY_FMT_TAIL_ONLY, declared in infy_rt.h) is accepted as "literal only". */
 
 static void str_push_bytes(InfyString* s, const char* p, uint64_t n) {
     InfyStr b = { (const uint8_t*)p, n };
@@ -1599,7 +1604,7 @@ static void fmt_uint_core(InfyString* out, uint64_t v, const InfyFmtSpec* sp) {
     char buf[128];
     switch (sp->which) {
     case FY_LOWER_HEX: snprintf(buf, sizeof buf, "%s%llx", sp->alt ? "0x" : "", (unsigned long long)v); break;
-    case FY_UPPER_HEX: snprintf(buf, sizeof buf, "%s%llX", sp->alt ? "0X" : "", (unsigned long long)v); break;
+    case FY_UPPER_HEX: snprintf(buf, sizeof buf, "%s%llX", sp->alt ? "0x" : "", (unsigned long long)v); break;
     case FY_OCTAL:     snprintf(buf, sizeof buf, "%s%llo", sp->alt ? "0o" : "", (unsigned long long)v); break;
     case FY_BINARY: {
         char rev[65], bits[66];
@@ -1724,11 +1729,6 @@ static void set_pretty_hint(const InfyFmtSpec* sp) {
     g_debug_pretty = (sp && (sp->which == FY_DEBUG_PRETTY || sp->alt)) ? 1 : 0;
 }
 
-/* The Debug vtable writer is declared in the frozen header as taking `struct InfyString*`, which is
- * a different (incomplete) type from the `InfyString` typedef; the cast below is the only way to
- * call it without editing the header (reported as a header bug). */
-typedef void (*InfyDebugWriteFn)(InfyString*, const void*);
-
 static void fmt_arg_into(InfyString* out, const InfyFmtArg* a, const InfyFmtSpec* sp) {
     InfyString core = infy_string_new();
     InfyFmtSpec local = *sp;
@@ -1752,7 +1752,7 @@ static void fmt_arg_into(InfyString* out, const InfyFmtArg* a, const InfyFmtSpec
         } else if (a->kind == FA_DEBUG_PTR && a->v.d.obj) {
             set_pretty_hint(&local);
             if (a->v.d.vt && a->v.d.vt->write)
-                ((InfyDebugWriteFn)a->v.d.vt->write)(&core, a->v.d.obj);
+                a->v.d.vt->write(&core, a->v.d.obj);
             else {
                 char b[32];
                 snprintf(b, sizeof b, "0x%llx", (unsigned long long)(uintptr_t)a->v.d.obj);
@@ -1943,7 +1943,9 @@ void infy_sched_init(uint32_t threads, uint32_t focus_stack_bytes, uint32_t chai
     memset(&infy_sched, 0, sizeof infy_sched);
     infy_mtx_init(&infy_sched.m);
     infy_cv_init(&infy_sched.cv);
-    infy_sched.next_focus_id = 0;
+    /* id 0 is reserved for "no focus": infy_current_focus() reports 0 outside a focus and
+     * infy_focus_spawn() reports 0 on its refusal paths, so allocation starts at 1 (§8.5). */
+    infy_sched.next_focus_id = 1;
     infy_sched.focus_cap_bytes = focus_stack_bytes ? focus_stack_bytes : 256u * 1024u;
     infy_sched.chain_cap_bytes = chain_stack_bytes ? chain_stack_bytes : 8u * 1024u * 1024u;
     infy_sched.n_workers = threads ? threads : worker_threads_to_use();
@@ -1996,6 +1998,22 @@ static void ready_enqueue_locked(InfyFocus* f) {
     infy_sched.ready_tail = f;
     f->state = INFY_F_READY;
     infy_sched.n_runnable++;
+}
+
+/* Unlink an arbitrary focus from the ready FIFO. A focus that is not queued (THROTTLED, RUNNING)
+ * is left alone, so n_runnable only moves when the focus really was in the queue. */
+static void ready_remove_locked(InfyFocus* f) {
+    InfyFocus* prev = 0;
+    for (InfyFocus* it = infy_sched.ready_head; it; it = it->qnext) {
+        if (it == f) {
+            if (prev) prev->qnext = f->qnext; else infy_sched.ready_head = f->qnext;
+            if (infy_sched.ready_tail == f) infy_sched.ready_tail = prev;
+            f->qnext = 0;
+            infy_sched.n_runnable--;
+            return;
+        }
+        prev = it;
+    }
 }
 
 uint32_t infy_focus_spawn(uint32_t chain_id, uint32_t start_node, const InfyNodeLoc* at) {
@@ -2096,18 +2114,7 @@ void infy_focus_pause(uint32_t focus_id) {
         if (!f || f->id != focus_id) continue;
         if (f->state == INFY_F_RUNNING) f->pause_req = 1;      /* suspends after the current node */
         else if (f->state == INFY_F_READY || f->state == INFY_F_THROTTLED) {
-            /* unlink from the ready FIFO */
-            InfyFocus** pp = &infy_sched.ready_head;
-            while (*pp) {
-                if (*pp == f) {
-                    *pp = f->qnext;
-                    if (infy_sched.ready_tail == f) infy_sched.ready_tail = 0;
-                    f->qnext = 0;
-                    infy_sched.n_runnable--;
-                    break;
-                }
-                pp = &(*pp)->qnext;
-            }
+            ready_remove_locked(f);                 /* unlink from the ready FIFO */
             if (f->state == INFY_F_THROTTLED) infy_sched.n_throttled--;
             f->state = INFY_F_PAUSED;
         }
@@ -2189,7 +2196,15 @@ void infy_sched_mark_failed(uint32_t focus_id, uint32_t code, uint8_t whole_chai
         if (f && f->id == focus_id) { fp = f; cid = f->chain_id; break; }
     }
     if (fp) {
+        /* §4.16 `chain` is `focus` *plus* the extra chain-wide marking, so the panicking focus
+         * itself terminates the same way under both radii. Its own cleanup deque is drained by
+         * infy_panic (this runs on the panicking focus's own thread). */
+        if (fp->state == INFY_F_READY) ready_remove_locked(fp);
+        if (fp->state == INFY_F_THROTTLED) infy_sched.n_throttled--;
+        fp->state = INFY_F_FAILED;
         fp->fail_code = code;
+        infy_sched.n_failed++;
+        infy_sched.n_alive--;
         if (whole_chain) {
             /* §4.16 `chain`: every focus of that chain is marked Failed and the chain's on_fail
              * linkage (when declared) runs — on_fail is a linkage statement, so it is codegen's
@@ -2201,7 +2216,7 @@ void infy_sched_mark_failed(uint32_t focus_id, uint32_t code, uint8_t whole_chai
                 if (!f || f->chain_id != cid || f == fp) continue;
                 if (f->state == INFY_F_READY || f->state == INFY_F_THROTTLED ||
                     f->state == INFY_F_PAUSED) {
-                    if (f->state == INFY_F_READY) infy_sched.n_runnable--;
+                    if (f->state == INFY_F_READY) ready_remove_locked(f);
                     if (f->state == INFY_F_THROTTLED) infy_sched.n_throttled--;
                     f->state = INFY_F_FAILED;
                     f->fail_code = code;
@@ -2212,14 +2227,8 @@ void infy_sched_mark_failed(uint32_t focus_id, uint32_t code, uint8_t whole_chai
                     f->frame = 0;
                 }
             }
-        } else {
-            if (fp->state == INFY_F_READY) infy_sched.n_runnable--;
-            if (fp->state == INFY_F_THROTTLED) infy_sched.n_throttled--;
-            fp->state = INFY_F_FAILED;
-            infy_sched.n_failed++;
-            infy_sched.n_alive--;
-            infy_cv_broadcast(&infy_sched.cv);
         }
+        infy_cv_broadcast(&infy_sched.cv);
     }
     sched_unlock();
     INFY_UNUSED(cid);

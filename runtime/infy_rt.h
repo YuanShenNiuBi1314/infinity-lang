@@ -34,7 +34,7 @@ typedef enum { INFY_RADIUS_FOCUS = 0, INFY_RADIUS_CHAIN = 1, INFY_RADIUS_PROCESS
 
 /* ---------- fundamental value types ---------- */
 typedef struct { const uint8_t* ptr; uint64_t len; } InfyStr;      /* str: UTF-8, not NUL-terminated */
-typedef struct { uint8_t* ptr; uint64_t len; uint64_t cap; } InfyString;
+typedef struct InfyString { uint8_t* ptr; uint64_t len; uint64_t cap; } InfyString;
 typedef struct { const void* ptr; uint64_t len; } InfySlice;        /* [T] fat pointer (ptr,len) */
 typedef struct { void* ptr; uint64_t len; uint64_t cap; } InfyVec;  /* Vec<T>, element size in meta */
 typedef struct { uint64_t len; uint64_t cap; void* ptr; } InfyVecHdr;
@@ -207,6 +207,8 @@ typedef struct {
     uint8_t alt;                     /* {:#?} / {:#x} */
     uint8_t zero_pad;                /* {:0>10} */
 } InfyFmtSpec;
+/* arg_index sentinel: the spec carries only the literal run that follows the last placeholder */
+#define INFY_FMT_TAIL_ONLY 0xFFFFFFFFu
 typedef enum { FA_I64, FA_U64, FA_F64, FA_STR, FA_BOOL, FA_CHAR, FA_DEBUG_PTR, FA_I128, FA_U128 } InfyFmtKind;
 typedef struct { InfyFmtKind kind; union { int64_t i; uint64_t u; double f; InfyStr s; uint8_t b; uint32_t c; struct { const void* obj; const struct InfyDebugVt* vt; } d; } v; } InfyFmtArg;
 typedef struct InfyDebugVt { void (*write)(struct InfyString* out, const void* obj); } InfyDebugVt;
@@ -304,7 +306,8 @@ int8_t  infy_host_set(InfyStr key, InfyStr val);
 typedef struct {
     uint32_t ifabi, opt_level;
     uint8_t overflow_policy, panic_radius, usize_bits, fast_math, lto;
-    uint32_t stack_bytes, focus_stack_bytes, focus_quota, iter_guard_steps;
+    uint32_t stack_bytes, focus_stack_bytes, focus_quota;
+    uint64_t iter_guard_steps;   /* §10.10 default is 2^32: a u32 field silently truncates it to 0 */
     InfyStr target_triple, build_id, platform, lang_version, source_toolchain;
     uint32_t n_chains, n_events, n_nodes, n_ifbc_modules, n_resource_keys;
     uint32_t off_chains, len_chains, off_events, len_events, off_nodes, len_nodes,

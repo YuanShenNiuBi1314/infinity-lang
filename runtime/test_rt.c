@@ -59,6 +59,16 @@ static int g_failures = 0;
 
 static void section(const char* name) { printf("-- %s\n", name); }
 
+/* An InfyString is a (ptr,len) pair with no NUL terminator (§4.1), so `(char*)s.ptr` reads past it.
+ * Copy into a static buffer before any C-string comparison. */
+static char g_cpybuf[1024];
+static const char* cstr(const InfyString* s) {
+    size_t n = s->len < sizeof g_cpybuf - 1 ? (size_t)s->len : sizeof g_cpybuf - 1;
+    if (s->ptr && n) memcpy(g_cpybuf, s->ptr, n);
+    g_cpybuf[n] = 0;
+    return g_cpybuf;
+}
+
 /* ============================ panic plumbing ============================ */
 
 /* A node location for the calls under test: the runtime only ever reads through the pointer, so a
@@ -128,38 +138,38 @@ static volatile uint64_t g_sink;   /* keep the "ok" results observable for the o
 #define MIN64_TEST (-(int64_t)9223372036854775807LL - 1)
 #define MAX64_TEST ((int64_t)9223372036854775807LL)
 
-static void e_add_u8_ov(void)   { g_sink = infy_add_u8(255, 1, &LOC(1, 1, 0)); }
-static void e_sub_u16_ov(void)  { g_sink = infy_sub_u16(0, 1, &LOC(2, 1, 0)); }
-static void e_mul_u32_ov(void)  { g_sink = infy_mul_u32(0x80000u, 0x10000u, &LOC(3, 1, 0)); }
-static void e_add_i8_ov(void)   { g_sink = (uint64_t)infy_add_i8(127, 1, &LOC(4, 1, 0)); }
-static void e_sub_i8_ov(void)   { g_sink = (uint64_t)infy_sub_i8(-128, 1, &LOC(5, 1, 0)); }
-static void e_mul_i64_ov(void)  { g_sink = (uint64_t)infy_mul_i64(0x4000000000000000LL, 4, &LOC(6, 1, 0)); }
-static void e_div_min(void)     { g_sink = (uint64_t)infy_div_i64(MIN64_TEST, -1, &LOC(7, 1, 0)); }
-static void e_rem_min(void)     { g_sink = (uint64_t)infy_rem_i64(MIN64_TEST, -1, &LOC(8, 1, 0)); }
-static void e_div_u32_zero(void){ g_sink = infy_div_u32(7, 0, &LOC(9, 1, 0)); }
-static void e_div_i64_zero(void){ g_sink = (uint64_t)infy_div_i64(7, 0, &LOC(10, 1, 0)); }
-static void e_rem_u8_zero(void) { g_sink = infy_rem_u8(7, 0, &LOC(11, 1, 0)); }
-static void e_shl_64(void)      { g_sink = infy_shl_u64(1, 64, &LOC(12, 1, 0)); }
-static void e_shr_neg(void)     { g_sink = (uint64_t)infy_shr_i64(-8, 64, &LOC(13, 1, 0)); }
-static void e_remf_zero(void)   { (void)infy_remf64(1.0, 0.0, &LOC(14, 1, 0)); }
-static void e_remf_inf(void)    { g_sink = (uint64_t)infy_remf64(INFINITY, 2.0, &LOC(15, 1, 0)); }
-static void e_index_oob(void)   { InfyVec v = { (void*)"ab", 2, 2 }; (void)infy_vec_index(&v, 2, 1, &LOC(16, 1, 0)); }
-static void e_slice_oob(void)   { InfySlice s = { (void*)"abcd", 4 }; (void)infy_slice_index(&s, 4, 1, &LOC(17, 1, 0)); }
+static void e_add_u8_ov(void)   { g_sink = infy_add_u8(255, 1, LOC(1, 1, 0)); }
+static void e_sub_u16_ov(void)  { g_sink = infy_sub_u16(0, 1, LOC(2, 1, 0)); }
+static void e_mul_u32_ov(void)  { g_sink = infy_mul_u32(0x80000u, 0x10000u, LOC(3, 1, 0)); }
+static void e_add_i8_ov(void)   { g_sink = (uint64_t)infy_add_i8(127, 1, LOC(4, 1, 0)); }
+static void e_sub_i8_ov(void)   { g_sink = (uint64_t)infy_sub_i8(-128, 1, LOC(5, 1, 0)); }
+static void e_mul_i64_ov(void)  { g_sink = (uint64_t)infy_mul_i64(0x4000000000000000LL, 4, LOC(6, 1, 0)); }
+static void e_div_min(void)     { g_sink = (uint64_t)infy_div_i64(MIN64_TEST, -1, LOC(7, 1, 0)); }
+static void e_rem_min(void)     { g_sink = (uint64_t)infy_rem_i64(MIN64_TEST, -1, LOC(8, 1, 0)); }
+static void e_div_u32_zero(void){ g_sink = infy_div_u32(7, 0, LOC(9, 1, 0)); }
+static void e_div_i64_zero(void){ g_sink = (uint64_t)infy_div_i64(7, 0, LOC(10, 1, 0)); }
+static void e_rem_u8_zero(void) { g_sink = infy_rem_u8(7, 0, LOC(11, 1, 0)); }
+static void e_shl_64(void)      { g_sink = infy_shl_u64(1, 64, LOC(12, 1, 0)); }
+static void e_shr_neg(void)     { g_sink = (uint64_t)infy_shr_i64(-8, 64, LOC(13, 1, 0)); }
+static void e_remf_zero(void)   { (void)infy_remf64(1.0, 0.0, LOC(14, 1, 0)); }
+static void e_remf_inf(void)    { g_sink = (uint64_t)infy_remf64(INFINITY, 2.0, LOC(15, 1, 0)); }
+static void e_index_oob(void)   { InfyVec v = { (void*)"ab", 2, 2 }; (void)infy_vec_index(&v, 2, 1, LOC(16, 1, 0)); }
+static void e_slice_oob(void)   { InfySlice s = { (void*)"abcd", 4 }; (void)infy_slice_index(&s, 4, 1, LOC(17, 1, 0)); }
 static void e_str_nul(void)     { static const uint8_t b[3] = {'a', 0, 'b'}; InfyStr s = { b, 3 };
-                                  infy_str_check_nul(s, &LOC(18, 1, 0)); }
+                                  infy_str_check_nul(s, LOC(18, 1, 0)); }
 static void e_cstr_nul(void)    { static const uint8_t b[2] = {'a', 0}; InfyStr s = { b, 2 };
-                                  char* c = infy_to_cstr(s, &LOC(19, 1, 0)); free(c); }
-static void e_unwrap_none(void) { infy_panic(R_UNWRAP_NONE, "unwrap of None (§4.9 UB-009)", &LOC(20, 1, 0)); }
-static void e_bool_bits(void)   { infy_panic(R_BAD_BOOL, "byte 0x02 is not a bool (§4.1)", &LOC(21, 1, 0)); }
-static void e_shift_u8(void)    { infy_panic(R_SHIFT_WIDTH, "shift 8 on u8 (§4.12)", &LOC(22, 1, 0)); }
+                                  char* c = infy_to_cstr(s, LOC(19, 1, 0)); free(c); }
+static void e_unwrap_none(void) { infy_panic(R_UNWRAP_NONE, "unwrap of None (§4.9 UB-009)", LOC(20, 1, 0)); }
+static void e_bool_bits(void)   { infy_panic(R_BAD_BOOL, "byte 0x02 is not a bool (§4.1)", LOC(21, 1, 0)); }
+static void e_shift_u8(void)    { infy_panic(R_SHIFT_WIDTH, "shift 8 on u8 (§4.12)", LOC(22, 1, 0)); }
 static void e_rng_empty(void)   { InfyRng r = infy_rng_seeded(1); (void)infy_rng_choice_index(&r, 0); }
 static void e_rng_range_empty(void) { InfyRng r = infy_rng_seeded(1); (void)infy_rng_range(&r, 5, 5); }
-static void e_atrack_null(void) { (void)infy_atrack_ptr_in(0, 16, &LOC(23, 1, 0)); }
-static void e_atrack_err(void)  { infy_atrack_err_out(0, &LOC(24, 1, 0)); }
-static void e_focus_wrap(void)  { (void)infy_focus_spawn(0, 0, &LOC(25, 1, 0)); }
-static void e_goto_missing(void){ infy_goto_checked(0, 999, &LOC(26, 1, 0)); }
-static void e_radix(void)       { infy_panic(R_RADIX, "from_str_radix radix 37 (§10.9)", &LOC(27, 1, 0)); }
-static void e_iter_guard(void)  { infy_panic(R_ITER_GUARD, "iterator exceeded iter_guard_steps (§10.10)", &LOC(28, 1, 0)); }
+static void e_atrack_null(void) { (void)infy_atrack_ptr_in(0, 16, LOC(23, 1, 0)); }
+static void e_atrack_err(void)  { infy_atrack_err_out(0, LOC(24, 1, 0)); }
+static void e_focus_wrap(void)  { (void)infy_focus_spawn(0, 0, LOC(25, 1, 0)); }
+static void e_goto_missing(void){ infy_goto_checked(0, 999, LOC(26, 1, 0)); }
+static void e_radix(void)       { infy_panic(R_RADIX, "from_str_radix radix 37 (§10.9)", LOC(27, 1, 0)); }
+static void e_iter_guard(void)  { infy_panic(R_ITER_GUARD, "iterator exceeded iter_guard_steps (§10.10)", LOC(28, 1, 0)); }
 static void e_push_nul(void)    { InfyString s = infy_string_new(); infy_string_push(&s, 0); infy_string_drop(&s); }
 static void e_push_surr(void)   { InfyString s = infy_string_new(); infy_string_push(&s, 0xD800); infy_string_drop(&s); }
 
@@ -178,13 +188,13 @@ static void test_arithmetic(void) {
 
     /* ... and saturate under overflow = "saturate" (§4.4), with no panic at all */
     infy_profile.overflow = INFY_OV_SATURATE;
-    CK_EQ(infy_add_u8(255, 1, &LOC(1, 1, 0)), 255);
-    CK_EQ(infy_sub_u16(0, 1, &LOC(1, 1, 0)), 0);
-    CK_EQ(infy_mul_u32(0x80000u, 0x10000u, &LOC(1, 1, 0)), 0xFFFFFFFFu);
-    CK_EQ(infy_add_i8(127, 1, &LOC(1, 1, 0)), 127);
-    CK_EQ(infy_sub_i8(-128, 1, &LOC(1, 1, 0)), -128);
-    CK_EQ(infy_div_i64(MIN64_TEST, -1, &LOC(1, 1, 0)), MAX64_TEST);
-    CK_EQ(infy_rem_i64(MIN64_TEST, -1, &LOC(1, 1, 0)), 0);
+    CK_EQ(infy_add_u8(255, 1, LOC(1, 1, 0)), 255);
+    CK_EQ(infy_sub_u16(0, 1, LOC(1, 1, 0)), 0);
+    CK_EQ(infy_mul_u32(0x80000u, 0x10000u, LOC(1, 1, 0)), 0xFFFFFFFFu);
+    CK_EQ(infy_add_i8(127, 1, LOC(1, 1, 0)), 127);
+    CK_EQ(infy_sub_i8(-128, 1, LOC(1, 1, 0)), -128);
+    CK_EQ(infy_div_i64(MIN64_TEST, -1, LOC(1, 1, 0)), MAX64_TEST);
+    CK_EQ(infy_rem_i64(MIN64_TEST, -1, LOC(1, 1, 0)), 0);
     infy_profile.overflow = INFY_OV_PANIC;
 
     /* div/rem by zero is R-0002, never silent (§4.9 UB-004) */
@@ -218,41 +228,41 @@ static void test_arithmetic(void) {
     expect_panic("iter guard", R_ITER_GUARD, e_iter_guard);
 
     /* §4.12: division truncates toward zero, % takes the sign of the dividend */
-    CK_EQ(infy_div_i32(-7, 2, &LOC(1, 1, 0)), -3);
-    CK_EQ(infy_div_i32(7, -2, &LOC(1, 1, 0)), -3);
-    CK_EQ(infy_div_i32(-7, -2, &LOC(1, 1, 0)), 3);
-    CK_EQ(infy_rem_i32(-7, 2, &LOC(1, 1, 0)), -1);
-    CK_EQ(infy_rem_i32(7, -2, &LOC(1, 1, 0)), 1);
-    CK_EQ(infy_rem_i64(-7, -2, &LOC(1, 1, 0)), -1);
+    CK_EQ(infy_div_i32(-7, 2, LOC(1, 1, 0)), -3);
+    CK_EQ(infy_div_i32(7, -2, LOC(1, 1, 0)), -3);
+    CK_EQ(infy_div_i32(-7, -2, LOC(1, 1, 0)), 3);
+    CK_EQ(infy_rem_i32(-7, 2, LOC(1, 1, 0)), -1);
+    CK_EQ(infy_rem_i32(7, -2, LOC(1, 1, 0)), 1);
+    CK_EQ(infy_rem_i64(-7, -2, LOC(1, 1, 0)), -1);
     /* the §4.12 identity: (a/b)*b + a%b == a */
     for (int64_t a = -20; a <= 20; a++) {
         for (int64_t b = -5; b <= 5; b++) {
             if (b == 0) continue;
-            int64_t q = infy_div_i64(a, b, &LOC(1, 1, 0));
-            int64_t r = infy_rem_i64(a, b, &LOC(1, 1, 0));
+            int64_t q = infy_div_i64(a, b, LOC(1, 1, 0));
+            int64_t r = infy_rem_i64(a, b, LOC(1, 1, 0));
             CK_EQ(q * b + r, a);
-            CK((b > 0) == 1 || r <= 0 || r == 0);           /* sign of r follows a, not b */
+            CK(r == 0 || (r > 0) == (a > 0));              /* sign of r follows a, not b (§4.12) */
             if (a > 0) CK(r >= 0 ? 1 : 0);
             if (a < 0) CK(r <= 0 ? 1 : 0);
         }
     }
     /* no false positives on in-range arithmetic */
-    CK_EQ(infy_add_u64(0xFFFFFFFFFFFFFFFFull, 0, &LOC(1, 1, 0)), 0xFFFFFFFFFFFFFFFFull);
-    CK_EQ(infy_add_i64(MAX64_TEST - 1, 1, &LOC(1, 1, 0)), MAX64_TEST);
-    CK_EQ(infy_mul_i64(MIN64_TEST, 1, &LOC(1, 1, 0)), MIN64_TEST);
-    CK_EQ(infy_shl_u64(1, 63, &LOC(1, 1, 0)), 0x8000000000000000ull);
-    CK_EQ(infy_shr_i64(-8, 1, &LOC(1, 1, 0)), -4);
-    CK_EQ(infy_shr_i64(-1, 63, &LOC(1, 1, 0)), -1);
-    CK_EQ(infy_shr_u64(0xFFFFFFFFFFFFFFFFull, 63, &LOC(1, 1, 0)), 1);
+    CK_EQ(infy_add_u64(0xFFFFFFFFFFFFFFFFull, 0, LOC(1, 1, 0)), 0xFFFFFFFFFFFFFFFFull);
+    CK_EQ(infy_add_i64(MAX64_TEST - 1, 1, LOC(1, 1, 0)), MAX64_TEST);
+    CK_EQ(infy_mul_i64(MIN64_TEST, 1, LOC(1, 1, 0)), MIN64_TEST);
+    CK_EQ(infy_shl_u64(1, 63, LOC(1, 1, 0)), 0x8000000000000000ull);
+    CK_EQ(infy_shr_i64(-8, 1, LOC(1, 1, 0)), -4);
+    CK_EQ(infy_shr_i64(-1, 63, LOC(1, 1, 0)), -1);
+    CK_EQ(infy_shr_u64(0xFFFFFFFFFFFFFFFFull, 63, LOC(1, 1, 0)), 1);
     CK_EQ(infy_wrapping_add_u64(0xFFFFFFFFFFFFFFFFull, 1), 0);
     CK_EQ(infy_wrapping_add_i64(MAX64_TEST, 1), MIN64_TEST);
     CK_EQ(infy_saturating_add_u64(0xFFFFFFFFFFFFFFFFull, 1), 0xFFFFFFFFFFFFFFFFull);
     CK_EQ(infy_saturating_add_i64(MAX64_TEST, 1), MAX64_TEST);
     CK_EQ(infy_saturating_add_i64(MIN64_TEST, -1), MIN64_TEST);
     CK_EQ(infy_wrapping_shl_u64(1, 64), 1);
-    CK(fabs(infy_remf64(7.5, 2.0, &LOC(1, 1, 0)) - 1.5) < 1e-12);
-    CK(fabs(infy_remf64(-7.5, 2.0, &LOC(1, 1, 0)) + 1.5) < 1e-12);
-    CK(fabs(infy_remf32(5.5f, 2.0f, &LOC(1, 1, 0)) - 1.5f) < 1e-6f);
+    CK(fabs(infy_remf64(7.5, 2.0, LOC(1, 1, 0)) - 1.5) < 1e-12);
+    CK(fabs(infy_remf64(-7.5, 2.0, LOC(1, 1, 0)) + 1.5) < 1e-12);
+    CK(fabs(infy_remf32(5.5f, 2.0f, LOC(1, 1, 0)) - 1.5f) < 1e-6f);
 }
 
 /* ============================ 2. drop / defer order (§4.7.4, §3.13) ============================ */
@@ -268,7 +278,7 @@ static void drop_b(void* p) { (void)p; rec("(b)"); }
 static void drop_c(void* p) { (void)p; rec("(c)"); }
 static void defer_x(void* p) { (void)p; rec("[x]"); }
 static void defer_y(void* p) { (void)p; rec("[y]"); }
-static void drop_panic(void* p) { (void)p; infy_panic(R_UNWRAP_NONE, "panic inside Drop", &LOC(50, 1, 0)); }
+static void drop_panic(void* p) { (void)p; infy_panic(R_UNWRAP_NONE, "panic inside Drop", LOC(50, 1, 0)); }
 
 static void e_double_panic(void) {
     infy_scope_mark();
@@ -373,17 +383,17 @@ static void test_vec_cap(void) {
     /* the growth is observable through capacity(), i.e. it *is* the ABI: pushing must land exactly
      * on these numbers, and growth never shrinks */
     InfyVec v = { 0, 0, 0 };
-    for (int i = 0; i < 4; i++) infy_vec_push(&v, &i, sizeof(int), alignof(int));
+    for (int i = 0; i < 4; i++) infy_vec_push(&v, &i, sizeof(int), _Alignof(int));
     CK_EQ(v.len, 4);
     CK_EQ(v.cap, 4);
     int x = 4;
-    infy_vec_push(&v, &x, sizeof(int), alignof(int));
+    infy_vec_push(&v, &x, sizeof(int), _Alignof(int));
     CK_EQ(v.cap, 8);
     CK_EQ(v.len, 5);
-    for (int i = 5; i < 9; i++) infy_vec_push(&v, &i, sizeof(int), alignof(int));
+    for (int i = 5; i < 9; i++) infy_vec_push(&v, &i, sizeof(int), _Alignof(int));
     CK_EQ(v.cap, 16);
     /* elements are address-stable modulo reallocation and readable (§4.8) */
-    for (int i = 0; i < 9; i++) CK_EQ(*(int*)infy_vec_index(&v, (uint64_t)i, sizeof(int), &LOC(1,1,0)), i);
+    for (int i = 0; i < 9; i++) CK_EQ(*(int*)infy_vec_index(&v, (uint64_t)i, sizeof(int), LOC(1,1,0)), i);
     infy_vec_drop(&v, sizeof(int), 0);
     CK_EQ(v.cap, 0);
 
@@ -412,11 +422,12 @@ static void test_strings(void) {
     CK_EQ(infy_str_eq_nfc(a, a), 1);
     CK(infy_str_eq_nfc(a, infy_str_of("e")) == 0);
 
-    /* Hangul is algorithmic: 한 = U+AC00 = L(1112) V(1161) T(11A8) */
+    /* Hangul is algorithmic: 한 = U+D55C decomposes to L=U+1112, V=U+1161, T=U+11AB
+     * (Lindex 18, Vindex 0, Tindex 4 -> jamo = U+11A7 + 4) */
     static const uint8_t hangul_s[]  = { 0xED, 0x95, 0x9C };                 /* U+D55C 한 */
     static const uint8_t hangul_j[]  = { 0xE1, 0x84, 0x92,                   /* U+1112 */
-                                         0xEA, 0xB5, 0xAD,                   /* U+1161 */
-                                         0xE0, 0xB2, 0xA8 };                 /* U+11A8 */
+                                         0xE1, 0x85, 0xA1,                   /* U+1161 */
+                                         0xE1, 0x86, 0xAB };                 /* U+11AB */
     CK_EQ(infy_str_eq_nfc((InfyStr){ hangul_s, sizeof hangul_s },
                           (InfyStr){ hangul_j, sizeof hangul_j }), 1);
 
@@ -442,7 +453,7 @@ static void test_strings(void) {
     CK_EQ(infy_str_cmp(infy_str_of("abc"), infy_str_of("abc")), 0);
     CK_EQ(infy_str_cmp(infy_str_of("ab"), infy_str_of("abc")), -1);
     CK_EQ(infy_str_cmp(infy_str_of(""), infy_str_of("a")), -1);
-    CK_EQ(infy_str_cmp(infy_str_of("é"), infy_str_of("z")), -1);   /* U+00E9 < U+007A? no: 0xC3 > 0x7A */
+    CK_EQ(infy_str_cmp(infy_str_of("é"), infy_str_of("z")), 1);   /* U+00E9 > U+007A; bytes agree (0xC3 > 0x7A) */
     CK_EQ(infy_str_cmp(infy_str_of("a"), infy_str_of("A")), 1);
 
     /* str view of a literal does not copy (§4.1) */
@@ -455,7 +466,7 @@ static void test_strings(void) {
     InfyString s = infy_string_from(infy_str_of("ab"));
     infy_string_push_str(&s, infy_str_of("cd"));
     s = infy_string_concat(s, infy_str_of("!"));
-    CK_STR((const char*)s.ptr, "abcd!");
+    CK_STR(cstr(&s), "abcd!");
     CK_EQ(s.len, 5);
     InfyStr view = infy_string_as_str(&s);
     CK_EQ(view.len, 5);
@@ -465,7 +476,7 @@ static void test_strings(void) {
     CK_EQ(s.cap, 0);
 
     /* to_cstr is explicit (§7.6.4) and NUL-free */
-    char* c = infy_to_cstr(infy_str_of("plain"), &LOC(1, 1, 0));
+    char* c = infy_to_cstr(infy_str_of("plain"), LOC(1, 1, 0));
     CK_STR(c, "plain");
     infy_free(c);
 
@@ -513,7 +524,7 @@ static void test_map(void) {
     CK(p != 0);
     if (p) CK_EQ(*p, 501);
     CK(infy_map_get(m, &(uint64_t){ 1000 }) == 0);
-    infy_map_drop(m);
+    /* m stays live: the second-Map comparison below iterates it, and it is dropped once at the end */
 
     /* a second Map built in a different insertion order iterates identically: the order is the
      * key Ord, never the hash/insertion order (§10.13, §12.4 reproducibility) */
@@ -548,7 +559,7 @@ static void test_map(void) {
         key = 9; val = 900;
         infy_vecmap_put(&vm, &key, &val);
         CK_EQ(vm.n, 6);
-        CK_EQ(vm.data[5 * (vm.key_size + vm.val_size) + vm.key_size], 0);  /* last inserted */
+        CK_EQ(*(uint64_t*)(vm.data + 5 * (vm.key_size + vm.val_size)), 9);   /* slot 5 = last inserted key */
         CK_EQ(*(uint64_t*)(vm.data + 5 * (vm.key_size + vm.val_size) + vm.key_size), 900);
         infy_vecmap_free(&vm);
 
@@ -573,8 +584,11 @@ static void test_map(void) {
 static void test_hash(void) {
     section("xxHash64 (§6.7 Hash derive algorithm)");
 
-    /* externally published reference vectors (xxhash python module docs, seed 0) */
-    CK_EQ(infy_xxhash64("", 0, 0), 0xEF46DB3751D8F993ull);
+    /* reference vectors: xxh64("xxhash") / seed 20141025 are the values published by the python
+     * xxhash module docs; the empty-input value 0xEF46DB3751D8E999 is XXH64("") recomputed from the
+     * canonical algorithm (avalanche of PRIME64_5 with len 0), cross-checked against both docs
+     * vectors by an independent implementation. */
+    CK_EQ(infy_xxhash64("", 0, 0), 0xEF46DB3751D8E999ull);
     CK_EQ(infy_xxhash64("xxhash", 6, 0), 0x32DD38952C4BC720ull);
     CK_EQ(infy_xxhash64("xxhash", 6, 20141025), 0xB559B98D844E0635ull);
 
@@ -654,7 +668,7 @@ static const char* one(InfyFmtSpec sp, InfyFmtArg arg) {
 
 /* a generated Debug impl consults the pretty hint because InfyDebugVt cannot carry a spec */
 static void point_write(InfyString* out, const void* obj);
-static const InfyDebugVt point_vt = { (void (*)(struct InfyString*, const void*))point_write };
+static const InfyDebugVt point_vt = { point_write };
 struct Point { int64_t x; int64_t y; };
 static void point_write(InfyString* out, const void* obj) {
     const struct Point* p = (const struct Point*)obj;
@@ -698,7 +712,8 @@ static void test_fmt(void) {
         sp[0] = S0(0);                                    /* w */
         sp[1] = S0(1); sp[1].lit = "x"; sp[1].lit_len = 1; /* h */
         InfyFmtArg args[2] = { A_UINT(8), A_UINT(2) };
-        CK_STR(fmt_run_str(sp, 2, args, 2), "8x");
+        /* the §10.11 example itself: fmt("{w}x{h}", w=8, h=2) -> '8' + 'x' + '2' */
+        CK_STR(fmt_run_str(sp, 2, args, 2), "8x2");
     }
     /* "{:>10}" right align, space fill */
     {
@@ -727,7 +742,10 @@ static void test_fmt(void) {
         CK_STR(one(s, A_F64(3.14159)), "3.142");
         CK_STR(one(s, A_STR("hello world")), "hel");
         s.precision = 4;
-        CK_STR(one(s, A_STR("日本語x")), "日本");
+        /* §10.11 does not say what `{:.N}` counts for str; this runtime counts BYTES and snaps the
+         * cut down to a code-point boundary, so 4 bytes of "日本語x" yield only 日 (3 bytes).
+         * Recorded as deviation D-20. */
+        CK_STR(one(s, A_STR("日本語x")), "日");
     }
     /* "{:e}" exponent form: shortest round-trip, no '+' and no leading zeros */
     {
@@ -766,8 +784,9 @@ static void test_fmt(void) {
         CK_STR(one(s, a), "Point { x: 1, y: 2 }");
         InfyFmtSpec sp = S0(0); sp.which = FY_DEBUG_PRETTY; sp.alt = 1;
         CK_STR(one(sp, a), "Point {\n    x: 1,\n    y: 2,\n}");
-        /* width applies to the rendered debug text too */
-        InfyFmtSpec sw = S0(0); sw.which = FY_DEBUG; sw.width = 20; sw.align = '>';
+        /* width applies to the rendered debug text too ("Point { x: 1, y: 2 }" is exactly 20
+         * characters, so the width has to exceed it for the pad to be observable) */
+        InfyFmtSpec sw = S0(0); sw.which = FY_DEBUG; sw.width = 23; sw.align = '>';
         CK_STR(one(sw, a), "   Point { x: 1, y: 2 }");
     }
     /* radix conversions with the alt flag: {:#x} {:#X} {:b} {:#o} */
@@ -798,15 +817,15 @@ static void test_fmt(void) {
         InfyFmtArg vals[2] = { A_INT(7), A_STR("t") };
         InfyString out = infy_string_new();
         infy_debug_write_struct(&out, "Pair", fields, vals, 2, 1, 0);
-        CK_STR((const char*)out.ptr, "Pair(7, \"t\")");
+        CK_STR(cstr(&out), "Pair(7, \"t\")");
         infy_string_drop(&out);
         out = infy_string_new();
         infy_debug_write_struct(&out, "Pair", fields, vals, 2, 1, 1);
-        CK_STR((const char*)out.ptr, "Pair(\n    7,\n    \"t\",\n)");
+        CK_STR(cstr(&out), "Pair(\n    7,\n    \"t\",\n)");
         infy_string_drop(&out);
         out = infy_string_new();
         infy_debug_write_struct(&out, "Empty", 0, 0, 0, 0, 1);
-        CK_STR((const char*)out.ptr, "Empty {}");
+        CK_STR(cstr(&out), "Empty {}");
         infy_string_drop(&out);
     }
     /* the direct value writers used by generated impls */
@@ -819,7 +838,7 @@ static void test_fmt(void) {
         infy_fmt_write_char(&o, '!');
         infy_fmt_write_float(&o, 2.5, &s);
         infy_fmt_write_str(&o, infy_str_of("z"), &s);
-        CK_STR((const char*)o.ptr, "  -7   9false! 2.5   z");
+        CK_STR(cstr(&o), "  -7   9false! 2.5   z");
         infy_string_drop(&o);
     }
     /* a runtime out-of-range argument index is a normative panic, never an empty hole */
@@ -831,7 +850,8 @@ static InfyFmtArg g_badargs[1];
 static void fmt_bad_index_thunk(void) {
     g_badspec[0] = S0(3);
     g_badargs[0] = A_INT(1);
-    infy_string_drop(infy_fmt_run(g_badspec, 1, g_badargs, 1));
+    InfyString r = infy_fmt_run(g_badspec, 1, g_badargs, 1);
+    infy_string_drop(&r);
 }
 
 /* ============================ 8. time + rand (§10.12) ============================ */
@@ -888,9 +908,14 @@ static void test_rand(void) {
     for (int i = 0; i < 500; i++) CK(infy_rng_choice_index(&r, 5) < 5);
 
     /* shuffle: tail-to-head Fisher-Yates with range(0..=i) is normative, so the permutation for a
-     * fixed seed is a golden value (§12.4 equivalence matrix, §10.12). */
+     * fixed seed is a golden value (§12.4 equivalence matrix, §10.12).
+     * The golden below was DERIVED, not observed: an independent implementation of the pinned
+     * algorithm (SplitMix64 seeding -> PCG-XSH-RR 32/64 -> Lemire unbiased bounded draw ->
+     * i = n-1 down to 1, j = below(i+1)) reproduces it for seed 0xDEADBEEFCAFEF00D. The previous
+     * constant in this file matched no Fisher-Yates direction and not the biased modulo variant
+     * either, i.e. it had no derivation at all. */
     dump_rng(0xDEADBEEFCAFEF00Dull);
-    static const int golden_perm[12] = { 5, 10, 7, 2, 0, 3, 1, 9, 11, 4, 8, 6 };
+    static const int golden_perm[12] = { 7, 9, 10, 1, 6, 3, 11, 8, 2, 5, 0, 4 };
     for (int i = 0; i < 12; i++) CK_EQ(g_perm[i], golden_perm[i]);
     /* it is a permutation: every index appears exactly once (no bias-introducing duplicates) */
     int seen[12] = { 0 };
@@ -961,12 +986,10 @@ static void fifo_note(const char* tag) {
 
 /* each waiter: acquire (blocks until it is the FIFO head), note its tag, then wait until the
  * previous holder signalled that it is done, then release */
-struct WaiterArg { const char* tag; int idx; };
-
 static THREAD_FN waiter_queue_b(void* p) {
     struct WaiterArg* a = (struct WaiterArg*)p;
     fifo_note("(B-queued)");
-    uint64_t g = infy_lock_acquire("db:orders:writer", &LOC(100, 1, 0));
+    uint64_t g = infy_lock_acquire("db:orders:writer", LOC(100, 1, 0));
     fifo_note("[B]");
     infy_lock_release(g);
     fifo_note("(B-done)");
@@ -976,7 +999,7 @@ static THREAD_FN waiter_queue_b(void* p) {
 static THREAD_FN waiter_queue_c(void* p) {
     struct WaiterArg* a = (struct WaiterArg*)p;
     fifo_note("(C-queued)");
-    uint64_t g = infy_lock_acquire("db:orders:writer", &LOC(101, 1, 0));
+    uint64_t g = infy_lock_acquire("db:orders:writer", LOC(101, 1, 0));
     fifo_note("[C]");
     infy_lock_release(g);
     fifo_note("(C-done)");
@@ -991,7 +1014,7 @@ static void test_lock_fifo(void) {
     const char* res = "db:orders:writer";
 
     /* 1) the plain mutex property: nested acquisitions from different threads serialise */
-    uint64_t g1 = infy_lock_acquire(res, &LOC(90, 1, 0));
+    uint64_t g1 = infy_lock_acquire(res, LOC(90, 1, 0));
     CK(g1 != 0);
 
     /* 2) two waiters queue while the main thread holds the resource; the service order must be
@@ -1030,7 +1053,7 @@ static THREAD_FN waiter_spin(void* p) {
     struct WaiterArg* a = (struct WaiterArg*)p;
     (void)a;
     for (int i = 0; i < 100; i++) {
-        uint64_t g = infy_lock_acquire("db:orders:writer", &LOC(102, 1, 0));
+        uint64_t g = infy_lock_acquire("db:orders:writer", LOC(102, 1, 0));
         int was = inside;
         inside = was + 1;
         if (inside > max_inside) max_inside = inside;
@@ -1073,7 +1096,7 @@ static void node_body(void* frame) {
         char b[64];
         snprintf(b, sizeof b, "(n1-panic F%u)", (unsigned)id);
         run_note(b);
-        infy_panic(R_INDEX_OOB, "index 9 out of bounds for length 4 (§4.9 UB-008)", &LOC(200, 5, 1));
+        infy_panic(R_INDEX_OOB, "index 9 out of bounds for length 4 (§4.9 UB-008)", LOC(200, 5, 1));
     }
     run_note("(n1)");
 }
@@ -1113,9 +1136,9 @@ static void test_focus_radius(void) {
     infy_profile.panic_radius = INFY_RADIUS_FOCUS;
 
     g_run_log[0] = 0;
-    uint32_t f1 = infy_focus_spawn(0, 0, &LOC(1, 1, 0));
-    uint32_t f2 = infy_focus_spawn(0, 0, &LOC(1, 1, 0));
-    uint32_t f3 = infy_focus_spawn(0, 0, &LOC(1, 1, 0));
+    uint32_t f1 = infy_focus_spawn(0, 0, LOC(1, 1, 0));
+    uint32_t f2 = infy_focus_spawn(0, 0, LOC(1, 1, 0));
+    uint32_t f3 = infy_focus_spawn(0, 0, LOC(1, 1, 0));
     CK(f1 != f2 && f2 != f3);
     g_fail_focus_id = (int)f2;
     g_obs_count = 0;
@@ -1165,8 +1188,8 @@ static void test_focus_radius(void) {
     infy_sched_reset();
     infy_sched_init(1, 0, 0);
     g_run_log[0] = 0;
-    uint32_t s1 = infy_focus_spawn(1, 0, &LOC(1, 1, 0));
-    uint32_t s2 = infy_focus_spawn(1, 0, &LOC(1, 1, 0));
+    uint32_t s1 = infy_focus_spawn(1, 0, LOC(1, 1, 0));
+    uint32_t s2 = infy_focus_spawn(1, 0, LOC(1, 1, 0));
     CK(s1 != s2);
     code = infy_sched_run_until_idle();
     /* node 1 of the first focus to run asks for stop; both focuses then finish the node they are
@@ -1185,9 +1208,11 @@ static void test_radius_chain(void) {
     infy_sched_init(1, 0, 0);
     infy_profile.panic_radius = INFY_RADIUS_CHAIN;
     g_run_log[0] = 0;
-    uint32_t a = infy_focus_spawn(0, 0, &LOC(1, 1, 0));
-    uint32_t b = infy_focus_spawn(0, 0, &LOC(1, 1, 0));
-    uint32_t c = infy_focus_spawn(1, 0, &LOC(1, 1, 0));      /* other chain: untouched */
+    /* §8.2 is FIFO, so the panicking focus has to be the one that runs first: otherwise its
+     * sibling finishes before the panic and there is nothing left in the chain to mark Failed. */
+    uint32_t b = infy_focus_spawn(0, 0, LOC(1, 1, 0));      /* panics in node 1 */
+    uint32_t a = infy_focus_spawn(0, 0, LOC(1, 1, 0));      /* still queued when the chain fails */
+    uint32_t c = infy_focus_spawn(1, 0, LOC(1, 1, 0));      /* other chain: untouched */
     g_fail_focus_id = (int)b;
     (void)infy_sched_run_until_idle();
     uint32_t failed_chain0 = 0, done_chain1 = 0;
@@ -1214,14 +1239,14 @@ static void test_focus_wraparound(void) {
     /* ids are never reused: a refusal leaves the counter where it was */
     CK_EQ(infy_sched.next_focus_id, 0xFFFFFFFFu);
     infy_test_set_focus_seq(1000u);
-    uint32_t id = infy_focus_spawn(0, 0, &LOC(1, 1, 0));
+    uint32_t id = infy_focus_spawn(0, 0, LOC(1, 1, 0));
     CK_EQ(id, 1000u);
-    id = infy_focus_spawn(0, 0, &LOC(1, 1, 0));
+    id = infy_focus_spawn(0, 0, LOC(1, 1, 0));
     CK_EQ(id, 1001u);
     /* goto to a node that does not exist is R-0010 (§4.9 UB-013) */
     infy_sched_reset();
     infy_sched_init(1, 0, 0);
-    infy_focus_spawn(0, 0, &LOC(1, 1, 0));
+    infy_focus_spawn(0, 0, LOC(1, 1, 0));
     g_run_log[0] = 0;
     expect_panic("goto missing target", R_GOTO_TARGET, e_goto_missing);
 }
@@ -1232,8 +1257,8 @@ static void test_pause_yield(void) {
     infy_sched_reset();
     infy_sched_init(1, 0, 0);
     g_run_log[0] = 0;
-    uint32_t f1 = infy_focus_spawn(0, 0, &LOC(1, 1, 0));
-    uint32_t f2 = infy_focus_spawn(0, 0, &LOC(1, 1, 0));
+    uint32_t f1 = infy_focus_spawn(0, 0, LOC(1, 1, 0));
+    uint32_t f2 = infy_focus_spawn(0, 0, LOC(1, 1, 0));
     CK_EQ(infy_focus_count(0), 2u);
     infy_focus_pause(f2);                     /* suspends before it ever ran */
     CK_EQ(infy_focus_count(0), 2u);
@@ -1257,7 +1282,7 @@ static void test_pause_yield(void) {
     /* backpressure throttles admission but never reorders or fails a start() (§11.4) */
     infy_set_pressure(0.9f);
     CK_EQ(infy_sched.pressure >= 0.5f ? 1u : 0u, 1u);
-    uint32_t tf = infy_focus_spawn(0, 0, &LOC(1, 1, 0));
+    uint32_t tf = infy_focus_spawn(0, 0, LOC(1, 1, 0));
     CK_EQ(infy_sched.n_throttled, 1u);
     CK(tf != 0u);
     infy_set_pressure(0.1f);
@@ -1493,14 +1518,15 @@ static void e_hs_events(void) {
 static void e_hs_env(void)    { (void)infy_host_handshake(INFY_IFABI, 0, 0, 0xDEADBEEFDEADBEEFull); }
 static void e_hs_no_table(void) { (void)infy_host_handshake(INFY_IFABI, 0, 3, infy_env_layout_hash()); }
 static void e_call_unknown(void) { InfyArgFrame fr; memset(&fr, 0, sizeof fr);
-                                   (void)infy_host_call_event(31337, &fr, &LOC(300, 1, 0)); }
+                                   (void)infy_host_call_event(31337, &fr, LOC(300, 1, 0)); }
 static void e_call_err(void)  { InfyArgFrame fr; memset(&fr, 0, sizeof fr);
-                                 (void)infy_host_call_event(4040, &fr, &LOC(301, 1, 0)); }
+                                 (void)infy_host_call_event(4040, &fr, LOC(301, 1, 0)); }
 static void e_call_deep(void) {
     infy_test_set_host_nesting(8);
     InfyArgFrame fr; memset(&fr, 0, sizeof fr);
-    (void)infy_host_call_event(5, &fr, &LOC(302, 1, 0));
-    infy_test_set_host_nesting(0);
+    (void)infy_host_call_event(5, &fr, LOC(302, 1, 0));
+    /* unreachable: the panic unwinds past this call, so the reset lives with the expect_panic
+     * that catches it (leaving the depth at 8 would make every later host call panic) */
 }
 static void e_query_wrong_type(void) {
     int64_t x = 0;
@@ -1536,10 +1562,11 @@ static void test_host(void) {
     expect_panic("host returned an error", R_HOST_UNMAPPED, e_call_err);
     /* nesting deeper than 8 is R-0902 (§11.1) */
     expect_panic("host nesting > 8", R_HOST_NESTING, e_call_deep);
+    infy_test_set_host_nesting(0);              /* the panic skipped e_call_deep's own reset */
 
     /* a well-formed call returns the value the host wrote */
     InfyArgFrame fr; memset(&fr, 0, sizeof fr);
-    InfyOutVal v = infy_host_call_event(5, &fr, &LOC(303, 1, 0));
+    InfyOutVal v = infy_host_call_event(5, &fr, LOC(303, 1, 0));
     CK_EQ(v.tag, 1u);
     CK_EQ(v.v.i, 10);
 
@@ -1552,14 +1579,14 @@ static void test_host(void) {
     infy_host_set_query("ci/attempt", INFY_HQ_STR, 0, infy_str_of("seven"));
     InfyString qs = infy_string_new();
     CK_EQ(infy_host_query_str(infy_str_of("ci/attempt"), &qs), 1u);
-    CK_STR((const char*)qs.ptr, "seven");
+    CK_STR(cstr(&qs), "seven");
     infy_string_drop(&qs);
     /* wrong key type is R-0901, not a silent reinterpretation */
     expect_panic("query type mismatch", R_HOST_QUERY_TYP, e_query_wrong_type);
     /* std.host.set is the writable side (§10.8) */
     CK_EQ(infy_host_set(infy_str_of("manual/key"), infy_str_of("value")), 0);
     CK_EQ(infy_host_query_str(infy_str_of("manual/key"), &qs), 1u);
-    CK_STR((const char*)qs.ptr, "value");
+    CK_STR(cstr(&qs), "value");
     infy_string_drop(&qs);
 
     /* acquire_resource/release_resource run outside the serialising host lock (§11.1) */
@@ -1583,7 +1610,8 @@ static void test_host(void) {
 
 /* ============================ 13. §9.2 rendering, byte for byte ============================ */
 
-static void e_render_panic(void) {
+static void e_render_panic(void* unused) {
+    (void)unused;
     InfyNodeLoc l = { "rt_sample.infy", 12, 21, 3, 1 };
     infy_panic(R_INDEX_OOB, "index 5 out of bounds for length 4", &l);
 }
@@ -1625,7 +1653,7 @@ static void test_diag_rendering(void) {
         "  \xe2\x94\x8c\xe2\x94\x80 rt_sample.infy:12:21\n"
         "  \xe2\x94\x82\n"
         "12\xe2\x94\x82     var secs: u32 = ticks * 1.5;\n"
-        "  \xe2\x94\x82                     ^  index out of bounds\n"
+        "  \xe2\x94\x82                     ^  \xe4\xb8\x8b\xe6\xa0\x87\xe8\xb6\x8a\xe7\x95\x8c\n"
         "  = focus: 0, chain: 0, node: rt_sample.infy:12:21 (node_idx 3)\n"
         "  = note: index 5 out of bounds for length 4\n";
     CK_STR(got, want);
@@ -1644,7 +1672,10 @@ static void test_diag_rendering(void) {
     /* gutter geometry for a single-digit line number: gw = 2 */
     CK(strncmp(g2, "runtime[R-0005]", 15) == 0);
     CK(strstr(g2, "\n  \xe2\x94\x94") == 0);
-    CK(strstr(g2, "7\xe2\x94\x82 <source unavailable>") == 0);
+    /* the single-digit line number starts its own gutter row (gw = digits(7)+1 = 2): the row is
+     * exactly "7│ ...", never padded to the two-column form */
+    CK(strstr(g2, "\n7\xe2\x94\x82 <source unavailable>") != 0);
+    CK(strstr(g2, "\n 7\xe2\x94\x82") == 0);
     free(g2);
 
     /* every normative R- code renders with its table title (§9.3/§9.7) */
@@ -1654,7 +1685,7 @@ static void test_diag_rendering(void) {
                                       0x0720, 0x0722, 0x0723, 0x0730, 0x0802, 0x0803, 0x0900,
                                       0x0901, 0x0902, 0x0903, 0x0904, 0x0905, 0x1010, 0x1040 };
     for (size_t i = 0; i < sizeof codes / sizeof codes[0]; i++)
-        infy_report((InfyRCode)codes[i], 0, 1, 1, &LOC(1, 1, 0));
+        infy_report((InfyRCode)codes[i], 0, 1, 1, LOC(1, 1, 0));
     fflush(stderr);
     freopen("rt_diag.log", "ab", stderr);
     char* g3 = slurp("rt_render3.log", &n);
@@ -1698,18 +1729,34 @@ static void test_fs(void) {
     CK_EQ(infy_fs_exists("rt_fs_dir/a/b/c"), 1);
     CK_EQ(infy_fs_mkdir_p("rt_fs_dir/a/b/c", &err), 0);        /* idempotent */
 
-    /* File is a whole-file buffer; its Drop closes it (§10.3), so close flushes */
+    /* File is a whole-file buffer; its Drop closes it (§10.3), so close flushes the buffer back.
+     * mode "w" truncates and hands out a 1-byte buffer with no grow call, so what a writable
+     * handle can express through the public API is an in-place mutation of an existing file. */
     InfyFileHandle fh;
     memset(&err, 0, sizeof err);
-    CK_EQ(infy_fs_open("rt_fs_handle.txt", "w", &fh, &err), 0);
+    CK_EQ(infy_fs_write_all("rt_fs_handle.txt", (const uint8_t*)"hello infy", 10, &err), 0);
+    CK_EQ(infy_fs_open("rt_fs_handle.txt", "r+", &fh, &err), 0);
     CK_EQ(fh.readonly, 0u);
-    memcpy(fh.buf, "written by close", 18);
-    fh.len = 18;
+    CK_EQ(fh.len, 10u);
+    memcpy(fh.buf, "HELLO INFY", 10);
     infy_fs_close(&fh);
     memset(&err, 0, sizeof err);
     CK_EQ(infy_fs_read_all("rt_fs_handle.txt", &data, &len, &err), 0);
-    CK_EQ(len, 18u);
-    CK(memcmp(data, "written by close", 18) == 0);
+    CK_EQ(len, 10u);
+    CK(memcmp(data, "HELLO INFY", 10) == 0);
+    infy_free(data);
+
+    /* mode "w" truncates on open: closing the untouched handle leaves an empty file (§10.3) */
+    memset(&err, 0, sizeof err);
+    CK_EQ(infy_fs_write_all("rt_fs_trunc.txt", (const uint8_t*)"was here", 8, &err), 0);
+    memset(&err, 0, sizeof err);
+    CK_EQ(infy_fs_open("rt_fs_trunc.txt", "w", &fh, &err), 0);
+    CK_EQ(fh.readonly, 0u);
+    CK_EQ(fh.len, 0u);
+    infy_fs_close(&fh);
+    memset(&err, 0, sizeof err);
+    CK_EQ(infy_fs_read_all("rt_fs_trunc.txt", &data, &len, &err), 0);
+    CK_EQ(len, 0u);
     infy_free(data);
 
     /* read-only handle: close must not write anything back */
@@ -1729,6 +1776,9 @@ static void test_fs(void) {
 
 static void e_leak_check(void);
 static void e_free_leaky(void);
+static int      g_leaky_obj;
+static uint64_t g_leaky_cnt;
+static void*    g_leaky_box;
 
 static int g_init_order[4];
 static int g_init_n;
@@ -1767,7 +1817,10 @@ static void test_misc(void) {
     /* releasing it (count dropped to 0 first) makes the check pass */
     cnt = 0;
     expect_panic("arc_cb_free with live count", R_CB_LEAK, e_free_leaky);
-    infy_arc_cb_free(boxed, &LOC(1, 1, 0));
+    /* R-0723 leaves the box registered, so release it for real here: otherwise the leak check
+     * below (which must stay silent) reports this very box */
+    if (g_leaky_box) { g_leaky_cnt = 0; infy_arc_cb_free(g_leaky_box, LOC(2, 1, 0)); g_leaky_box = 0; }
+    infy_arc_cb_free(boxed, LOC(1, 1, 0));
     infy_leak_check();                  /* must not panic now */
 
     /* the log sink B-track print maps to (§7.7.1 item 4) */
@@ -1795,12 +1848,11 @@ static void test_misc(void) {
 
 static void e_leak_check(void) { infy_leak_check(); }
 static void e_free_leaky(void) {
-    static uint64_t c = 2;
-    static int obj = 1;
-    void* b = infy_arc_cb_box(&obj, &c);
-    infy_arc_cb_free(b, &LOC(2, 1, 0));   /* count is still 2 -> R-0723 */
-    c = 0;
-    infy_arc_cb_free(b, &LOC(2, 1, 0));   /* already released: no-op, must not double free */
+    g_leaky_cnt = 2;
+    g_leaky_box = infy_arc_cb_box(&g_leaky_obj, &g_leaky_cnt);
+    infy_arc_cb_free(g_leaky_box, LOC(2, 1, 0));   /* count is still 2 -> R-0723 */
+    /* the panic unwinds past here, and R-0723 leaves the box registered on purpose, so the
+     * release happens in test_misc once the panic has been caught */
 }
 
 /* ============================ main ============================ */
@@ -1808,6 +1860,8 @@ static void e_free_leaky(void) {
 int main(int argc, char** argv) {
     /* diagnostics go to a log so the console shows only assertion results */
     freopen("rt_diag.log", "wb", stderr);
+    /* unbuffered: if a case crashes the process, the console still holds the last section run */
+    setvbuf(stdout, NULL, _IONBF, 0);
 
     if (argc > 2 && strcmp(argv[1], "--dump-seed") == 0) {
         /* cross-process reproducibility probe: same seed must print the same bytes twice */
