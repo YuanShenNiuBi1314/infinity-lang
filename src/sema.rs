@@ -1464,6 +1464,25 @@ impl<'a> Checker<'a> {
                 if !type_compatible(&tt, &vt) && !matches!(vt, Ty::Invalid) && !matches!(tt, Ty::Invalid) {
                     self.emit("E-0110", value.span, format!("赋值类型不匹配：左值 {}，右值 {}", tt.text(), vt.text()), "赋值", Some("§4.2：无隐式数字转换（UB-001）".into()), Some("显式 `as`".into()));
                 }
+                // §4.3: `let` is an immutable binding. This is the only reachable assignment path —
+                // §3.5 parses `x = 2` as an assignment *expression*, so `StmtKind::Assign` never occurs.
+                if let ExprKind::Ident(n) = &target.kind {
+                    if let Some((_, mutable)) = self.lookup(n) {
+                        if !mutable {
+                            self.emit("E-0120", target.span, "修改 let 不可变绑定", n, Some("§4.3：let 是不可变绑定".into()), Some(format!("改 `var {n} = …`，或使用 `std.sync.RefCell`")));
+                        }
+                    }
+                }
+                // §4.6: the `env` accessors are read-only; UB-024 forbids quietly accepting a write.
+                if let ExprKind::Field { base, name } = &target.kind {
+                    if matches!(&base.kind, ExprKind::Ident(b) if b == "env") {
+                        let f = match name {
+                            FieldName::Named(f) => format!("env.{f}"),
+                            FieldName::Index(i) => format!("env.{i}"),
+                        };
+                        self.emit("E-0140", target.span, "写入 env 只读变量", f, Some("§4.6：`env` 是只读访问器命名空间".into()), Some("领域指标走 std.host.query(&str)".into()));
+                    }
+                }
                 if !matches!(op, Punct::Eq) {
                     let _ = self.binop_ty(compound_to_bin(*op), &tt, &vt, e.span);
                 }
@@ -1496,6 +1515,17 @@ impl<'a> Checker<'a> {
                 self.prog.fns[found[0]].ret.clone()
             }
             ExprKind::Field { base, name } => {
+                // §4.6: `env` is a closed, read-only accessor namespace, not a binding — resolving
+                // it as an identifier reported a false `E-0101` on every `env.iter`.
+                if let (ExprKind::Ident(b), FieldName::Named(f)) = (&base.kind, name) {
+                    if b == "env" {
+                        if let Some(t) = env_field_ty(f) {
+                            return t;
+                        }
+                        self.emit("E-0110", e.span, format!("`env.{f}` 不存在"), f, Some("§4.6/§1.3：`env` 字段集合封闭且领域中立，实现私自扩展 = UB-024".into()), Some("领域指标走 std.host.query(&str)".into()));
+                        return Ty::Invalid;
+                    }
+                }
                 let bt = self.check_expr(base);
                 match name {
                     FieldName::Index(i) => match &bt {
@@ -2393,4 +2423,233 @@ pub fn check_files(src: &Sources, h: &mut Handler, module: &str, files: &[(FileI
     c.collect(files);
     c.check_bodies(files);
     c.prog
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{lexer, parser};
+
+    /// Stages [1]–[4] over a one-file module: `(code, title)` in emission order.
+    fn diags(src: &str) -> Vec<(String, String)> {
+        let mut sources = Sources::default();
+        let f = sources.add("p/mod.infy".to_string(), format!("package p\n\n{src}\n"));
+        let mut h = Handler::default();
+        let lexed = lexer::lex_file(&sources, f, &mut h);
+        let pf = parser::parse(&sources, f, &lexed, &mut h);
+        check_files(&sources, &mut h, "t/p", &[(f, "t/p".to_string(), pf)], false, vec![], vec![]);
+        h.diags.iter().map(|d| (d.code.clone(), d.title.clone())).collect()
+    }
+
+    fn codes(src: &str) -> Vec<String> {
+        diags(src).into_iter().map(|(c, _)| c).collect()
+    }
+
+    /// The "legal program" half of a pair: a source that must produce no *error*.
+    fn clean(src: &str) {
+        let c = errors(src);
+        assert!(c.is_empty(), "expected no errors, got {c:?}\n--- source ---\n{src}");
+    }
+
+    fn errors(src: &str) -> Vec<String> {
+        codes(src).into_iter().filter(|c| c.starts_with('E')).collect()
+    }
+
+    fn got(src: &str, code: &str) -> bool {
+        codes(src).iter().any(|c| c == code)
+    }
+
+    const FNS: &str = "fn spawn() { }\nfn harvest() { }\nfn gate() { }\nfn retry() { }\nfn finalize() { }\nfn all_green() -> bool { true }\nfn take_u8(x: u8) { }\nfn take_i32(x: i32) { }\n";
+
+    // ------------------------------------------------------------- §4.1 built-in constructors
+
+    /// §4.1: `Some`/`None`/`Ok`/`Err` are constructors of the built-in `Option`/`Result`, not
+    /// ordinary identifiers — treating them as identifiers reported a false `E-0101` on `Ok(v)`.
+    #[test]
+    fn builtin_constructors_are_not_e0101() {
+        let c = codes("struct E { pub c: u32 }\nfn a() -> Option<u32> { Some(1) }\nfn b() -> Option<u32> { None }\nfn c() -> Result<u32, E> { Ok(1) }\nfn d() -> Result<u32, E> { Err(E { c: 0 }) }");
+        assert!(!c.contains(&"E-0101".to_string()), "{c:?}");
+    }
+
+    /// §4.1 + §4.2: the constructor's parameter type comes from its argument, so a wrong-width
+    /// argument is still an implicit conversion and must be reported.
+    #[test]
+    fn constructor_inner_type_follows_the_argument() {
+        assert!(got("fn f() -> Option<u32> { Some(1u64) }", "E-0110"), "Option<u32> <- Option<u64> must not pass");
+        clean("fn f() -> Option<u64> { Some(1u64) }");
+        clean("fn f() -> Option<u32> { Some(1) }");
+    }
+
+    // ------------------------------------------------------------- §4.1 undeclared names
+
+    /// §4.1 / UB-005: reading a name that was never bound is `E-0101`, not a runtime null.
+    #[test]
+    fn undeclared_identifier_read_is_e0101() {
+        assert!(got("fn f() { let y = zzz; }", "E-0101"));
+    }
+
+    /// §5.3: an unresolvable callee is `E-0101`.
+    #[test]
+    fn undeclared_callee_is_e0101() {
+        assert!(got("fn f() { nope(1u64); }", "E-0101"));
+    }
+
+    // ------------------------------------------------------------- §2.8 / §4.13 literal typing
+
+    /// §4.13 rule 7: an unconstrained unsuffixed integer literal is `i32` — deliberately not `i64`.
+    #[test]
+    fn unsuffixed_literal_defaults_to_i32_not_i64() {
+        assert!(got("fn f() { let x = 1; let y: u32 = x; }", "E-0110"), "default type is not i32");
+        clean("fn f() { let x = 1; let y: i32 = x; }");
+    }
+
+    /// §2.6 / §4.13: the same literal adapts to the parameter type instead of being converted.
+    #[test]
+    fn unsuffixed_literal_adapts_to_the_parameter_type() {
+        clean(&format!("{FNS}fn f() {{ take_u8(200); take_i32(1); }}"));
+    }
+
+    /// §2.8: the literal suffix set is closed. An unknown suffix must never be silently accepted;
+    /// the lexer stops at the first character that is not a known suffix, so the rejection surfaces
+    /// as `E-0053` at the stray token (`sema`'s `E-0043` arm covers suffixes the lexer does accept).
+    #[test]
+    fn unknown_literal_suffix_is_rejected() {
+        assert!(got("fn f() { let x = 1u99; }", "E-0053"));
+        assert!(got("fn f() { let x = 1xyz; }", "E-0053"));
+        clean("fn f() { let x = 1u32; }");
+    }
+
+    /// §2.8: a suffixed literal that does not fit is an error — no wraparound, no saturation.
+    #[test]
+    fn suffixed_literal_overflow_is_e0043() {
+        assert!(got("fn f() { let x = 300u8; }", "E-0043"));
+        clean("fn f() { let x = 255u8; }");
+    }
+
+    /// §2.8: `-128i8` is the documented exception — the magnitude fits only after negation.
+    #[test]
+    fn signed_suffix_accepts_the_negated_extreme() {
+        clean("fn f() { let x = -128i8; }");
+        assert!(got("fn f() { let x = 129i8; }", "E-0043"));
+    }
+
+    /// §2.8: decimal without a suffix stops at `i64`.
+    #[test]
+    fn decimal_literal_beyond_i64_is_e0042() {
+        assert!(got("fn f() { let x = 12345678901234567890123; }", "E-0042"));
+        clean("fn f() { let x = 1234567890123u64; }");
+    }
+
+    /// §2.8: non-decimal without a suffix escalates `i32` → `u32` → `i64` → `E-0042`.
+    #[test]
+    fn unsuffixed_hex_literal_escalates_by_width() {
+        clean("fn f() { let a: i32 = 0x7F; }");
+        clean("fn f() { let b: u32 = 0xFFFFFFFF; }");
+        assert!(got("fn f() { let b: i32 = 0xFFFFFFFF; }", "E-0110"), "0xFFFFFFFF is not an i32");
+        clean("fn f() { let c: i64 = 0xFFFFFFFFFF; }");
+        assert!(got("fn f() { let d = 0xFFFFFFFFFFFFFFFFF; }", "E-0042"));
+    }
+
+    // ------------------------------------------------------------- §4.2 no implicit conversion
+
+    /// §4.2 UB-001: integer widths never mix silently.
+    #[test]
+    fn mixed_integer_width_is_e0110() {
+        assert!(got("fn f(a: u32, b: u8) -> u32 { a + b }", "E-0110"));
+        clean("fn f(a: u32, b: u32) -> u32 { a + b }");
+    }
+
+    /// §4.2 UB-002: float/integer mixing has its own code.
+    #[test]
+    fn float_and_integer_mixing_is_e0111() {
+        assert!(got("fn f(a: f64, b: i64) -> f64 { a + b }", "E-0111"));
+    }
+
+    /// §4.3 / P5: no implicit truthiness — a numeric `if` condition is `E-0110`.
+    #[test]
+    fn if_condition_must_be_bool() {
+        assert!(got("fn f(x: u32) { if (x) { spawn(); } }", "E-0110"));
+        clean(&format!("{FNS}fn f(x: u32) {{ if (x > 0) {{ spawn(); }} }}"));
+    }
+
+    /// §4.3: `let` is an immutable binding; assigning to it is `E-0120`.
+    #[test]
+    fn assigning_to_let_binding_is_e0120() {
+        assert!(got("fn f() { let x: u32 = 1; x = 2; }", "E-0120"));
+        clean("fn f() { var x: u32 = 1; x = 2; }");
+    }
+
+    /// §4.2: `type_compatible` is the single gate for assignment/argument/return. Locked directly
+    /// so a change to any arm cannot slip through unnoticed via the front end.
+    #[test]
+    fn type_compatible_locks_the_closed_rules() {
+        assert!(!type_compatible(&Ty::Prim(Prim::U32), &Ty::Prim(Prim::U8)), "UB-001");
+        assert!(!type_compatible(&Ty::Prim(Prim::F64), &Ty::Prim(Prim::I64)), "UB-002");
+        assert!(type_compatible(&Ty::Prim(Prim::U32), &Ty::IntLit), "§2.6: literal adapts");
+        assert!(!type_compatible(&Ty::Bool, &Ty::IntLit), "a literal is not a bool");
+        assert!(type_compatible(&Ty::Str, &Ty::String), "§2.10");
+        assert!(type_compatible(&Ty::Option { inner: Box::new(Ty::Prim(Prim::U32)) }, &Ty::Option { inner: Box::new(Ty::IntLit) }), "§4.1 parameter by parameter");
+        assert!(!type_compatible(&Ty::Option { inner: Box::new(Ty::Prim(Prim::U32)) }, &Ty::Option { inner: Box::new(Ty::Prim(Prim::U64)) }), "§4.1 must not widen the parameter");
+    }
+
+    // ------------------------------------------------------------- §8.2 goto / start
+
+    /// §8.2: a named anchor must exist in the same chain — otherwise `E-0301`. The legal half is
+    /// the §14 tour shape, so this is the clause-level lock behind "tour checks clean".
+    #[test]
+    fn goto_missing_named_anchor_is_e0301() {
+        let bad = format!("{FNS}chain P {{ label begin: spawn(); harvest(); gate(); {{ if (all_green()) {{ goto(\"nope\"); }} goto(+1); }} retry(); {{ goto(\"begin\"); }} label done: finalize(); }}");
+        assert!(got(&bad, "E-0301"), "{:?}", codes(&bad));
+        let good = bad.replace("goto(\"nope\")", "goto(\"done\")");
+        clean(&good);
+    }
+
+    /// §8.2: an absolute index outside the node table is `E-0301`, and §8.4 rule 6 adds `N-0800`.
+    #[test]
+    fn goto_absolute_index_out_of_range_is_e0301_with_notice() {
+        let c = codes(&format!("{FNS}chain P {{ spawn(); harvest(); {{ goto(7); }} }}"));
+        assert!(c.contains(&"E-0301".to_string()), "{c:?}");
+        assert!(c.contains(&"N-0800".to_string()), "{c:?}");
+        assert!(!codes(&format!("{FNS}chain P {{ spawn(); harvest(); {{ goto(1); }} }}")).contains(&"E-0301".to_string()));
+    }
+
+    /// §8.2: `goto(+N)` / `goto(-N)` is relative to the *current* node and decided at compile time.
+    #[test]
+    fn goto_relative_offset_out_of_range_is_e0301() {
+        assert!(got(&format!("{FNS}chain P {{ spawn(); harvest(); {{ goto(+5); }} }}"), "E-0301"), "forward past the last node");
+        assert!(got(&format!("{FNS}chain P {{ spawn(); {{ goto(-1); }} }}"), "E-0301"), "backward past node 0");
+        clean(&format!("{FNS}chain P {{ spawn(); harvest(); {{ goto(+1); }} finalize(); }}"));
+    }
+
+    /// §8.4: only top-level `expr_stmt`s open a node — `label`/`let`/assignment are the preamble of
+    /// the node that follows, so they must not shift the numbering `goto(+N)` is measured against.
+    #[test]
+    fn node_numbering_ignores_preamble_statements() {
+        clean(&format!("{FNS}chain P {{ label top: spawn(); let k: u32 = 1; harvest(); {{ goto(+1); }} finalize(); }}"));
+        assert!(got(&format!("{FNS}chain P {{ label top: spawn(); let k: u32 = 1; harvest(); {{ goto(+2); }} finalize(); }}"), "E-0301"), "node count moved by preamble statements");
+    }
+
+    /// §8.2: `start(chain = C)` must name an existing chain (`E-0800`), and `node = "a"` must name
+    /// an anchor inside it (`E-0801`). `chain` is a reserved word (§2.4), so the parameter name in
+    /// `start(chain = …)` must be read as a word, not an `ident` — the same trap as D-13/D-14.
+    #[test]
+    fn start_names_a_chain_and_an_anchor_or_fails() {
+        assert!(got(&format!("{FNS}chain P {{ spawn(); {{ start(chain = Nope); }} }}"), "E-0800"));
+        assert!(got(&format!("{FNS}chain P {{ spawn(); {{ start(chain = Q, node = \"missing\"); }} }} chain Q {{ label here: harvest(); }}"), "E-0801"));
+        clean(&format!("{FNS}chain P {{ spawn(); {{ start(chain = Q, node = \"here\"); }} }} chain Q {{ label here: harvest(); }}"));
+    }
+
+    // ------------------------------------------------------------- §4.6 env
+
+    /// §4.6 / UB-024: the `env` accessor set is closed and read-only. `env` is a namespace, not a
+    /// binding, so reading a real accessor must not report `E-0101`; an unknown accessor is
+    /// `E-0110`; writing one is `E-0140`.
+    #[test]
+    fn env_accessors_are_closed_and_read_only() {
+        clean("fn f() { let y: u32 = env.iter; }");
+        clean("fn f() { let s: str = env.platform; }");
+        assert!(got("fn f() { let y = env.nope; }", "E-0110"), "§4.6 unknown accessor");
+        assert!(!got("fn f() { let y = env.iter; }", "E-0101"), "env must not resolve as an identifier");
+        assert!(got("fn f() { env.iter = 1; }", "E-0140"), "§4.6 writing env must be E-0140");
+    }
 }

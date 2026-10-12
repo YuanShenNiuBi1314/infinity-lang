@@ -28,6 +28,7 @@ pub fn parse(sources: &Sources, file: FileId, lexed: &Lexed, handler: &mut Handl
         comments: lexed.comments.clone(),
         h: handler,
         stop: false,
+        closer_debts: 0,
     };
     let out = p.file(lexed.shebang.clone(), &lexed.build_constraint);
     out
@@ -42,6 +43,9 @@ struct P<'a> {
     h: &'a mut Handler,
     /// Hard stop (too many errors from one cause, e.g. a file that is not UTF-8 at all).
     stop: bool,
+    /// `>` levels an inner generic scan already closed on our behalf (§3.6: a single `>>` token
+    /// closes two levels, and the innermost `<…>` is parsed recursively).
+    closer_debts: usize,
 }
 
 impl<'a> P<'a> {
@@ -1448,14 +1452,26 @@ impl<'a> P<'a> {
         self.bump();
         let mut depth = 1usize;
         while depth > 0 && !self.at_end() {
+            // Levels an inner scan already closed on our behalf (§3.6: `Arc<Mutex<u32>>` ends with
+            // a single `>>` token that belongs to two scans).
+            while self.closer_debts > 0 && depth > 0 {
+                self.closer_debts -= 1;
+                depth -= 1;
+            }
+            if depth == 0 {
+                break;
+            }
             if self.at_p(Punct::Lt) {
                 depth += 1;
             }
             if self.at_p(Punct::Shr) {
-                // `>>` — two closers
-                depth -= 2;
+                // `>>` closes two levels: this scan takes what it still has open, the remainder is
+                // a debt for the enclosing scan. Subtracting blindly underflowed `depth` here.
+                let mine = 2usize.min(depth);
+                depth -= mine;
+                self.closer_debts += 2 - mine;
                 self.bump();
-                if depth < 1 {
+                if depth == 0 {
                     break;
                 }
                 continue;
@@ -1485,6 +1501,10 @@ impl<'a> P<'a> {
             if !self.eat_p(Punct::Comma) {
                 continue;
             }
+        }
+        if self.at_end() {
+            // An unterminated `<…>` must not leave a debt that silently closes a later generic.
+            self.closer_debts = 0;
         }
         out
     }
@@ -1572,7 +1592,7 @@ impl<'a> P<'a> {
         }
         let toks = lexed.toks.clone();
         let comments = lexed.comments.clone();
-        let mut sub = P { toks, pos: 0, file: fid, src: src.get(fid), comments, h: &mut h, stop: false };
+        let mut sub = P { toks, pos: 0, file: fid, src: src.get(fid), comments, h: &mut h, stop: false, closer_debts: 0 };
         let e = sub.expr();
         let trailing_is_end = sub.at_end();
         if !matches!(e.kind, ExprKind::Invalid) && trailing_is_end {
@@ -1935,8 +1955,8 @@ impl<'a> P<'a> {
                 let mut chain_span = t.span;
                 let mut node = None;
                 loop {
-                    let name = match self.peek().ident() {
-                        Some(n) => n.to_string(),
+                    let name = match self.word_at(0) {
+                        Some(n) => n,
                         None => break,
                     };
                     self.bump();
@@ -2902,6 +2922,60 @@ mod tests {
             "package main\n\nenum P { A, B }\nfn d(p: P) -> u32 { match (p) { P::A => 1, P::B => 2, } }\n",
         );
         assert!(codes.is_empty(), "{codes:?}");
+    }
+
+    /// §3.5 / §8.2: `chain` is a reserved word (§2.4), so the parameter name in
+    /// `start(chain = C, node = "a")` is a *keyword* token — reading it as an `ident` broke the
+    /// whole statement (the same trap as attribute paths and `.link()`, D-13/D-14).
+    #[test]
+    fn start_takes_keyword_parameter_names() {
+        let (ast, codes) = parse_str("package main\n\nchain A { work(); { start(chain = B, node = \"here\"); } }\nchain B { label here: work(); }\n");
+        assert!(codes.is_empty(), "{codes:?}");
+        if let ItemKind::Chain { stmts, .. } = &ast.items[0].kind {
+            let found = stmts
+                .iter()
+                .find_map(|s| match &s.kind {
+                    StmtKind::Expr { linkage, .. } => linkage.iter().flat_map(|b| b.stmts.iter()).find(|x| matches!(x, LinkageStmt::Start { .. })),
+                    _ => None,
+                })
+                .expect("a start() linkage statement");
+            match found {
+                LinkageStmt::Start { chain, node, .. } => {
+                    assert_eq!(chain, "B", "the chain name must survive");
+                    assert!(matches!(node, Some(StartNode::Anchor(a)) if a == "here"), "{node:?}");
+                }
+                _ => unreachable!(),
+            }
+        } else {
+            panic!("expected a chain");
+        }
+    }
+
+    /// §3.6: nested generic arguments closed by a single `>>` token must not over-close the scan —
+    /// the depth bookkeeping used to underflow here and panic the parser in debug builds.
+    #[test]
+    fn nested_generics_close_without_underflow() {
+        for (ty, outer_args) in [("Arc<Mutex<u32>>", 1), ("Vec<Map<u32, str>>", 1), ("Result<Option<u32>, Vec<u8>>", 2), ("Arc<Mutex<u32> >", 1)] {
+            let (ast, codes) = parse_str(&format!("package main\n\nfn f(v: {ty}) -> {ty} {{ v }}\n"));
+            assert!(codes.is_empty(), "{ty}: {codes:?}");
+            if let ItemKind::Fn { sig, .. } = &ast.items[0].kind {
+                let ret = sig.ret.as_ref().expect("return type");
+                // the parameter and the return type spell the same type, so both paths must hold
+                for t in [&sig.params[0].ty, ret] {
+                    let TypeKind::Named { path, args } = &t.kind else {
+                        panic!("{ty}: expected a named generic, got {:?}", t.kind);
+                    };
+                    assert_eq!(path.len(), 1, "{ty}");
+                    assert_eq!(args.len(), outer_args, "{ty}: wrong number of outer arguments");
+                    // the innermost argument must itself still carry its own parameters
+                    if let Some(TypeKind::Named { args: inner, .. }) = args.first().map(|a| &a.kind) {
+                        assert!(!inner.is_empty(), "{ty}: the nested argument lost its own parameters");
+                    }
+                }
+            } else {
+                panic!("expected a function");
+            }
+        }
     }
 }
 

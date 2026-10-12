@@ -5,11 +5,11 @@
 或 `⬜`（未实现，运行时显式报错）。`src/host.rs`、`src/hir.rs`、`src/codegen.rs`、`src/atrack.rs`、
 `src/conformance.rs`、`src/doc.rs` 六个模块的占位注释也指向这里。
 
-## 1. 证据命令（2026-10-13 本轮实测，主树非隔离副本）
+## 1. 证据命令（2026-10-13 A4 轮实测，主树非隔离副本）
 
 | # | 命令 | 输出里的数字 | exit |
 | --- | --- | --- | --- |
-| P1 | `cargo test --offline --lib` | `285 passed; 0 failed; 0 ignored` | 0 |
+| P1 | `cargo test --offline --lib` | `332 passed; 0 failed; 0 ignored` | 0 |
 | P2 | `cargo check --offline --lib` | 0 error、`51 warnings`（全部 unused/dead code，BACKLOG F2） | 0 |
 | P3 | `infy check examples/tour` | `check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)` | 0 |
 | P4 | `infy build examples/tour` | 先打 P3 那行，再打 `notice: ... stages [8] codegen and [9] link are not implemented yet` | 6 |
@@ -23,7 +23,7 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 
 ## 2. 前端与语义（Rust 侧）
 
-`cargo test --offline --lib` 的 285 项按模块分布（`cargo test -- --list` 计数）：
+`cargo test --offline --lib` 的 332 项按模块分布（`cargo test -- --list` 计数）：
 
 | 模块 | 项数 | 条款 |
 | --- | --- | --- |
@@ -31,36 +31,37 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 | `derive` | 57 | §6.7 derive（含 3 项 `E-0421`） |
 | `fmt` | 39 | §9.5 十四条规则（幂等、注释不丢、三种宽度带金样） |
 | `macro_expand` | 35 | §6.1–§6.5 |
+| `sema` | 22 | §4.1 内建构造/未声明名、§4.2 无隐式转换（含 `type_compatible` 逐臂）、§4.3、§4.6 `env`、§2.8 字面量取型、§4.13 规则 7、§8.2/§8.4 `goto`/`start` |
+| `pkg` | 19 | §5.2 清单、§5.3 导入解析顺序、§5.7 semver/MVS、§5.8 dirhash 与 lock |
 | `toml` | 15 | §5.2 / 附录 E.2–E.4 |
+| `borrow` | 15 | §4.7 借用检查 + §4.3/UB-006 `E-0121`（4 项，A4 轮补） |
 | `sha256` | 12 | §5.8 |
-| `borrow` | 11 | §4.7 借用检查 |
 | `codes` | 9 | §9.1–§9.3/§9.7，`count() == 210` |
 | `base64` | 7 | §5.8 |
-| `parser` | 5 | §3 文法 + §8.4 节点编号（1 项） |
+| `parser` | 7 | §3 文法 + §8.4 节点编号（1 项）+ §3.5 `start(chain=…)` + §3.6 嵌套泛型闭合 |
 | `ifbc` | 5 | §7.8 Rust 侧编码/反汇编 |
 | `cli` | 5 | §13.4 子命令与退出码 |
 | `stdlib` | 4 | §10 签名表 + §1.3 领域中立 |
 | `diag` | 2 | §9.2 版式（规范样例逐字节 1 项 + caret 行规则 1 项） |
 
-**没有一项独立单测的模块**：`sema.rs`（§4 类型检查，2396 行）、`pkg.rs`（§5 清单/MVS/lock/dirhash，1127 行）、
-`btrack.rs`（§7.7 B 轨，4476 行）、`span.rs`/`token.rs`/`ast.rs`（结构体，由上述模块间接使用）。
-它们目前的证据只有 P3（`infy check examples/tour` 跑完 §7.1 阶段 [1]–[5] 且 exit 0），属于"端到端跑通一次"，
-不等于分支覆盖。
+**没有一项独立单测的模块**：`btrack.rs`（§7.7 B 轨，4476 行）、`span.rs`/`token.rs`/`ast.rs`（结构体，由上述模块间接使用）。
+`sema.rs`/`pkg.rs` 的零单测状态在 A4 轮结束（41 项，见上表），它们剩下的证据仍是 P3（`infy check examples/tour`
+跑完 §7.1 阶段 [1]–[5] 且 exit 0）——**新测试锁的是判据与码，不等于分支覆盖**。
 
 ## 3. 逐条状态
 
 | 条款 | 实现位置 | 状态 | 证据 / 缺口 |
 | --- | --- | --- | --- |
 | §2 词法 | `src/lexer.rs` | ✅ | 79 项（P1） |
-| §3 语法 | `src/parser.rs` | 🟡 | 5 项 + P3 全量解析；没有"EBNF 全产生式是否都落到 AST"的审计，**"全产生式"这句在 README 里已降级** |
-| §4 类型检查 | `src/sema.rs` | 🟡 | 0 项独立单测；仅 P3。`Ok/Some/None` 内建、上下文取型、`?` 展开、elision、穷尽性、const-eval、`unsafe` 六禁令都只有 tour 走到的那部分被真实执行过 |
-| §4.7 借用检查 | `src/borrow.rs` | ✅ | 11 项：`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006` 正反例。**`E-0121` 实现了但没有测试** |
-| §5 包/依赖 | `src/pkg.rs` | 🟡 | 0 项独立单测；仅 P3 装载 `examples/tour` 的 2 文件多 package 布局 |
+| §3 语法 | `src/parser.rs` | 🟡 | 7 项 + P3 全量解析；没有"EBNF 全产生式是否都落到 AST"的审计，**"全产生式"这句在 README 里已降级** |
+| §4 类型检查 | `src/sema.rs` | 🟡 | A4 轮补 **22 项**（内建构造、未声明名、字面量取型/后缀/范围、无隐式转换含 `type_compatible` 逐臂、`E-0120`、`env` 封闭集与 `E-0140`、`goto`/`start`）。缺口：`?` 展开、生命周期 elision、穷尽性 `E-0070/0071/0072`、const-eval、`unsafe` 六禁令仍只有 P3 |
+| §4.7 借用检查 | `src/borrow.rs` | ✅ | 15 项：`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006` 正反例 + `E-0121` 4 项（A4 轮补）。`E-0121` 的判据低估数值绑定，见偏差 D-19 / BACKLOG F7 |
+| §5 包/依赖 | `src/pkg.rs` | 🟡 | A4 轮补 **19 项**（清单逐段与默认值、`E-0506`/`E-0507`/`W-0500`、§5.3 解析顺序、`^` 区间、MVS 最小选择与冲突、dirhash 顺序无关与路径绑定、lock 往返/排序/`E-0200`）。缺口：`discover()`（目录发现、R3/R4 规则）无测试，依赖 P3 的两 package 布局 |
 | §5.8 哈希/base64 | `sha256.rs` `base64.rs` | ✅ | 12 + 7 项（NIST、RFC 4648 向量、流式百万字节） |
 | §5.2/E.2–E.4 TOML | `toml.rs` | ✅ | 15 项（规范 fixture 往返 + fuzz 不 panic） |
 | §6.1–6.5 宏 | `macro_expand.rs` | ✅ | 35 项 |
 | §6.7 derive | `derive.rs` | ✅ | 57 项 |
-| §8.4 节点编号 | `sema.rs` + `parser.rs` | 🟡 | 1 项（源码序编号）。`goto("anchor")`/绝对/相对越界三条 `E-0301` 路径**无测试** |
+| §8.4 节点编号 | `sema.rs` + `parser.rs` | 🟡 | 编号 1 项（`parser`）+ A4 轮 6 项（`sema`）：命名锚点缺失、绝对索引越界（并 `N-0800`）、相对偏移前/后越界、序言语句不移动编号、`start` 的链名/锚点。缺口：`N-0800` 只在 strict 之外的展示层，`--deadlock`/`W-0800` 无测试 |
 | §9.1–9.3/9.7 诊断码 | `codes.rs` | ✅ | 9 项 + `count()==210`（`E-0093` 来自 §9.6 正文，见 `codes.rs:2052`） |
 | §9.2 诊断版式 | `diag.rs` | 🟡 | 2 项，其中逐字节金样只有 §9.2 那一条样例 |
 | §9.4/E.5 `--diag-json` | `cli.rs:416` | 🟡 | 能写出 `{"version":1,"tool":{...},"diagnostics":[...]}`，但结构无金样测试 |

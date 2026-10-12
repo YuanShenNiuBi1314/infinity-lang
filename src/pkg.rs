@@ -1125,3 +1125,350 @@ pub fn code_table_size() -> usize {
 pub fn level_of(code: &str) -> Option<Level> {
     codes::lookup(code).map(|c| c.level)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §5.2 in full, written out here so this module owns its own fixture.
+    const FULL: &str = "\
+[module]
+path    = \"github.com/user/infinity\"
+version = \"1.2.3\"
+infy    = \"2.0\"
+authors = [\"Alice <a@b.com>\"]
+
+[dependencies]
+\"std\"                   = \"1.0\"
+\"github.com/user/mathx\" = \"^1.5\"
+\"github.com/user/decoder\" = \"2.0.0\"
+
+[features]
+gpu = []
+a_track_c = [\"gpu\"]
+
+[profile]
+overflow         = \"saturate\"
+diagnostic_level = \"lenient\"
+opt_level        = 2
+stack_bytes      = 8388608
+a_track          = \"unsafe-trusted\"
+reproducible     = true
+
+[b_track]
+py  = \"3.13\"
+lua = \"5.4\"
+
+[[bin]]
+name = \"zhukong\"
+path = \"cmd/host\"
+
+[[lib]]
+path    = \"core/schedule\"
+edition = [\"source\", \"wheel\"]
+targets = [\"x86_64-pc-windows-msvc\", \"x86_64-unknown-linux-gnu\"]
+
+[lints]
+W-0070 = \"allow\"
+
+[net]
+private = [\"git.internal/*\"]
+nosumdb = [\"internal.example\"]
+";
+
+    const MINIMAL: &str = "[module]\npath = \"github.com/user/m\"\n";
+
+    fn parse(text: &str) -> (Option<Manifest>, Vec<String>) {
+        let mut h = Handler::default();
+        let m = parse_manifest(text, MANIFEST_NAME, &mut h);
+        (m, h.diags.iter().map(|d| d.code.clone()).collect())
+    }
+
+    fn full() -> Manifest {
+        let (m, c) = parse(FULL);
+        assert!(c.iter().all(|x| !x.starts_with('E')), "{c:?}");
+        m.expect("§5.2 fixture must parse")
+    }
+
+    // ---------------------------------------------------------------- §5.2 manifest
+
+    /// §5.2: every documented section of `MODULE.infy.toml` reaches the `Manifest` struct — a key
+    /// that silently fails to bind is how a typo becomes an ignored setting.
+    #[test]
+    fn manifest_reads_every_5_2_section() {
+        let m = full();
+        assert_eq!(m.module_path, "github.com/user/infinity");
+        assert_eq!(m.version, "1.2.3");
+        assert_eq!(m.infy, "2.0");
+        assert_eq!(m.authors, vec!["Alice <a@b.com>".to_string()]);
+        assert_eq!(m.dependencies.len(), 3);
+        assert_eq!(m.feature_names(), vec!["a_track_c".to_string(), "gpu".to_string()]);
+        assert_eq!(m.profile.overflow, Overflow::Saturate);
+        assert_eq!(m.profile.diagnostic_level, DiagLevel::Lenient);
+        assert_eq!(m.profile.stack_bytes, 8_388_608);
+        assert!(m.profile.reproducible);
+        assert_eq!(m.b_track.get("py").map(|s| s.as_str()), Some("3.13"));
+        assert_eq!(m.bins.len(), 1);
+        assert_eq!(m.bins[0].name, "zhukong");
+        assert_eq!(m.libs[0].editions, vec!["source".to_string(), "wheel".to_string()]);
+        assert_eq!(m.libs[0].targets.len(), 2);
+        assert_eq!(m.lints, vec![("W-0070".to_string(), "allow".to_string())]);
+        assert_eq!(m.net_private, vec!["git.internal/*".to_string()]);
+        assert_eq!(m.net_nosumdb, vec!["internal.example".to_string()]);
+    }
+
+    /// §5.2: the defaults a development module gets when it writes nothing else.
+    #[test]
+    fn manifest_defaults_match_5_2() {
+        let m = full_minimal();
+        assert_eq!(m.version, "0.0.0-dev");
+        assert_eq!(m.infy, crate::VERSION.lang);
+        assert_eq!(m.profile.overflow, Overflow::Panic, "UB-003: panic is the default");
+        assert_eq!(m.profile.diagnostic_level, DiagLevel::Strict, "§9.6: strict by default");
+        assert_eq!(m.profile.opt_level, OptLevel::O2);
+        assert_eq!(m.profile.focus_stack_bytes, 256 * 1024, "§8.5 focus stack");
+        assert_eq!(m.profile.focus_quota, 1, "§8.5 one scheduling slice per node");
+        assert_eq!(m.profile.panic_radius, PanicRadius::Focus, "§4.16");
+        assert!(!m.declares_a_track(), "§4.7.5: @c/@py need an explicit a_track declaration");
+    }
+
+    fn full_minimal() -> Manifest {
+        let (m, c) = parse(MINIMAL);
+        assert!(c.is_empty(), "{c:?}");
+        m.expect("minimal manifest must parse")
+    }
+
+    /// §5.2: an unknown manifest key is `W-0500`, so a misspelled section cannot be silently
+    /// ignored (the same class of failure as an unset `overflow`).
+    #[test]
+    fn manifest_unknown_key_is_w0500() {
+        let (_, c) = parse("[module]\npath = \"github.com/u/m\"\n\n[profle]\noverflow = \"saturate\"\n");
+        assert!(c.contains(&"W-0500".to_string()), "{c:?}");
+    }
+
+    /// §5.2: malformed TOML is `E-0506` and yields no manifest at all — never a default-filled one.
+    #[test]
+    fn manifest_syntax_error_is_e0506() {
+        let (m, c) = parse("[module\npath = ");
+        assert!(m.is_none());
+        assert!(c.contains(&"E-0506".to_string()), "{c:?}");
+    }
+
+    /// §5.2: `module.path` is mandatory. A manifest without it must be refused, not half-built.
+    #[test]
+    fn manifest_without_module_path_is_refused() {
+        let (m, _) = parse("[module]\nversion = \"1.0.0\"\n");
+        assert!(m.is_none(), "a manifest with no module path cannot resolve imports (§5.3)");
+    }
+
+    /// §5.3 step 2: a local module may not squat on the `std` virtual module.
+    #[test]
+    fn manifest_path_squatting_on_std_is_e0507() {
+        let (_, c) = parse("[module]\npath = \"std/whatever\"\n");
+        assert!(c.contains(&"E-0507".to_string()), "{c:?}");
+    }
+
+    /// §4.4 / UB-003: `overflow = "wrap"` is not a legal policy; the profile falls back to `panic`
+    /// and the request is reported rather than quietly honoured.
+    #[test]
+    fn manifest_rejects_wrap_overflow_policy() {
+        let (m, c) = parse("[module]\npath = \"github.com/u/m\"\n\n[profile]\noverflow = \"wrap\"\n");
+        assert!(c.contains(&"E-0506".to_string()), "{c:?}");
+        assert_eq!(m.expect("still yields a manifest").profile.overflow, Overflow::Panic);
+    }
+
+    /// §5.3 step 2: `std` is the mandatory built-in dependency and must be distinguishable.
+    #[test]
+    fn std_dependency_is_flagged() {
+        let m = full();
+        assert_eq!(m.dependencies.iter().filter(|d| d.is_std).count(), 1);
+        assert!(m.dependencies.iter().any(|d| d.module == "github.com/user/mathx" && d.spec == "^1.5" && !d.is_std));
+    }
+
+    // ---------------------------------------------------------------- §5.3 import resolution order
+
+    /// §5.3: the resolution order for an import path is fixed — `std*`, then a local package, then
+    /// a declared dependency, otherwise undeclared.
+    #[test]
+    fn classify_import_follows_the_5_3_order() {
+        let m = full();
+        assert_eq!(classify_import("std", &m), ImportSource::Std);
+        assert_eq!(classify_import("std/collections", &m), ImportSource::Std);
+        assert_eq!(classify_import("github.com/user/infinity/core", &m), ImportSource::Local);
+        assert_eq!(classify_import("github.com/user/infinity", &m), ImportSource::Local);
+        assert_eq!(classify_import("github.com/user/mathx/spline", &m), ImportSource::Dependency);
+        assert_eq!(classify_import("github.com/user/nobody", &m), ImportSource::Undeclared);
+        // §5.3 step 1/4: a prefix that only matches mid-segment is not a dependency.
+        assert_eq!(classify_import("github.com/user/mathx2", &m), ImportSource::Undeclared);
+    }
+
+    // ---------------------------------------------------------------- §5.7 semver ranges and MVS
+
+    /// §5.7 step 2: `^` is the first non-zero component's compatibility window.
+    #[test]
+    fn caret_range_is_the_compatibility_window() {
+        let r = parse_range("^1.5");
+        assert_eq!(r.lower, (1, 5, 0));
+        assert_eq!(r.upper, Some((2, 0, 0)));
+        assert!(range_contains(&r, (1, 5, 0)));
+        assert!(range_contains(&r, (1, 99, 0)));
+        assert!(!range_contains(&r, (2, 0, 0)), "major bump is breaking");
+        assert!(!range_contains(&r, (1, 4, 9)));
+        // 0.x: the minor is the breaking component.
+        assert_eq!(parse_range("^0.3").upper, Some((0, 4, 0)));
+        assert_eq!(parse_range("^0.0.7").upper, Some((0, 0, 8)));
+    }
+
+    /// §5.7 step 2: an exact spec selects exactly one version.
+    #[test]
+    fn exact_spec_selects_one_version() {
+        let r = parse_range("2.0.0");
+        assert!(range_contains(&r, (2, 0, 0)));
+        assert!(!range_contains(&r, (2, 0, 1)));
+        assert_eq!(parse_semver("v2.0"), Some((2, 0, 0)));
+    }
+
+    /// §5.7: minimal version selection picks the *smallest* version satisfying every demand — no
+    /// "highest wins", no backtracking, no SAT solving.
+    #[test]
+    fn mvs_selects_the_minimal_satisfying_version() {
+        let available: BTreeMap<String, Vec<String>> = [(
+            "github.com/user/mathx".to_string(),
+            vec!["1.4.0".to_string(), "1.5.0".to_string(), "1.5.3".to_string(), "1.9.0".to_string()],
+        )]
+        .into_iter()
+        .collect();
+        let demands = vec![
+            ("github.com/user/mathx".to_string(), "^1.0".to_string()),
+            ("github.com/user/mathx".to_string(), ">= 1.5".to_string()),
+        ];
+        let got = mvs(&demands, &available).expect("MVS must succeed");
+        assert_eq!(got, vec![("github.com/user/mathx".to_string(), "1.5.0".to_string())]);
+    }
+
+    /// §5.7: an unsatisfiable demand set is an error naming the module — MVS must not invent a
+    /// version or quietly drop one of the demands.
+    #[test]
+    fn mvs_reports_conflicts_without_backtracking() {
+        let available: BTreeMap<String, Vec<String>> = [("github.com/u/a".to_string(), vec!["1.0.0".to_string(), "2.0.0".to_string()])].into_iter().collect();
+        let demands = vec![
+            ("github.com/u/a".to_string(), "^1.0".to_string()),
+            ("github.com/u/a".to_string(), "^2.0".to_string()),
+        ];
+        let err = mvs(&demands, &available).expect_err("disjoint ranges cannot be satisfied");
+        assert_eq!(err.len(), 1, "{err:?}");
+        assert!(err[0].contains("github.com/u/a"), "{}", err[0]);
+        assert!(err[0].contains("^1.0") && err[0].contains("^2.0"), "the conflict must name both demands: {}", err[0]);
+    }
+
+    /// §5.7: MVS output is sorted by module path, because the lock file must be byte-stable (§7.3).
+    #[test]
+    fn mvs_output_is_sorted_by_module_path() {
+        let available: BTreeMap<String, Vec<String>> = [
+            ("github.com/u/b".to_string(), vec!["1.0.0".to_string()]),
+            ("github.com/u/a".to_string(), vec!["1.0.0".to_string()]),
+        ]
+        .into_iter()
+        .collect();
+        let demands = vec![("github.com/u/b".to_string(), "1.0.0".to_string()), ("github.com/u/a".to_string(), "1.0.0".to_string())];
+        assert_eq!(mvs(&demands, &available).unwrap(), vec![("github.com/u/a".to_string(), "1.0.0".to_string()), ("github.com/u/b".to_string(), "1.0.0".to_string())]);
+    }
+
+    // ---------------------------------------------------------------- §5.8 dirhash
+
+    /// §5.8 item 1: dirhash sorts by path, folds `path` and `content` together, and is `h1:<base64>`.
+    #[test]
+    fn dirhash_is_order_free_and_binds_paths_to_contents() {
+        let mut a = vec![("core/mod.infy".to_string(), b"package core".to_vec()), ("cmd/main.infy".to_string(), b"package main".to_vec())];
+        let mut b = vec![("cmd/main.infy".to_string(), b"package main".to_vec()), ("core/mod.infy".to_string(), b"package core".to_vec())];
+        let ha = dirhash(&mut a);
+        let hb = dirhash(&mut b);
+        assert_eq!(ha, hb, "§5.8: enumeration order must not change the hash");
+        assert!(ha.starts_with("h1:"), "{ha}");
+        // same content set under swapped paths is a *different* tree: path is part of the digest
+        let mut c = vec![("core/mod.infy".to_string(), b"package main".to_vec()), ("cmd/main.infy".to_string(), b"package core".to_vec())];
+        assert_ne!(ha, dirhash(&mut c));
+        let mut d = vec![("core/mod.infy".to_string(), b"package coreX".to_vec()), ("cmd/main.infy".to_string(), b"package main".to_vec())];
+        assert_ne!(ha, dirhash(&mut d));
+    }
+
+    /// §5.8 / §7.3: the empty tree has a fixed hash (a build with no files must still be comparable).
+    #[test]
+    fn dirhash_of_empty_tree_is_stable() {
+        let mut e: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut f: Vec<(String, Vec<u8>)> = Vec::new();
+        assert_eq!(dirhash(&mut e), dirhash(&mut f));
+        assert!(dirhash(&mut e).starts_with("h1:"));
+    }
+
+    // ---------------------------------------------------------------- §5.8 / appendix E.1 lock
+
+    /// §5.8 item 2 / appendix E.1: `MODULE.infy.lock` round-trips, and rendering is sorted so two
+    /// runs over the same graph produce identical bytes (§7.3 reproducibility).
+    #[test]
+    fn lock_round_trips_and_renders_stably() {
+        let text = "\
+# comment line
+req github.com/user/decoder 2.0.0
+req github.com/user/mathx 1.5.0 resolved-from github.com/user/mathx@1.5.0
+dirh github.com/user/mathx 1.5.0 h1:AAA
+dirh-m github.com/user/mathx 1.5.0 h1:BBB
+sumdb github.com/user/mathx 1.5.0 tree_head=h1:CCC inset=7 proof=h1:DDD
+priv git.internal/*
+nosum internal.example
+";
+        let l = Lock::parse(text);
+        assert_eq!(l.req.len(), 2);
+        assert_eq!(l.req[1].2.as_deref(), Some("github.com/user/mathx@1.5.0"));
+        assert_eq!(l.dirh[0].2, "h1:AAA");
+        assert_eq!(l.dirh_m[0].2, "h1:BBB");
+        assert_eq!(l.sumdb[0].3, 7);
+        assert_eq!(l.priv_globs, vec!["git.internal/*".to_string()]);
+        assert_eq!(l.nosum_globs, vec!["internal.example".to_string()]);
+        assert_eq!(l.checksum_of("github.com/user/mathx", "1.5.0"), Some("h1:AAA"));
+        assert_eq!(l.checksum_of("github.com/user/mathx", "9.9.9"), None);
+
+        // rendering is order-insensitive: build the same lock from shuffled input and compare bytes
+        let shuffled = "\
+priv git.internal/*
+req github.com/user/mathx 1.5.0 resolved-from github.com/user/mathx@1.5.0
+req github.com/user/decoder 2.0.0
+nosum internal.example
+dirh github.com/user/mathx 1.5.0 h1:AAA
+dirh-m github.com/user/mathx 1.5.0 h1:BBB
+sumdb github.com/user/mathx 1.5.0 tree_head=h1:CCC inset=7 proof=h1:DDD
+";
+        assert_eq!(Lock::parse(text).render(), Lock::parse(shuffled).render());
+        assert_eq!(Lock::parse(&l.render()).req.len(), 2, "render output must re-parse");
+    }
+
+    /// §5.7 step 4 / §5.8 item 2: a lock that no longer matches the manifest is `E-0200` — both for
+    /// a missing requirement and for one the manifest has dropped.
+    #[test]
+    fn lock_out_of_sync_with_manifest_is_e0200() {
+        let m = full();
+        let codes_for = |lock: &str| {
+            let l = Lock::parse(lock);
+            let mut h = Handler::default();
+            l.check_against_manifest(&m, &mut h);
+            h.diags.iter().map(|d| (d.code.clone(), d.title.clone())).collect::<Vec<_>>()
+        };
+        let in_sync = "\"std\" is built in, so only declared dependencies need a req line\n\
+req github.com/user/mathx 1.5.0\n\
+req github.com/user/decoder 2.0.0\n";
+        assert!(codes_for(in_sync).is_empty(), "{:?}", codes_for(in_sync));
+        let missing = codes_for("req github.com/user/mathx 1.5.0\n");
+        assert!(missing.iter().any(|(c, t)| c == "E-0200" && t.contains("decoder")), "{missing:?}");
+        let extra = codes_for("req github.com/user/mathx 1.5.0\nreq github.com/user/decoder 2.0.0\nreq github.com/user/gone 1.0.0\n");
+        assert!(extra.iter().any(|(c, t)| c == "E-0200" && t.contains("gone")), "{extra:?}");
+    }
+
+    /// §5.7 step 4: the `req` line for a `^1.5` demand is its lower bound, which is what MVS chose.
+    #[test]
+    fn lock_records_the_lower_bound_of_a_range_demand() {
+        let (m, _) = parse("[module]\npath = \"github.com/u/m\"\n\n[dependencies]\n\"github.com/u/a\" = \"^1.5\"\n");
+        let mut h = Handler::default();
+        Lock::parse("req github.com/u/a 1.5.0\n").check_against_manifest(&m.expect("manifest"), &mut h);
+        assert!(h.diags.is_empty(), "{:?}", h.diags.iter().map(|d| d.code.clone()).collect::<Vec<_>>());
+    }
+}

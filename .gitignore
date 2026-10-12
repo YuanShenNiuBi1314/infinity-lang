@@ -10,3 +10,5 @@
 .infy-build/
 MODULE.infy.lock.generated
 push.log
+# Qoder 本地会话/用量数据（含提示词原文），不入库
+.qoder-credits/

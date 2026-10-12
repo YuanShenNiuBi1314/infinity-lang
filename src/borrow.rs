@@ -720,4 +720,42 @@ mod tests {
         assert_eq!(h.exit_code(), 2);
         let _ = Level::Error;
     }
+
+    // ---------------------------------------------------------------- E-0121 (§4.3, UB-006)
+
+    const ACC: &str = "struct Acc { pub n: u32 }\nfn work() { }\n";
+
+    /// §4.3 / UB-006: a mutable binding that both the current chain and a chain it starts can
+    /// touch is a data race, and it must be destroyed at compile time — not deferred to a runtime
+    /// race detector.
+    #[test]
+    fn mutable_state_shared_across_chains_is_e0121() {
+        let c = codes(&annotated(&format!("{ACC}chain A {{ var a: Acc = Acc {{ n: 0 }}; work(); {{ start(chain = B); }} }}\nchain B {{ work(); }}")));
+        assert!(c.contains(&"E-0121".to_string()), "{c:?}");
+    }
+
+    /// §4.3: `Arc`/`Mutex` is the sanctioned way to share across focuses, so it must not be
+    /// reported — otherwise the rule pushes users back to raw mutable state.
+    #[test]
+    fn arc_shared_state_across_chains_is_clean() {
+        let c = codes(&annotated(&format!("{ACC}fn sync() -> Arc<Mutex<u32>> {{ sync() }}\nchain A {{ var g: Arc<Mutex<u32>> = sync(); work(); {{ start(chain = B); }} }}\nchain B {{ work(); }}")));
+        assert!(!c.contains(&"E-0121".to_string()), "{c:?}");
+        assert!(!c.iter().any(|x| x.starts_with("E-01")), "{c:?}");
+    }
+
+    /// §8.2: starting a second focus of the *same* chain is explicitly legal (重入安全), so the
+    /// shared-state rule must not fire there.
+    #[test]
+    fn same_chain_second_focus_is_not_e0121() {
+        let c = codes(&annotated(&format!("{ACC}chain A {{ var a: Acc = Acc {{ n: 0 }}; work(); {{ start(chain = A); }} }}")));
+        assert!(!c.contains(&"E-0121".to_string()), "{c:?}");
+    }
+
+    /// §4.3: an immutable `let` binding cannot race, so cross-chain reachability alone is not a
+    /// reason to report — the rule keys on mutability, not on "two chains mention it".
+    #[test]
+    fn immutable_state_across_chains_is_not_e0121() {
+        let c = codes(&annotated(&format!("{ACC}chain A {{ let a: Acc = Acc {{ n: 0 }}; work(); {{ start(chain = B); }} }}\nchain B {{ work(); }}")));
+        assert!(!c.contains(&"E-0121".to_string()), "{c:?}");
+    }
 }

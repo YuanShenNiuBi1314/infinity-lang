@@ -35,25 +35,25 @@ infy conformance --report   # 未实现：notice + exit 1
 | §9.2 | 诊断渲染的字节级版式（gutter、caret 行、`note`/`help`、建议行） | 🟡 仅 §9.2 那条规范样例逐字节对齐（2 项测试） |
 | §9.4 / E.5 | `--diag-json` 结构（`phase` / `origin` / `expand_chain` / `suggestions` / `runtime_ctx`） | 🟡 能输出，无金样测试 |
 | §2 | 词法：编码与换行、嵌套注释、`//infy:build` 约束、XID 标识符与保留字、生命周期记法、数值/字符串/原字符串/字节串/`char`/`cord` 的完整文法与转义封闭表、`@embed` 词法不透明区 | ✅ 79 项测试 |
-| §3 | EBNF 递归下降（含 §3.6 嵌入、§3.9 宏、§3.11/3.12/3.13 补全），§3.10 消歧，错误恢复 | 🟡 5 项测试 + `examples/tour` 全量解析；没有"全产生式都落到 AST"的审计 |
-| §5 | module/package/file 三层、`MODULE.infy.toml`、§5.3 导入解析次序、`internal` 可见性、§5.7 MVS、§5.8 dirhash、lock 读写、§2.2 约束表达式 | 🟡 已实现，**0 项独立单测**；证据只有 `infy check examples/tour` exit 0（`internal` 规则另有 1 项 cli 测试） |
-| §4 | 类型全集、字面量范围、无隐式数字转换、运算符语义、`?` 展开、生命周期 elision、§4.12 数字细节、穷尽性、§2.12 const-eval、`env` 封闭字段集、`unsafe` 六禁令 | 🟡 已实现，**0 项独立单测**；同上仅 tour 证据 |
-| §4.7 | 借用检查 | ✅ 11 项：`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006` 正反例（`E-0121` 实现了但无测试） |
+| §3 | EBNF 递归下降（含 §3.6 嵌入、§3.9 宏、§3.11/3.12/3.13 补全），§3.10 消歧，错误恢复 | 🟡 7 项测试 + `examples/tour` 全量解析（A4 轮补 `start(chain = …)` 与嵌套泛型闭合 2 项）；没有"全产生式都落到 AST"的审计 |
+| §5 | module/package/file 三层、`MODULE.infy.toml`、§5.3 导入解析次序、`internal` 可见性、§5.7 MVS、§5.8 dirhash、lock 读写、§2.2 约束表达式 | 🟡 **19 项独立单测**（A4 轮补：清单逐段/`E-0506`/`E-0507`/`W-0500`、§5.3 次序、`^` 区间、MVS 最小选择与冲突、dirhash、lock 往返与 `E-0200`）；`discover()` 目录发现仍只有 tour 证据 |
+| §4 | 类型全集、字面量范围、无隐式数字转换、运算符语义、`?` 展开、生命周期 elision、§4.12 数字细节、穷尽性、§2.12 const-eval、`env` 封闭字段集、`unsafe` 六禁令 | 🟡 **22 项独立单测**（A4 轮补：内建构造、未声明名、字面量取型与后缀范围、`type_compatible` 逐臂、`E-0120`、`env`/`E-0140`、`goto`/`start`）；`?` 展开、elision、穷尽性、const-eval、`unsafe` 六禁令仍只有 tour 证据 |
+| §4.7 | 借用检查 | ✅ 15 项：`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006` 正反例 + `E-0121` 4 项（A4 轮补；其判据低估数值绑定，见偏差 D-19 / BACKLOG F7） |
 | §5.8 | SHA-256 / base64 / Merkle dirhash 自研实现（NIST 与 RFC 4648 向量） | ✅ 12 + 7 项 |
 | §5.2/E.2–E.4 | 无依赖 TOML 子集解析 + 稳定输出（`parse→emit→parse` 幂等） | ✅ 15 项 |
 | §6.1–§6.5 / §6.7 | `macro_rules!` 展开与 derive 生成 | ✅ 35 + 57 项 |
 | §9.5 | 格式化十四条规则 | ✅ 39 项 |
 | §10 | `std` 签名表 | 🟡 表有 4 项测试；其消费者 `infy doc`、codegen 映射未实现 |
 | §1.3 | 领域中立判据（`NFKCCaseFold` 匹配 `domain_terms` 黑名单） | ✅ 4 项 |
-| §8.4 | 节点表编号 | 🟡 1 项；`goto` 的三条 `E-0301` 越界路径无测试 |
+| §8.4 | 节点表编号 | 🟡 7 项（`parser` 编号 1 项 + `sema` 的 `goto` 三条 `E-0301` 越界路径、`start` 链名/锚点、序言不移动编号） |
 | §7.4 / §7.3 | 产物容器：宿主可执行文件 + `INFYART2` 段尾 + `.inf meta/rodata 索引/ifbc/sum`；`build-id` | 🟡 `infy artifact info` 只识别段尾魔数；段写入器与 `.inf meta` 解析都不存在（BACKLOG C3） |
 | §7.8 / 附录 D | IFBC 编码、反汇编、装载期六项校验（`R-0704`…`R-0708`）、UB-019 | 🟡 Rust 侧 5 项 + C 侧 79 断言**各自**通过；两侧操作数个数不一致（BACKLOG D4），双侧交叉验证目前必然错位 |
 | §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ⬜ `src/host.rs` 是占位文件 —— **未实现** |
 | 运行时 | 检查型算术、Vec/String 增长因子、确定性 drop 顺序与 `focus` 终止半径、焦点调度器与 ResourceLock FIFO、`xxHash64`、SplitMix64+PCG32、无偏 Fisher–Yates | 🟡 代码在 `runtime/infy_rt.c`；`test_rt.c` harness 未收敛（B1），且 79 断言链的是 `test_ifbc_stubs.c` 替身而非生产运行时（B2） |
 
-`cargo test --offline --lib` 目前 **285 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
-"绿灯"只表示已写测试的模块自洽：`sema`、`pkg`、`hir`、`codegen`、`host`、`btrack`、`atrack`、`conformance`、`doc`
-这些模块**一项单测都没有**，仍在进行中或未开始。
+`cargo test --offline --lib` 目前 **332 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
+"绿灯"只表示已写测试的模块自洽：A4 轮之后 `sema`(22) 与 `pkg`(19) 已不再是零单测，
+但 `hir`、`codegen`、`host`、`btrack`、`atrack`、`conformance`、`doc` **一项单测都没有**，仍在进行中或未开始。
 
 明确未实现（不使用即报错，不做静默降级）：`src/codegen.rs`（§7.5 C11 发射）、`src/hir.rs`、`src/atrack.rs`（A 轨绑定）、
 `src/host.rs`（§11 `HostApi`）、`src/doc.rs`（`infy doc`）、`src/conformance.rs`（§12 用例集）——这六个文件目前是 1 行占位；

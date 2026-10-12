@@ -53,11 +53,21 @@
       README 目录树里不存在的 `tests/` 已删；README 指向的 `docs/coverage.md` 此前**根本不存在**，现已建成逐条款"实现 × 证据"矩阵。
       遗留：A3 期间发现的两条真实缺陷登记为 F5/F6，零单测模块的补测登记为 A4。
       证据提交：`4244458`（README/status/coverage/BACKLOG/D-17），RUNLOG 行在紧随其后的提交里。
-- [ ] A4 给**零单测模块**补独立回归测试：`src/sema.rs`（§4 类型检查、`E-0101` 内建构造、`E-0110` 字面量取型、
+- [x] A4 给**零单测模块**补独立回归测试：`src/sema.rs`（§4 类型检查、`E-0101` 内建构造、`E-0110` 字面量取型、
       `E-0301` 的三条 `goto` 越界路径）、`src/pkg.rs`（清单/MVS/lock/dirhash）、`src/borrow.rs` 的 `E-0121`。
       理由（A3 核对结论）：阶段 A 修掉的十个缺陷里绝大多数只有"`infy check examples/tour` exit 0"这一条端到端证据，
       回归网是空的 —— 改坏 `sema.rs` 现在不会有测试变红。
       验收：`cargo test --offline --lib` 里 `sema::tests` + `pkg::tests` 合计 ≥ 20 项，且每项能单独指出它锁住的是哪条条款。
+      实测：`sema` **22** + `pkg` **19** = **41 项**（≥20 ✔），另补 `borrow` 的 `E-0121` **4 项**与配套的 `parser` **2 项**；
+      `cargo test --offline --lib` **332 passed / 0 failed**（基线 285/0），`cargo check --offline --lib` 0 error / 51 warning，
+      `infy check examples/tour` 仍 exit 0，`(cd examples/tour && infy fmt --check)` 仍 exit 2，C 侧 `79 asserts, 79 pass, 0 FAIL`。
+      每项的条款写在测试的 doc comment 里（`§4.1`/`§4.2`/`§4.3`/`§4.6`/`§2.8`/`§4.13 规则 7`/`§8.2`/`§8.4`/`§5.2`/`§5.3`/`§5.7`/`§5.8`/`§4.3+UB-006`）。
+      新测试一上手就红的 4 条不是测试写错，而是真实缺陷，已修并各自带回归测试（细节见 `docs/status.md` 的 A4 一节）：
+      (1) `start(chain = C, node = "a")` 整条解析失败（参数名位置只接受 `Ident`，`chain` 是 §2.4 保留字）→ `E-0800`/`E-0801` 永不触发；
+      (2) `E-0120` 永不触发（§3.5 把 `x = 2` 解析成赋值**表达式**，检查却写在 `parser.rs` 无产生式的 `StmtKind::Assign` 分支里）；
+      (3) §4.6 `env.x` 报假 `E-0101`、写 `env` 的 `E-0140` 永不触发（判定只写在 `check_path` 的 `::` 形式里）；
+      (4) 嵌套泛型 `Arc<Mutex<u32>>` 令解析器 **panic（`usize` 减法下溢）** —— `generic_args` 的 `depth -= 2` 与递归内层冲突，改为 `closer_debts` 记账。
+      两条未修只登记：`E-0043` 的未知后缀分支不可达（实际报 `E-0053`，偏差 D-18）、`E-0121` 判据低估数值绑定（偏差 D-19 / 新任务 F7）。
 
 ### 阶段 B：运行时可测（C 侧）
 
@@ -116,20 +126,34 @@
       `2 file(s) are not canonical`，exit 2。必须先判定是"§9.5 与 §14 互相矛盾（规范级缺陷，写 `docs/spec-deviations.md`）"
       还是"格式化器与 §14 样例之一写错了"（改实现/改样例）。裁决前，任何文档不得声称"§14 导览已是规范写法"。
       验收：`infy fmt --check examples/tour` exit 0，或偏差条目里给出规范方认可的逐条理由。
+- [ ] F7 **`E-0121` 的判据与 §4.3/UB-006 不一致**（A4 轮补测时确认，已写 `docs/spec-deviations.md` D-19，未改实现）：
+      `src/borrow.rs:460` 的条件是 `mutable && !ty.is_numeric() && !matches!(ty, Ty::Rc{..})`。
+      于是 (a) `var n: u32 = 0` 跨链可达时**静默通过**（数值绑定并不比结构体绑定安全，排除它没有规范依据）；
+      (b) 反过来把链内局部 `var` 当成跨链共享（§8.2 说各焦点私有栈，真正危险的是捕获与全局路径），方向偏严。
+      同一函数的诊断 span 用 `b_span_default()`（`Span::empty_at(0,0)`），所以 §9.2 的 `file:line:col` 指向不到绑定处。
+      验收：逐条裁决 (a)(b) 与 span，改实现或改判据，并把 `borrow::tests` 里 `E-0121` 的用例补成"数值绑定也报 / 局部 var 不报"的成对断言；结论写回 D-19。
+        现状测试：`mutable_state_shared_across_chains_is_e0121`（报）+ `arc_shared_state_across_chains_is_clean` /
+        `same_chain_second_focus_is_not_e0121` / `immutable_state_across_chains_is_not_e0121`（不误报）。
 
 ## 2. 当前指针
 
-> **下一轮第一件事：补推。** 远端 `toolchain` 停在 `4429b25`；本地领先的提交数用 `git rev-list --count 4429b25..HEAD` 现算
-> （**只认现算**：`git rev-list --count 4429b25..HEAD`，写下这行的提交本身也会让它 +1，所以不引用固定数；区间起点是远端 SHA）。
-> cron-01、cron-02 各两次 `git push` 都失败在 `github.com:443`；`api.github.com` 能回查远端 SHA，但推不动（不要只看 push 的输出，回查为准）。
+> **下一轮第一件事：取 B1**（§1 里第一个 `[ ]`：`runtime/infy_rt.c` 的测试 harness 补齐，半成品在 `runtime/test_rt.c`，
+> 收敛而非重写）。验收：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && ./rt_tests` 全通过；
+> 输出二进制写 `target/scratch/`（写 `/tmp` 会让 `ld` 直接返回 5，见经验库）。B3 的 `infy_rt.h:212` typedef 前置引用告警
+> 会在编译 `infy_rt.c` 时出现，那是已知项，不是 B1 的失败。
 >
-> **补推之后取 A4**（§1 里第一个 `[ ]`：给 `sema.rs`/`pkg.rs`/`E-0121` 补独立回归测试 —— A3 核对出的事实是这三个模块
-> 目前**一项单测都没有**，阶段 A 修掉的十个缺陷大多只有 tour 那一条端到端证据）。
-> 已验证事实（A3 轮全部复跑，非引用）：`cargo test --offline --lib` **285 passed / 0 failed**；
-> `cargo check --offline --lib` 0 error / 51 warning；`infy check examples/tour` exit 0；`infy build examples/tour` exit 6；
-> `infy run|test|doc|ifbc|conformance|lsp` exit 1；`(cd examples/tour && infy fmt --check)` **exit 2（2 file(s) are not canonical，见 F6）**；
-> `infy artifact info <非产物>` exit 7；C 侧 `IFBC harness: 79 asserts, 79 pass, 0 FAIL`（链的是 `test_ifbc_stubs.c`，不是生产 `infy_rt.c`）；
-> 诊断码 210 全表；规范 §12 要求 2300 用例（1244+256+800），外部用例目前为 0。
+> **推送欠账：0**。cron-03 轮开头 `git push origin HEAD:toolchain` 成功，并用 `api.github.com` 回查确认远端
+> = `9813ba33accfe8f93a4650a654840fe532db292b`（此前 cron-01/cron-02 各两次失败，欠 9 个提交）。
+> 现算式仍然只认 `git rev-list --count <远端SHA>..HEAD`，远端 SHA 变了要一起换。
+>
+> 已验证事实（A4 轮全部复跑，非引用）：`cargo test --offline --lib` **332 passed / 0 failed**
+> （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `pkg` 19 · `toml` 15 · `borrow` 15 · `sha256` 12 ·
+> `codes` 9 · `base64` 7 · `parser` 7 · `ifbc` 5 · `cli` 5 · `stdlib` 4 · `diag` 2 = 332）；
+> `cargo check --offline --lib` 0 error / 51 warning；`infy check examples/tour` exit 0；
+> `(cd examples/tour && infy fmt --check)` **exit 2（2 file(s) are not canonical，见 F6）**；
+> C 侧 `gcc … infy_ifbc.c infy_dyn.c test_ifbc.c test_ifbc_stubs.c` → `IFBC harness: 79 asserts, 79 pass, 0 FAIL` exit 0（链的是替身，不是生产 `infy_rt.c` = B2）。
+> A4 修掉的 4 个前端缺陷（`start(chain=…)` 保留字参数名、`E-0120` 分支不可达、§4.6 `env` 假 `E-0101` + `E-0140` 不可达、
+> 嵌套泛型 `>>` 让解析器 `usize` 下溢 panic）都有回归测试；两条未修只登记：D-18（后缀实际报 `E-0053`）、D-19/F7（`E-0121` 低估数值绑定）。
 > `main` 与本地分叉（另一会话推了 `faa34ad`/`05da606`），**合并主干由人决定**。
-> 阶段 A 之后优先级最高的已知地雷：**D4**（Rust/C 的 IFBC 操作数个数不一致）与 **B1**（C 侧 harness 未收敛）；
+> 阶段 A 之后优先级最高的已知地雷：**D4**（Rust/C 的 IFBC 操作数个数不一致）与 **B1**；
 > **编译 C 侧测试时四个 .c 必须一起给**（少 `infy_dyn.c` 时 `ld` 只返回 `collect2: error: ld returned 5`，不打印任何 undefined reference）。
