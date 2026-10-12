@@ -1,4 +1,5 @@
 # Infinity Language (INFY) — v2.0
+> If you find this interesting, a star would help a lot - issues and design critiques are even better.
 
 **A zero-dependency Rust toolchain for a statically-typed, compiled language.**
 
