@@ -970,9 +970,16 @@ impl<'a> P<'a> {
             self.expect_p(Punct::RBrace);
         }
         if self.eat_p(Punct::Eq) {
+            let t = self.peek().clone();
             let e = self.expr();
-            if let ExprKind::Int(i) = &e.kind {
-                disc = i.value;
+            // §4.1 explicit discriminant. `primary` builds `ExprKind::Lit(Lit::Int(..))`; the
+            // `ExprKind::Int` shape it also names is unreachable there, so matching only that one
+            // silently turned every `A = 3` into `A` with no diagnostic at all.
+            match &e.kind {
+                // `value: None` means the literal is wider than `u128` — §2.8 makes that sema's
+                // range error, so the token is not reported twice here.
+                ExprKind::Int(i) | ExprKind::Lit(Lit::Int(i)) => disc = i.value,
+                _ => self.syntax_err(&t, "枚举判别式的整数字面量（§4.1）"),
             }
         }
         Some(Variant { name, tuple, struct_fields, disc, attrs, docs, span: Span::new(self.file, start, self.prev_end()) })
@@ -2885,6 +2892,32 @@ mod tests {
         } else {
             panic!("expected chain");
         }
+    }
+
+    /// §4.1: an explicit discriminant has to reach the AST. `primary`'s first `Kind::Lit` arm
+    /// matches every literal, so the `ExprKind::Int` shape `variant()` used to look for is never
+    /// built there — `A = 3` parsed as a bare `A` and printed no diagnostic at all.
+    #[test]
+    fn enum_discriminants_reach_the_ast_and_bogus_ones_are_e0053() {
+        let (ast, codes) = parse_str("package main
+
+enum E { A = 3, B, C = 10 }
+");
+        assert!(codes.is_empty(), "{codes:?}");
+        let discs = match &ast.items[0].kind {
+            ItemKind::Enum { variants, .. } => variants.iter().map(|v| v.disc).collect::<Vec<_>>(),
+            _ => panic!("expected enum"),
+        };
+        assert_eq!(discs, vec![Some(3), None, Some(10)]);
+
+        let (_, codes) = parse_str("package main
+
+enum E { A = yes }
+");
+        assert!(
+            codes.iter().any(|c| c == "E-0053"),
+            "a non-literal discriminant must not pass silently: {codes:?}"
+        );
     }
 
     #[test]

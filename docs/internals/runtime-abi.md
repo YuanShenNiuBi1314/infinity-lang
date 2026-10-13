@@ -31,17 +31,30 @@ reference target; `usize`/`isize` width is taken from the target and recorded in
 | `Vec<T>` | `typedef struct { T* ptr; uint64_t len; uint64_t cap; } InfyVec_T;` | 24/8 |
 | `Box<T>` | `T*` (heap, freed by the owning scope's cleanup entry) | 8/8 |
 | `Rc<T>` / `Arc<T>` | `typedef struct { T* data; uint64_t* strong; } InfyRc_T;` (`Arc` uses `_Atomic uint64_t*`) | 16/8 |
-| `Option<T>` (scalar/`str`) | `typedef struct { T val; uint8_t some; } InfyOption_T;` | `sizeof(T)+1`, aligned |
+| `Option<T>` (scalar/`str`) | `typedef struct { T val; uint8_t some; } InfyOption_T;` | C padding rules (see below) — `Option<u32>` = 8/4, `Option<str>` = 24/8 |
 | `Option<T>` where `T` is a pointer (`&T`, `Box<U>`, `*const U`, fn ptr) | the pointer itself; `NULL == None` (§4.1 niche — source must not depend on this beyond `.is_some()`) | 8/8 |
-| `Result<T, E>` | `typedef struct { T ok; E err; uint8_t is_ok; } InfyResult_T_E;` | `sizeof(T)+sizeof(E)+1`, aligned |
-| `enum` | `typedef struct { uint32_t tag; union { ... } v; } InfyE_name;` — explicit tag, never niche-dependent (§4.1) | per union |
+| `Result<T, E>` | `typedef struct { T ok; E err; uint8_t is_ok; } InfyResult_T_E;` | C padding rules — `Result<u32, Fail>` = **20**/4, `Result<u32, u64>` = **24**/8 |
+| `enum` | `typedef struct { uint32_t tag; union { ... } v; } InfyE_name;` — explicit tag, never niche-dependent (§4.1); **if no variant carries a payload the union is elided** and the enum is exactly its tag | `FailWhy` 8/4, `Phase` **4/4** |
 | `struct` | C struct, fields in declaration order; `#[repr(Rust)]` default layout is **the same order** in this implementation (legal: §4.8 forbids source from depending on the default layout, and field reordering is an optimisation this backend does not perform) | sum |
 | `#[repr(C)] struct` | identical, and additionally the layout exported to A-track code | sum |
+| `(A, B)` tuple | C struct, elements in order, fields named `a0`, `a1`, … (deviation D-24: §4.1 fixes no tuple representation) | `(u32, bool)` 8/4, `(u64, (u32, bool))` 16/8 |
 | `fn(A,B) -> R` | `R (*)(A, B)` (non-capturing only, §4.1) | 8/8 |
 | closure (capturing) | `typedef struct { void* fn; void* env; } InfyCloseret_args;` | 16/8 |
 | `dyn Trait` | `typedef struct { void* data; const InfyVtable_Trait* vt; } InfyDyn_Trait;` | 16/8 |
 
 `dyn` (B-track boxed dynamic value) is `InfyDyn` — a reference-counted tagged box (§7.7.7).
+
+**The exact rule.** The arithmetic shorthands this table used to carry are not what the backend does, so
+they are gone: `Result<u32, Fail>` measures **20** (ok@0, err@4, is_ok@16) and `Result<u32, u64>` measures
+**24** (ok@0 + 4 bytes of padding, err@8, is_ok@16, tail-padded to 8), while `sizeof(T)+sizeof(E)+1, aligned`
+would have said 16 and 16. What is implemented is the record rule: every record is laid out by C
+rules — each field starts at `align_up(offset, field.align)`, the record's alignment is the maximum field
+alignment, the size is padded to that alignment — and a union is `{ max size, max align }` with every
+member at offset 0. Implemented and measured in one place: `src/hir.rs::record_layout` / `union_layout`,
+goldens `hir::tests::scalar_rows_of_abi_section_1`,
+`hir::tests::option_and_result_rows_of_abi_section_1` and `hir::tests::tour_declarations_carry_the_measured_layouts`
+(each number cross-checked against `gcc -std=c11` `sizeof`/`_Alignof`/`offsetof`, `docs/RUNLOG.md` cron-07).
+`#[align(N)]` raises a record's alignment and therefore its tail padding.
 
 ### vtable layout (`IFABI-2`)
 
@@ -114,6 +127,15 @@ typedef struct ChainFrame_<name> { InfyLocals locals; uint32_t node_idx; ... } F
 static void node_<name>_<i>(Frame* f);      // one function per §8.4 node
 static const InfyNodeDesc nodes_<name>[];   // file:line:col, linkage_count, host_event_id
 ```
+
+`ChainFrame_<name>` exactly: the chain's `let`/`var` bindings as a record **in declaration order**, then
+`node_idx: uint32_t`, then tail padding to the frame's alignment. A chain with no bindings is therefore
+4/4 (just `node_idx`); `let a: u32` + `var b: u64` is 24/8 (`a`@0, `b`@8, `node_idx`@16). The runtime never
+inspects the internals — it allocates `InfyChainDesc.frame_size` bytes with `frame_align` and zeroes them
+(`runtime/infy_rt.c`, `infy_alloc(d->frame_size, ...)` + `memset`), so these offsets are the whole contract
+between codegen and the scheduler. `InfyLocals` is that prefix, not a separate struct.
+Goldens: `hir::tests::chain_frame_is_locals_then_node_idx`, `hir::tests::abi_table_rows_match_infy_rt_h`
+(`InfyNodeLoc` 24/8 = 0/8/12/16/20, `InfyChainDesc` 48/8 = 0/8/12/16/20/24/32/40, `InfyFocusId3` 12/4).
 
 Node numbering follows §8.4 to the letter: only top-level `expr_stmt`s (including `@embed`) open
 a new node; `let`/`var`/plain assignment/`label` are the *preamble* of the preceding node;
@@ -250,7 +272,26 @@ D.8's values, so `1` is this implementation's fixed choice.
 ## 10. `env` (§4.6)
 
 `EnvSnapshot` is a fixed-layout struct; `env.x` compiles to a load at a compile-time offset
-recorded in `.inf meta`'s `EnvOffsets`. The field set is closed and domain-neutral (§1.3):
+recorded in `.inf meta`'s `EnvOffsets`. The layout is `runtime/infy_rt.h`'s `InfyEnvSnapshot`, and §4.6's
+`&str` entries are stored **inline as `InfyStr`** (the host publishes the whole block; a pointer into host
+memory would not survive the node boundary):
+
+| field | type | offset @64 | size/align |
+| --- | --- | --- | --- |
+| `iter` | `u32` | 0 | 4/4 |
+| `runtime_s` | `u32` | 4 | 4/4 |
+| `realtime` | `u64` | 8 | 8/8 |
+| `ram_mb` | `u32` | 16 | 4/4 |
+| `cpu_use` | `f32` | 20 | 4/4 |
+| `gpu_use` | `f32` | 24 | 4/4 |
+| `chain_id` | `u32` | 28 | 4/4 |
+| `node_idx` | `u32` | 32 | 4/4 |
+| `focus_id` | `u32` | 36 | 4/4 |
+| `platform` | `&str` → `InfyStr` | 40 | 16/8 |
+| `build_id` | `&str` → `InfyStr` | 56 | 16/8 |
+
+Total **72/8**. Golden: `hir::tests::env_offset_table_matches_the_frozen_header` (the same 11 offsets measured
+with `offsetof` in `gcc`); a host that disagrees answers `R-0905` (§11.2). The field set is closed and domain-neutral (§1.3):
 `iter u32`, `runtime_s u32`, `realtime u64`, `ram_mb u32`, `cpu_use f32`, `gpu_use f32`,
 `chain_id u32`, `node_idx u32`, `focus_id u32`, `platform &str`, `build_id &str`. Anything else
 goes through `std.host.query`. The host refreshes the snapshot between node dispatches; writes to

@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 333 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 354 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
 Finished `dev` profile  (51 warnings，全部为 unused/dead code，见 BACKLOG F2)
 $ infy check examples/tour
@@ -57,9 +57,9 @@ $ (cd examples/tour && infy fmt --check)
 2 file(s) are not canonical                        # exit 2，见下文"导览源码不是格式化不动点"
 ```
 
-333 项按模块（`cargo test --offline --lib -- --list` 分组计数，合计 333）：
-`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `pkg` 19 · `toml` 15 · `borrow` 15 ·
-`sha256` 12 · `codes` 9 · `base64` 7 · `parser` 7 · `ifbc` 6 · `cli` 5 · `stdlib` 4 · `diag` 2。
+354 项按模块（`cargo test --offline --lib -- --list` 分组计数，合计 354）：
+`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `pkg` 19 · `hir` 20 · `toml` 15 · `borrow` 15 ·
+`sha256` 12 · `codes` 9 · `base64` 7 · `parser` 8 · `ifbc` 6 · `cli` 5 · `stdlib` 4 · `diag` 2。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -72,8 +72,8 @@ $ (cd examples/tour && infy fmt --check)
 **绿灯的含义要如实限定**：`cargo test --lib` 全绿只说明"已写的模块自洽"，不等于 §12 合规。
 `infy build`/`run`/`test`/`doc`/`lib pack`/`ifbc dump`/`conformance` 仍显式报"未实现"（build 是 exit 6，其余 exit 1）；
 B 轨 lowering(`src/btrack.rs`) 尚未收敛；C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（32303 断言 / 0 失败，直接链生产 `infy_rt.c`）；
-`src/codegen.rs`、`src/hir.rs`、`src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs`
-是 1 行占位文件（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
+`src/codegen.rs`、`src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs`
+是 1 行占位文件（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
 A 轨绑定、`std.net` TLS、`infy lsp` 未实现。
 IFBC 断言（B3 轮 79 → **82**，新增的是 `closure.new` 越出 `func_table` 的拒绝路径）**B2 轮起既链
 `runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，两侧同为 82/82、stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 Rust↔C 双侧交叉验证（D4 阻塞）。
@@ -227,12 +227,64 @@ stdout 逐字节相同）；`cargo test --offline --lib` **333 passed / 0 failed
 交叉验证仍被 D4 阻塞；本轮另外核实到 D4 的范围比原描述更大（`func_table` 记录布局两侧也不同：Rust 36 字节/条
 含 `arity/ret_ty/sig/sig_hash`，C 40 字节/条含 `max_stack/ret_arity/ret_sig/flags/frame_kind`），已写进 BACKLOG D4。
 
+## C1 本轮：`src/hir.rs` 落成声明层 IR，布局与 `gcc` 实测逐一对回（IFABI-2 金样）
+
+阶段 [7] 的模块原先是 1 行占位。本轮把它落成**前端与 codegen 之间唯一的接口**，字段与偏移一律对
+`docs/internals/runtime-abi.md`（不是对 `src/ast.rs`）：
+
+- **布局引擎**：`Target`（指针宽度、`__int128` 对齐 = 探测值）、`Layout`、`record_layout`/`union_layout`
+  （C 规则：字段 `align_up` 入位、对齐取最大、尾部补齐）、`Layouter`（带 ADT 递归栈）。
+  §1 表示表**逐行**落成测试，且每个数字都有独立的 C 来源：`gcc -std=c11` 打印
+  `sizeof`/`_Alignof`/`offsetof`（探针 `target/scratch/c1/probe.c`，实测数字摘录记在 `docs/RUNLOG.md` cron-07）。
+  对照出的两处 ABI 文档**算术错误**已改正并写回文档：`Result<u32, Fail>` 实测 **20/4**（ok@0 err@4 is_ok@16），
+  `Result<u32, u64>` 实测 **24/8** —— 原文的 `sizeof(T)+sizeof(E)+1, aligned` 两条都会算成 16。
+- **条目 lowers**：`struct`/`enum`/`fn`/`event`/`const`/`static`/`chain`，含每个字段的偏移、每个变体的
+  判别式与 payload 偏移、每个函数签名/返回的布局、`#[repr(C)]` 与 `repr(Rust)` 的区分（§4.8：
+  `offset_of` 只对 `repr(C)` 可用，测试 `offset_of_field_is_only_available_for_repr_c` 锁住）、
+  `event` 与 A 轨 `extern` 的 foreign 链接性、§5.9 `#[test]`/`#[bench]`、§7.6.5 `#[export]`。
+- **链（§8.4 + ABI §5）**：节点表（`idx/line/col/linkage_count/host_event/event_id/anchor`）与链帧
+  （`let`/`var` 按声明序入帧 + `node_idx` + 尾部补齐）。tour 的 `Pipeline` 金样 = **6 个节点**
+  （行 8/9/10/11/16/19，`gate` 与 `retry_once` 各挂 1 个连携块，锚点 `begin`=0、`done`=5），
+  它把 §8.4 规则 1"连携块与 `label` 都不开新节点"第一次钉成了可复跑断言。
+  `ABI` §5/§8.4 的三种定长行也做了金样：`InfyNodeLoc` 24/8（0/8/12/16/20）、`InfyChainDesc` 48/8
+  （0/8/12/16/20/24/32/40）、`InfyFocusId3` 12/4，全部与 `gcc` 的 `offsetof` 一致。
+- **`env`（§4.6 + ABI §10）**：11 个字段的封闭集 + `EnvOffsets`，与冻结头 `InfyEnvSnapshot` 的
+  `offsetof` 逐个对上（`iter`@0 … `platform`@40、`build_id`@56，**72/8**）。§4.6 写 `&str` 而头文件存
+  的是**内联 `InfyStr`**，这条已写进 ABI 文档 §10 的表里（宿主发布整块快照，指针跨不过节点边界）。
+- **符号（ABI §2）**：`infy_<mangled package path>_<item>`，非字母数字换 `_`。类型原先只有 module 路径，
+  本轮改从 `Program::by_path` 反查真正的 package 路径，使 tour 的类型符号是
+  `infy_tour_core_build_Phase` 而不是 `infy_tour_Phase`。
+- **vtable 前缀（§1）**：`drop`/`size`/`align` + 方法指针，`24 + 8·n`（n=2 实测 40/8）。
+
+规范未定的三项表示按协议选定并记 **D-24**（元组 = 声明序 C struct；无 payload 的 enum 省掉 union → `Phase`
+= 4/4；判别式只接受整数字面量，其它形态 `E-0053`）；§4.1"判别式最小容纳"与 ABI 的 `uint32_t tag` 冲突记
+**D-25**（裁决：标签恒为 `u32`，理由含 `.infib` ABI 稳定性与 `repr(C)` 要和 C 的 `int` 共享布局），
+推论是超宽判别式报 **`E-0042`** 而不是截断。
+
+**测试揪出的真实缺陷（已修）**：`enum Code { A = 3 }` 的显式判别式在解析器里被**静默丢弃且不打诊断**。
+根因是 `parser.rs::variant()` 只匹配 `ExprKind::Int(..)`，而 `primary()` 的第一个臂 `Kind::Lit(l)` 已吃掉所有
+字面量，它下面的 `Kind::Lit(Lit::Int(i))` 臂永不可达 —— 即 `ExprKind::Int` 从不被构造（同一类"码写在不可达
+分支里"的第 4 次出现）。修法：`variant()` 同时接受两种形态并在非字面量时报 `E-0053`；
+锁定点 `parser::tests::enum_discriminants_reach_the_ast_and_bogus_ones_are_e0053`。
+`primary()` 的死臂本身**没动**（动它会让 `ExprKind::Int` 全树突然出现），连同 `sema` 收集判别式时的
+`u128 as u64` 截断、`[T; N]` 的 N 非字面量时 `unwrap_or(0)` 静默变成长 0 三件事一起登记为 **F9/F10/F11**。
+
+**明确未做**（不假成功）：语句/表达式级 IFIR 没落，函数体仍是 AST 的 `Block`；`infy build` 没有接 HIR
+（仍打 `notice: stages [8] codegen and [9] link are not implemented yet`，exit 6）。这是 C2 的前置。
+
+回归（全部为本轮实测，非引用）：`cargo test --offline --lib` **354 passed / 0 failed**（基线 333，+20 `hir` +1 `parser`）；
+`cargo check --offline --lib` 0 error / **51 warning**（与基线同）；`infy check examples/tour` exit **0**；
+`(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决）；四条 C 链未改代码但全部复跑：
+`-c infy_rt.c` **0 warning** exit 0、rt harness **32303 assertions / 0 failures** exit 0、
+替身链 IFBC **82/82** exit 0、生产链 IFBC **82/82** exit 0 且与替身链 stdout 逐字节相同。
+
 ## 仍未实现
 
 `infy build` 的 C11 发射（阶段 [8]）与产物段写入（阶段 [9]）→ 因此 `build`（exit 6）、
 `run`/`test`/`doc`/`lib pack`/`ifbc dump`/`conformance`/`lsp`（exit 1）目前明确返回"未实现"而不是假成功；
 A 轨绑定生成（`src/atrack.rs`）、§11 `HostApi`（`src/host.rs`）、§12 合规用例集（`src/conformance.rs`）、
-`infy doc`（`src/doc.rs`）、HIR（`src/hir.rs`）同样未实现 —— 这六个文件当前是 1 行占位。
+`infy doc`（`src/doc.rs`）同样未实现 —— 这五个文件当前是 1 行占位。
+HIR（`src/hir.rs`）于 C1 轮落成**声明层**，但**语句/表达式级 IFIR 仍未实现**，`infy build` 也尚未接它。
 
 **本实现不声称「INFY v2.0 兼容」**：§12 的 2300 个用例（§12.1 的 1244 + §12.2 的 256 + §12.5 的 800）
 目前外部用例为 **0**，逐分类通过率不可测。

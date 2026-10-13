@@ -2,14 +2,15 @@
 
 本文件回答一个问题：**"某条声称完成了"到底是被什么证明的？**
 规则只有一条：标 `✅` 必须能在 §1 的命令里数出对应的测试/断言；数不出来的一律写 `🟡`（实现了但证据不足）
-或 `⬜`（未实现，运行时显式报错）。`src/host.rs`、`src/hir.rs`、`src/codegen.rs`、`src/atrack.rs`、
-`src/conformance.rs`、`src/doc.rs` 六个模块的占位注释也指向这里。
+或 `⬜`（未实现，运行时显式报错）。`src/host.rs`、`src/codegen.rs`、`src/atrack.rs`、
+`src/conformance.rs`、`src/doc.rs` 五个模块的占位注释也指向这里（`src/hir.rs` 于 C1 轮从占位落成声明层 IR，
+证据是 §3 的 stage [7] 一行）。
 
 ## 1. 证据命令（2026-10-13 B1 轮起逐轮复跑，主树非隔离副本；P11 于 B2 轮改判，全部 10 条于 B3 轮复跑）
 
 | # | 命令 | 输出里的数字 | exit |
 | --- | --- | --- | --- |
-| P1 | `cargo test --offline --lib` | `333 passed; 0 failed; 0 ignored` | 0 |
+| P1 | `cargo test --offline --lib` | `354 passed; 0 failed; 0 ignored` | 0 |
 | P2 | `cargo check --offline --lib` | 0 error、`51 warnings`（全部 unused/dead code，BACKLOG F2） | 0 |
 | P3 | `infy check examples/tour` | `check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)` | 0 |
 | P4 | `infy build examples/tour` | 先打 P3 那行，再打 `notice: ... stages [8] codegen and [9] link are not implemented yet` | 6 |
@@ -29,7 +30,7 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 
 ## 2. 前端与语义（Rust 侧）
 
-`cargo test --offline --lib` 的 333 项按模块分布（`cargo test -- --list` 计数）：
+`cargo test --offline --lib` 的 354 项按模块分布（`cargo test -- --list` 计数）：
 
 | 模块 | 项数 | 条款 |
 | --- | --- | --- |
@@ -59,7 +60,8 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 | 条款 | 实现位置 | 状态 | 证据 / 缺口 |
 | --- | --- | --- | --- |
 | §2 词法 | `src/lexer.rs` | ✅ | 79 项（P1） |
-| §3 语法 | `src/parser.rs` | 🟡 | 7 项 + P3 全量解析；没有"EBNF 全产生式是否都落到 AST"的审计，**"全产生式"这句在 README 里已降级** |
+| §3 语法 | `src/parser.rs` | 🟡 | 8 项 + P3 全量解析；（C1 轮补的第 8 项锁住 §4.1 枚举判别式，见偏差 D-24 —— 它此前被静默丢弃）没有"EBNF 全产生式是否都落到 AST"的审计，**"全产生式"这句在 README 里已降级** |
+| §7.1 [7] IFIR（**声明层**） | `src/hir.rs` | 🟡 | C1 轮 **20 项**：§1 表示表逐行（`sizeof`/`_Alignof`/`offsetof` 由 `gcc` 实测对回）、§4.6/§10 `EnvOffsets` 11 个偏移 + 72/8、§5 链帧与 `InfyNodeLoc`/`InfyChainDesc`/`InfyFocusId3` 行、§8.4 节点表、§2 符号 mangle、§4.8 `offset_of` 只对 `repr(C)`、§4.15 `E-0175`、D-24/D-25。**缺口**：语句/表达式层没落（C2 的前置），`infy build` 也未接 HIR（仍 P4 exit 6），所以这 20 项锁的是表示与判据而非端到端 |
 | §4 类型检查 | `src/sema.rs` | 🟡 | A4 轮补 **22 项**（内建构造、未声明名、字面量取型/后缀/范围、无隐式转换含 `type_compatible` 逐臂、`E-0120`、`env` 封闭集与 `E-0140`、`goto`/`start`）。缺口：`?` 展开、生命周期 elision、穷尽性 `E-0070/0071/0072`、const-eval、`unsafe` 六禁令仍只有 P3 |
 | §4.7 借用检查 | `src/borrow.rs` | ✅ | 15 项：`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006` 正反例 + `E-0121` 4 项（A4 轮补）。`E-0121` 的判据低估数值绑定，见偏差 D-19 / BACKLOG F7 |
 | §5 包/依赖 | `src/pkg.rs` | 🟡 | A4 轮补 **19 项**（清单逐段与默认值、`E-0506`/`E-0507`/`W-0500`、§5.3 解析顺序、`^` 区间、MVS 最小选择与冲突、dirhash 顺序无关与路径绑定、lock 往返/排序/`E-0200`）。缺口：`discover()`（目录发现、R3/R4 规则）无测试，依赖 P3 的两 package 布局 |
@@ -67,7 +69,7 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 | §5.2/E.2–E.4 TOML | `toml.rs` | ✅ | 15 项（规范 fixture 往返 + fuzz 不 panic） |
 | §6.1–6.5 宏 | `macro_expand.rs` | ✅ | 35 项 |
 | §6.7 derive | `derive.rs` | ✅ | 57 项 |
-| §8.4 节点编号 | `sema.rs` + `parser.rs` | 🟡 | 编号 1 项（`parser`）+ A4 轮 6 项（`sema`）：命名锚点缺失、绝对索引越界（并 `N-0800`）、相对偏移前/后越界、序言语句不移动编号、`start` 的链名/锚点。缺口：`N-0800` 只在 strict 之外的展示层，`--deadlock`/`W-0800` 无测试 |
+| §8.4 节点编号 | `sema.rs` + `parser.rs` + `hir.rs` | 🟡 | 编号 1 项（`parser`）+ A4 轮 6 项（`sema`）+ C1 轮把 §14 tour `Pipeline` 的 6 节点表逐行钉成金样（`hir::tests::tour_pipeline_node_table_matches_the_source`）：命名锚点缺失、绝对索引越界（并 `N-0800`）、相对偏移前/后越界、序言语句不移动编号、`start` 的链名/锚点。缺口：`N-0800` 只在 strict 之外的展示层，`--deadlock`/`W-0800` 无测试 |
 | §9.1–9.3/9.7 诊断码 | `codes.rs` | ✅ | 9 项 + `count()==210`（`E-0093` 来自 §9.6 正文，见 `codes.rs:2052`） |
 | §9.2 诊断版式 | `diag.rs` | 🟡 | 2 项，其中逐字节金样只有 §9.2 那一条样例 |
 | §9.4/E.5 `--diag-json` | `cli.rs:416` | 🟡 | 能写出 `{"version":1,"tool":{...},"diagnostics":[...]}`，但结构无金样测试 |
@@ -79,7 +81,7 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 | §7.7 B 轨 | `btrack.rs` | 🟡 | 4476 行、0 测试，端到端未收敛（D1） |
 | §7.6/§7.7 A 轨绑定 | `atrack.rs` | ⬜ | 占位（D3） |
 | §7.5 C11 发射 | `codegen.rs` | ⬜ | 占位（C2），P4 显式报错 |
-| §11 `HostApi`/三步握手 | `host.rs` | ⬜ | **占位**。（本轮之前的 README 把它写成 ✅，是文档错误，非实现事实） |
+| §11 `HostApi`/三步握手 | `host.rs` | ⬜ | **占位**。（`EnvSnapshot` 的偏移表已由 C1 轮在 `hir.rs::env_table` 落成并有金样，握手本身仍未实现）（本轮之前的 README 把它写成 ✅，是文档错误，非实现事实） |
 | §12 合规套件 | `conformance.rs` | ⬜ | 0 个外部用例；规范要求 2300（§12.1 1244 + §12.2 256 + §12.5 800），**通过率目前不可测**（E1/E2/E3） |
 | §13.4 CLI | `cli.rs` | ✅ | 5 项 + P3/P4/P5/P7/P8 的 exit 码逐条对上 |
 

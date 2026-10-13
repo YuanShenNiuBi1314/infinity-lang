@@ -48,20 +48,23 @@ infy conformance --report   # 未实现：notice + exit 1
 | §8.4 | 节点表编号 | 🟡 7 项（`parser` 编号 1 项 + `sema` 的 `goto` 三条 `E-0301` 越界路径、`start` 链名/锚点、序言不移动编号） |
 | §7.4 / §7.3 | 产物容器：宿主可执行文件 + `INFYART2` 段尾 + `.inf meta/rodata 索引/ifbc/sum`；`build-id` | 🟡 `infy artifact info` 只识别段尾魔数；段写入器与 `.inf meta` 解析都不存在（BACKLOG C3） |
 | §7.8 / 附录 D | IFBC 编码、反汇编、装载期六项校验（`R-0704`…`R-0708`）、UB-019 | 🟡 Rust 侧 6 项 + C 侧 82 断言**各自**通过；B3 轮已把码表对回 §9.7（偏差 D-22 裁决、D-23 钉死 `frame_kind` 两级取值），但两侧操作数个数与 `func_table` 记录布局仍不一致（BACKLOG D4），双侧交叉验证必然错位 |
-| §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ⬜ `src/host.rs` 是占位文件 —— **未实现** |
+| §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ⬜ `src/host.rs` 是占位文件 —— **未实现**（偏移表本身已由 `src/hir.rs::env_table` 落成并有金样） |
 | 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32303 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 82 断言 B2 轮起也链生产 `infy_rt.c`（同为 82/82，输出逐字节相同）。仍不等于 §12 合规：外部用例为 0，双侧交叉验证受 D4 阻塞 |
 
-`cargo test --offline --lib` 目前 **333 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
+`cargo test --offline --lib` 目前 **354 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
 "绿灯"只表示已写测试的模块自洽：A4 轮之后 `sema`(22) 与 `pkg`(19) 已不再是零单测，
-但 `hir`、`codegen`、`host`、`btrack`、`atrack`、`conformance`、`doc` **一项单测都没有**，仍在进行中或未开始。
+但 `codegen`、`host`、`btrack`、`atrack`、`conformance`、`doc` **一项单测都没有**，仍在进行中或未开始
+（`hir` 于 C1 轮补了 20 项声明层金样，语句/表达式层仍未落）。
 C 侧另有两份独立 harness，**两份都直接链生产 `runtime/infy_rt.c`**：`runtime/test_rt.c` →
 **32303 assertions / 0 failures**（B1 轮收敛，`-Wall -Wextra` 零告警）；`runtime/test_ifbc.c` →
 **82 asserts, 82 pass, 0 FAIL**（B2 轮真实链接，零告警；同一 harness 链 `test_ifbc_stubs.c` 替身也同为 82/82，
 两份输出逐字节相同）。
 以上都只说明"已写用例自洽"，**不等于 §12 合规**（外部用例仍为 0）。
 
-明确未实现（不使用即报错，不做静默降级）：`src/codegen.rs`（§7.5 C11 发射）、`src/hir.rs`、`src/atrack.rs`（A 轨绑定）、
-`src/host.rs`（§11 `HostApi`）、`src/doc.rs`（`infy doc`）、`src/conformance.rs`（§12 用例集）——这六个文件目前是 1 行占位；
+明确未实现（不使用即报错，不做静默降级）：`src/codegen.rs`（§7.5 C11 发射）、`src/atrack.rs`（A 轨绑定）、
+`src/host.rs`（§11 `HostApi`）、`src/doc.rs`（`infy doc`）、`src/conformance.rs`（§12 用例集）——这五个文件目前是 1 行占位；
+`src/hir.rs` 不再是占位文件，但它只落**声明层**（类型布局、链节点表、`env` 偏移、符号名），**语句/表达式级 IFIR 尚未实现**，
+`infy build` 也没有接它（仍是 exit 6 的显式未实现）；
 `std.net` 的 TLS 后端（§10.4）、`infy lsp`（§13.4 标注为可选）、`dyn Trait` 的跨实现 vtable 偏移表（规范缺口 C-7 ②）、
 `line_map`/`exception_table` 的规范字节格式（缺口 C-7 ①，本实现自行固定并写入 `runtime/IFBC.md`）。
 

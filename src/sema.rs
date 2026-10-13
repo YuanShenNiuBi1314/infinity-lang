@@ -203,7 +203,7 @@ pub struct ImplInfo {
     pub methods: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedItem {
     Fn(usize),
     Struct(usize),

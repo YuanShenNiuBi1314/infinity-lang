@@ -194,3 +194,49 @@ IFBC 操作数个数与 `func_table` 记录布局不一致，双侧交叉验证�
 锁定点 = `src/ifbc.rs` 的 `frame_kind_header_and_function_value_sets`（头部 `1` 被拒、函数级 `1` 可装载、函数级 `2` 被拒）。
 文档同批更新：`runtime/IFBC.md` §1.1/§1.5/§7、`docs/internals/runtime-abi.md` §9。
 若 §12 合规套件以后给出 D.8 的正式数值表，以规范为准改实现，本条改判。
+
+## D-24 stage [7] 三项规范未定的表示：元组 = 声明序 C struct、无 payload 的 enum 省掉 union、判别式只接受整数字面量
+C1 轮落 `src/hir.rs` 时撞上三条"规范没写、但 `.infib` 一定能观察到"的表示问题，按协议 §3(c) 选一个确定实现：
+
+1. **元组**。§3 的 EBNF 有 `type_list`（括号即元组/unit）、§4.12 之外多处使用元组（`ret.multi` 要"与 INFY 侧
+   元组返回类型逐元一致"，spec:1249），但 §4.1 的表示表**没有元组一行**，`docs/internals/runtime-abi.md` §1 原来也没有。
+   **选择**：元组 = C struct，元素按书写顺序，字段名 `a0`/`a1`/…；空元组即 `()` = `InfyUnit`（1/1）。
+   实测 `(u32, bool)` = 8/4、`(u64, (u32, bool))` = 16/8（`a1`@8）。
+2. **没有任何变体带 payload 的 enum**。ABI §1 写的是 `{ uint32_t tag; union { ... } v; }`，但 union 里一个成员都没有时
+   C11 不允许空 union。**选择**：此时省掉 union，枚举就是它的 tag → `Phase` = **4/4**（带 payload 的仍是 tag+union，
+   `FailWhy` = 8/4）。
+3. **判别式的语法**。`Variant.disc` 是 `Option<u128>`，即只能装整数字面量；规范 §3 的 EBNF 没有 `enum_decl` 的产生式体，
+   没写 `A = expr` 是否允许常量路径或负数。**选择**：只接受非负整数字面量，其它形态报 `E-0053`（解析器的语法码），
+   字面量宽于 `u128` 时留给 §2.8 的范围检查（`E-0042`/`E-0043`），不重复报同一个记号。
+
+**顺带修掉的真实缺陷**（就是这条语法选择暴露的）：`src/parser.rs::variant()` 原来的判据是
+`if let ExprKind::Int(i) = &e.kind`，而 `primary()` 的第一个臂 `Kind::Lit(l)` 已把所有字面量构造为
+`ExprKind::Lit(Lit::Int(..))` —— 它下面那个 `Kind::Lit(Lit::Int(i))` 臂**永不可达**，所以 `ExprKind::Int` 从不产生。
+后果：`enum Code { A = 3, B, C = 10 }` 的三个判别式全部静默变 `None`，`A = 3` 被当成 `A`，**且不打任何诊断**
+（§4.1 的显式判别式在整条前端链上消失）。这是"码写了却在无产生式/不可达分支里"这一类缺陷的第 4 次出现
+（见 `docs/RUNLOG.md` cron-07 与经验库 infy-unreachable-implementation-branch）。修法：`variant()` 同时接受两种形态，
+非字面量报 `E-0053`。锁定点 = `parser::tests::enum_discriminants_reach_the_ast_and_bogus_ones_are_e0053`
+（AST 侧 `[Some(3), None, Some(10)]`）与 `hir::tests::fieldless_enums_are_exactly_their_tag_and_discriminants_survive`
+（HIR 侧 `(3, 4, 10)`：`B` 由前一个显式值续号）。
+`primary()` 的死臂本身**未改**（改它会让 `ExprKind::Int` 突然在全树产生，风险跨模块），登记为 BACKLOG **F10**。
+
+## D-25 `enum` 的标签恒为 `uint32_t`，不按 §4.1"判别式最小容纳"逐类型收窄
+§4.1 的表示表（spec:538）给 `enum` 写的存储是"**判别式最小容纳** + payload（niches 由编译器选取，但**不得**被源码依赖，
+除非显式 `#[repr(C)]`）"，而 `docs/internals/runtime-abi.md` §1 自 IFABI-2 起把标签固定成 `uint32_t tag`。
+按字面读"最小容纳"，`Phase`（4 个变体）应该是 `u8` 1 字节；按 ABI 文档读是 4 字节。二者不能同时成立，必须裁决。
+
+**裁决（C1 轮）**：标签恒为 `uint32_t`，理由四条——
+1. §4.1 同一行就把表示交给编译器（"niches 由编译器选取"）并**禁止源码依赖**；只有 `#[repr(C)]` 才把布局升格为源码事实，
+   而 §4.8 又规定 `offset_of` 只对 `repr(C)` 可用 —— 说明非 `repr(C)` 枚举的宽度本来就不是可依赖的语义；
+2. `#[repr(C)]` 的枚举要与 A 轨 C 代码共享同一布局，而 C 的可执行枚举底层类型在参考目标上就是 `int`（4 字节）；
+   逐类型收窄会让"同一个类型在 C 和 INFY 里宽度不同"成为常态；
+3. 宽度随变体个数变化 = 加一个变体就改变 ABI。§4.15/§7.6 的 `.infib` 跨版本签名稳定性（`E-0605`）依赖"未修改的类型
+   布局不变"，最小容纳直接违背它；
+4. spec:1153 明令"未 `repr(C)` 的 `enum` 判别式"禁止跨边界传递 —— 与"布局由 IFABI 固定、源码不得依赖"一致。
+
+**推论（已实现）**：判别式必须能装进 `u32`，否则是 §2.8 的字面量超范围 → `E-0042`，**不是**截断。
+锁定点 = `hir::tests::a_discriminant_wider_than_the_tag_is_e0042`（`Hi = 4294967296` 报错且不产出该枚举）；
+`hir::tests::fieldless_enums_are_exactly_their_tag_and_discriminants_survive` 锁 4/4。
+注意 `sema` 收集判别式时做的是 `v.disc as u64`（u128 → u64 截断），所以**宽于 `u64` 的判别式在到 HIR 之前就已经回绕**，
+HIR 的 `u32` 检查拦不住它 —— 登记为 BACKLOG **F11**。
+若 §12 合规套件将来给出"最小容纳"的正式判据，以规范为准改实现，本条改判。

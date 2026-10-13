@@ -153,8 +153,30 @@
 
 ### 阶段 C：把 tour 从 check 推到 build/run（P6 单文件承诺的落地）
 
-- [ ] C1 `src/hir.rs`：把 §14 tour 需要的构造（fn/event/struct/enum/const/链节点）落成带类型的中间表示，字段与 `docs/internals/runtime-abi.md` 一一对应。
+- [x] C1 `src/hir.rs`：把 §14 tour 需要的构造（fn/event/struct/enum/const/链节点）落成带类型的中间表示，字段与 `docs/internals/runtime-abi.md` 一一对应。
       验收：`cargo test --offline --lib hir` 通过，且有金样测试证明尺寸/对齐与 ABI 文档一致。
+      实测：`hir` **20 项全绿**，`cargo test --offline --lib` **354 passed / 0 failed**（基线 333，+20 `hir` +1 `parser`），
+      `cargo check --offline --lib` 0 error / 51 warning，`infy check examples/tour` exit 0。
+      **金样不是抄文档，是抄 `gcc`**：一次性探针打 `sizeof`/`_Alignof`/`offsetof`（`target/scratch/c1/probe.c`，
+      实测数字摘录记在 `docs/RUNLOG.md` cron-07），Rust 侧 `record_layout`/`union_layout` 必须复现它。覆盖的表示：
+      §1 逐行（`[u32;4]` 16/4、`Rc/Arc` 16/8、`dyn`/闭包 16/8、`Option` 的指针 niche 只认 `&T`/`Box`/`*const`/fn 指针）、
+      `struct`/`enum` 的每字段偏移、链帧（`let`/`var` 声明序 + `node_idx` + 尾部补齐）、§8.4 节点表
+      （tour `Pipeline` = **6 个节点**，行 8/9/10/11/16/19，`gate`/`retry_once` 各挂 1 个连携块，锚点 `begin`=0/`done`=5
+      —— 这是"连携块与 `label` 都不开新节点"第一次被钉成可复跑断言）、§4.6/§10 `EnvOffsets` 11 个偏移 + 72/8、
+      §2 符号 mangle（类型的 package 路径改从 `Program::by_path` 反查，不再是 module 路径）、§1 vtable 前缀 `24 + 8·n`、
+      `InfyNodeLoc` 24/8、`InfyChainDesc` 48/8、`InfyFocusId3` 12/4。
+      三条 **ABI 文档自身的错处**已改正并写回文档：`Result<u32,Fail>` 实测 **20**、`Result<u32,u64>` 实测 **24**
+      （原文的 `sizeof(T)+sizeof(E)+1, aligned` 两处都会算成 16）；§5 的 `ChainFrame` 从伪码改成可算规则；
+      §10 补出 `EnvSnapshot` 逐字段偏移表（§4.6 写 `&str`，冻结头存的是**内联 `InfyStr`**，不是指针）。
+      规范未定 → 选定实现：偏差 **D-24**（元组 = 声明序 C struct；无 payload 的 enum 省掉 union → `Phase` 4/4；
+      判别式只接受整数字面量，其它形态 `E-0053`）与 **D-25**（§4.1"判别式最小容纳" vs ABI 的 `uint32_t tag` →
+      裁为恒 `u32`，理由含 `.infib` ABI 稳定性与 `repr(C)` 须与 C 的 `int` 共享布局；推论 = 超宽判别式报 `E-0042`，
+      不截断，锁定点 `hir::tests::a_discriminant_wider_than_the_tag_is_e0042`）。
+      测试揪出并修掉 **1 个真实缺陷**：`enum Code { A = 3 }` 的显式判别式被解析器**静默丢弃且不打任何诊断**
+      （`variant()` 只匹配 `ExprKind::Int`，而 `primary()` 首个 `Kind::Lit(l)` 臂吃掉所有字面量 → 该形状从不产生）。
+      锁定点 = `parser::tests::enum_discriminants_reach_the_ast_and_bogus_ones_are_e0053` + `hir` 的两个判别式测试。
+      **明确未做**：语句/表达式级 IFIR（函数体仍是 `ast::Block`），`infy build` 也没有接 HIR（仍 exit 6）—— 属 C2 前置。
+      同族未修只登记为 **F9/F10/F11**。
 - [ ] C2 `src/codegen.rs`：INFY → C11 发射，覆盖 tour 子集（原语/`str`/`String`/`Vec`/`Option`/`Result`/struct/enum/链/`?`/`match`/`fmt`），检查型算术与边界检查永不关闭（§7.2）。
       验收：`infy build` 在 `examples/tour` 上生成 `.c` 且 `gcc` 能编译它（可先只验到编译，不要求运行）。
 - [ ] C3 `src/artifact.rs`：`INFYART2` 段尾 + `.inf meta/ifbc/sum` 段、`build-id`（§7.3 规范化输入 SHA-256）。
@@ -220,22 +242,51 @@
       再给 `test_rt.c` 加一对断言：深度 8 的调用 panic 被捕获后，下一次正常 `infy_host_call_event` 必须成功返回而不是 `R-0902`。
       同类风险请一并核：`infy_tls_unwinding`（`drain_scope`/`scope_end_common` 里 1→0 的赋值若被 panic 打断同样悬挂）。
 
+- [ ] F9 **`parser::primary()` 的 `Kind::Lit(Lit::Int(i))` 臂永不可达**（C1 轮定位，未改）：
+      它排在 `Kind::Lit(l)` 之后，而后者匹配所有字面量，于是 `ExprKind::Int(IntLit)` 这一形状**在全树从不产生**。
+      后果是凡只匹配 `ExprKind::Int` 的代码都是死代码 —— `variant()` 那条已由 C1 修掉（`A = 3` 曾静默丢判别式），
+      但 `ast::Attr::int_arg()`（`#[link(name = "…", ordinal = 3)]` 一类）、`cli.rs` 与 `sema.rs` 里的
+      `ExprKind::Int` 判据仍需逐条审计：要么改成双形状匹配，要么删掉死臂让 `primary` 先匹配 `Lit::Int`。
+      验收：`grep -n "ExprKind::Int" src/*.rs` 的每一处都有测试证明它可达（或已删除），`primary` 的臂顺序有回归测试。
+
+- [ ] F10 **`sema` 收集枚举判别式时 `u128 as u64` 截断**（C1 轮定位，未改）：
+      `Variant.disc` 是 `Option<u128>`，`sema.rs:616` 直接 `as u64`，所以宽于 `u64` 的字面量**先回绕**才交给 HIR，
+      D-25 的 `u32` 容纳检查拦不住已回绕的值。
+      验收：宽于 `u64` 的判别式报 `E-0042`（而不是回绕）；成对断言 `A = 4294967296` → `E-0042`（HIR，C1 已有）
+      与 `A = 2^64` → `E-0042`（sema，待补）。
+
+- [ ] F11 **`[T; N]` 的 N 不是字面量时被 `unwrap_or(0)` 静默当成长 0**（C1 轮定位，未改）：
+      `sema.rs:439` 是 `let n = self.const_eval_usize(len).unwrap_or(0);`，而 `const_eval_usize` 在 §2.12 闭集之外返回 `None`
+      —— 于是 `let a: [u32; SOME_CONST]` 的类型变成 `[u32; 0]`，不报 `E-0131`，布局与边界检查全按 0 元素算。
+      HIR 侧本轮至少不再猜：`hir::hir_ty_from_ast` 遇到非字面量长度返回 `None` → `UnresolvedType`。
+      验收：`[u32; 常量表达式]` 要么按 §2.12 求值成功，要么显式 `E-0131`，不得静默取 0；补 `sema` 的成对测试。
+
 ## 2. 当前指针
 
-> **下一轮第一件事：取 C1**（§1 里第一个 `[ ]`：`src/hir.rs` 把 §14 tour 需要的构造落成带类型的中间表示）。
-> B3 轮已把接活需要的取证做齐，直接从这里接：
-> (1) `src/hir.rs` 目前是 1 行占位，`src/lib.rs:40` 已挂 `pub mod hir`，`src/lib.rs:15` 的阶段表把 §7.1 阶段 [7]
->     "IFIR + optimise"指给它 —— 也就是说 HIR 是**前端与 codegen 之间唯一的接口**，字段命名要和
->     `docs/internals/runtime-abi.md` 对齐而不是和 `src/ast.rs` 对齐：§1 标量/聚合表示、§5 链-节点-焦点、
->     §10 `env` 封闭字段集（`env.*` 写操作 = `E-0140`，`sema` 已有测试锁住）；验收要求的"尺寸/对齐金样"就抄这三节。
-> (2) 可复用的现成件（别重造）：`src/sema.rs` 的 `Ty`（§4 类型）、`runtime/infy_rt.h` 的 `InfyMetaFixed`
->     （§7.4 磁盘 meta 布局，B1 轮刚把 `iter_guard_steps` 修成 64 位）、`InfyChainDesc` / `InfyNodeLoc`
->     （§8 链表与诊断定位）。tour 的两个文件是 `examples/tour/core/build/mod.infy` 与 `examples/tour/cmd/runner/main.infy`，
->     需要的构造 = fn/event/struct/enum/const/链节点，`infy check` 已经在它们上面 exit 0，所以 AST 侧不缺信息。
-> (3) **不要碰 D4 的两侧布局**：C1 只落 Rust 侧表示。B3 轮核实 D4 比原描述大 —— 除了操作数个数，
->     `func_table` 记录 Rust 36 字节/条 vs C 40 字节/条也不同；那两条一起留给 D2/D4 裁决（`infy run` 之前不必动）。
+> **下一轮第一件事：取 C2**（§1 里第一个 `[ ]`：`src/codegen.rs` 的 INFY → C11 发射，覆盖 tour 子集）。
+> C1 轮已把接活需要的地基与取证做齐，直接从这里接：
+> (1) **HIR 是 codegen 唯一的上游接口**。`src/hir.rs` 现在有 `HirCrate`（`items` = `HirStruct`/`HirEnum`/`HirFn`/
+>     `HirConst`/`HirChain`，每字段带 `offset`/`layout`；`events` 的下标即 §11 的 `host_event_id`；`env` = `EnvOffsets`
+>     11 个偏移；`entry` = §7.4 三优先级的结果；`errors` = 布局失败列表，非空即构建失败）。
+>     入口是 `hir::lower(&sema::Program, &HirConfig { target, entry_chain })`。
+>     **C2 的缺口 = 语句/表达式层**：函数体仍是 `ast::Block`，`lower()` 不碰体。别在 codegen 里重算布局 ——
+>     尺寸/对齐/偏移一律从 `HirCrate` 取；新增表示形态时同步 `docs/internals/runtime-abi.md` §1（C1 轮已把该表的
+>     `Result`/`Option` 算术式改成 C 规则，别再往回写）。
+> (2) `infy build` 现在在 `cli.rs` 打 `notice: stages [8] codegen and [9] link are not implemented yet` + exit 6（P4）。
+>     C2 的第一步是把 `sema::check_files` 的 `Program` 交给 `hir::lower`，再发射 C11；§7.2 要求
+>     **检查型算术与边界检查永不关闭** —— `runtime/infy_rt.h` 已有带 `InfyNodeLoc` 的助手（`infy_add_u32`、
+>     `infy_shl_u64`、`infy_vec_index` …），直接调，不要自己写检查。链帧按 ABI §5 的可算规则发射
+>     （locals 声明序 + `node_idx` + 尾部补齐；`InfyChainDesc.frame_size/frame_align` 就是 `HirFrame.size/align`）。
+> (3) **不要碰 D4 的两侧布局**（IFBC 操作数个数 + `func_table` 记录 Rust 36 字节/条 vs C 40 字节/条），
+>     那两条留给 D2/D4 一起裁；`infy run` 之前不必动。
+> (4) 手法留档：C1 的布局金样 = "Rust 侧断言"与"`gcc` 探针实测"两两对上
+>     （重建探针：`gcc -std=c11 -Wall -Wextra -I . target/scratch/c1/probe.c -o target/scratch/c1/probe.exe`）。
+>     C2 若引入任何新的 C 侧形状，用同一手法：先探针实测，再写进测试与 ABI 文档。
 > 输出二进制一律写 `target/scratch/`（写 `/tmp` 会让 `ld` 直接返回 5）；改 `infy_rt.h` 后**四条链**都要复跑
 > （P6 替身 IFBC、P11 生产 IFBC、P9 rt、`-c infy_rt.c`），因为它们共用一个头。
+> C1 轮顺带登记 **F9**（`primary()` 死臂 → `ExprKind::Int` 全树从不产生，凡只匹配它的判据都是死代码，
+> C2 写 codegen 时必然撞上）、**F10**（`sema` 判别式 `u128 as u64` 截断）、**F11**（`[T; N]` 非字面量长度被
+> `unwrap_or(0)` 静默当 0）—— 三条同属"码写在不可达/静默回退分支里"这一族，接 C2 前先读 F9。
 > **B3 手法留档**：码表冲突的裁决顺序 = §9.7 码表 > 附录 D 的顺号表；附录 D.10 的"边界"在 §7.8.3 的 1→6 里并不存在
 > （第 6 项是行映射完备 → `W-0705`），这类"表末项是顺号编出来的"痕迹可以直接作为让路的依据；而废止号（`R-0702`/`E-0701`，
 > spec:1508）不能当逃生舱用。改枚举时记得 `infy_rt.c` 的 `r_table` 是第二份真相（诊断标题表），删码要同步删行。
@@ -245,14 +296,13 @@
 >
 > **推送欠账**：只认现算 `git rev-list --count <远端SHA>..HEAD`；远端 SHA 用
 > `gh api repos/YuanShenNiuBi1314/infinity-lang/git/refs/heads/toolchain --jq .object.sha` 回查，`Everything up-to-date` 不算成功。
-> **当前欠账 = 2**：B3 轮的 `c63187e` 与紧随其后的 `cron-06-push` 文档提交都没上去 —— 两次
-> `git push origin HEAD:toolchain` 都是 exit **128**（`Recv failure: Connection was reset`），而 `api.github.com` 回查成功
-> （远端 `toolchain` 仍停在 `6fa6dd3`）。**下一轮第一件事：先补推这两个提交**（推一次、失败再重试一次即记录，不轰炸），
-> 回查一致后再取 C1。
+> **推送欠账**：C1 轮开头按协议补推，`git push origin HEAD:toolchain` 两次都是 exit **128**
+> （`Recv failure: Connection was reset`），`api.github.com` 回查成功 → 远端 `toolchain` 仍是 `6fa6dd3`，
+> 当时欠账 **2**（`c63187e` + `95551ea`），加上 C1 轮的提交与记录行后为 4。通道本轮仍未恢复，下一轮继续补推。
 >
-> 已验证事实（B3 轮全部复跑，非引用）：`cargo test --offline --lib` **333 passed / 0 failed**
-> （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `pkg` 19 · `toml` 15 · `borrow` 15 · `sha256` 12 ·
-> `codes` 9 · `base64` 7 · `parser` 7 · `ifbc` 6 · `cli` 5 · `stdlib` 4 · `diag` 2 = 333）；
+> 已验证事实（C1 轮全部复跑，非引用）：`cargo test --offline --lib` **354 passed / 0 failed**
+> （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `pkg` 19 · `hir` 20 · `toml` 15 · `borrow` 15 ·
+> `sha256` 12 · `codes` 9 · `base64` 7 · `parser` 8 · `ifbc` 6 · `cli` 5 · `stdlib` 4 · `diag` 2 = 354）；
 > `cargo check --offline --lib` 0 error / 51 warning；`infy check examples/tour` exit 0；
 > `(cd examples/tour && infy fmt --check)` **exit 2（2 file(s) are not canonical，见 F6）**；
 > **rt harness `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → 0 error / 0 warning，
@@ -260,9 +310,11 @@
 > `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` → **0 warning**（B3 已勾，三项语义同轮落地）；
 > **IFBC 两条链都绿且 stdout 逐字节相同**：替身链 `gcc … infy_ifbc.c infy_dyn.c test_ifbc.c test_ifbc_stubs.c` →
 > `82 asserts, 82 pass, 0 FAIL` exit 0；**生产链** `gcc … infy_ifbc.c infy_dyn.c infy_rt.c test_ifbc.c` → 同为 82/82、0 告警。
-> A4 修掉的 4 个前端缺陷与 B1 修掉的 7 个运行时缺陷都有回归测试；未修只登记：D-18、D-19/F7、F8（host 嵌套计数跨 panic 不回滚）；
-> D-22 与 `frame_kind` 取值表（D-23）已于 B3 裁决完毕。
+> A4 修掉的 4 个前端缺陷、B1 修掉的 7 个运行时缺陷、C1 修掉的 1 个判别式静默丢失缺陷都有回归测试；
+> 未修只登记：D-18、D-19/F7、F8（host 嵌套计数跨 panic 不回滚）、F9/F10/F11（C1 轮新登记的同族死代码与静默回退）；
+> D-22 与 `frame_kind` 取值表（D-23）已于 B3 裁决完毕，D-24/D-25 已于 C1 裁决完毕。
 > `main` 与本地分叉（另一会话推了 `faa34ad`/`05da606`），**合并主干由人决定**。
 > 优先级最高的已知地雷：**D4**（Rust/C 的 IFBC 操作数个数 + `func_table` 记录布局都不一致，D2 之前必须先裁）、
+> **F9**（`ExprKind::Int` 从不产生 → 只匹配它的判据全是死代码，C2 写 codegen 必然撞上）、
 > **D1**（`src/btrack.rs` 端到端）、**F5/F6**（CLI 目录参数不一致、§14 源码不是格式化不动点）、**F7**、**F8**。
 > **编译 C 侧测试时四个 .c 必须一起给**（少 `infy_dyn.c` 时 `ld` 只返回 `collect2: error: ld returned 5`，不打印任何 undefined reference）。
