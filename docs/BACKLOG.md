@@ -148,6 +148,8 @@
       **§7.8/附录 D 仍保持 🟡**：码表已对齐，但 D4 未裁；本轮另核实 D4 范围比原描述更大（`func_table` 记录布局
       Rust 36 字节/条 vs C 40 字节/条，字段集也不同），已写进 D4。头文件仍缺"模块卸载/host thunk 绑定"公共入口，
       已在 `runtime/IFBC.md` §7 明确记录，不假实现。
+      证据提交：`c63187e`（上述 333/0、82/82、32303/0、`-c` 0 告警、tour exit 0、`fmt --check` exit 2 全部为该提交上的
+      实测复跑，非引用；该提交尚未推上去，见 §2 推送欠账与 RUNLOG `cron-06-push` 行）。
 
 ### 阶段 C：把 tour 从 check 推到 build/run（P6 单文件承诺的落地）
 
@@ -243,6 +245,10 @@
 >
 > **推送欠账**：只认现算 `git rev-list --count <远端SHA>..HEAD`；远端 SHA 用
 > `gh api repos/YuanShenNiuBi1314/infinity-lang/git/refs/heads/toolchain --jq .object.sha` 回查，`Everything up-to-date` 不算成功。
+> **当前欠账 = 2**：B3 轮的 `c63187e` 与紧随其后的 `cron-06-push` 文档提交都没上去 —— 两次
+> `git push origin HEAD:toolchain` 都是 exit **128**（`Recv failure: Connection was reset`），而 `api.github.com` 回查成功
+> （远端 `toolchain` 仍停在 `6fa6dd3`）。**下一轮第一件事：先补推这两个提交**（推一次、失败再重试一次即记录，不轰炸），
+> 回查一致后再取 C1。
 >
 > 已验证事实（B3 轮全部复跑，非引用）：`cargo test --offline --lib` **333 passed / 0 failed**
 > （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `pkg` 19 · `toml` 15 · `borrow` 15 · `sha256` 12 ·
