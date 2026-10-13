@@ -210,7 +210,9 @@
       `Vec`·`String` 的构造入口 / 字节串字面量 —— 全部是**指名条款的 CgError**；
       `fmt!` 在阶段 [2]/[4] 根本没有 lowering 路径（`sema` 对未展开宏发 `E-0402`），所以 C2 的 `fmt` 覆盖
       被上游阻塞，登记为 **F15**。
-      证据提交：见下一行 RUNLOG 的 cron-08（上述 372/0、0/51、12473 字节、gcc exit 0、四条 C 链数字均为该提交上的实测复跑）。
+      证据提交：**`2b0fcdb`**（`feat(C2)`）—— 上述 372/0、0/51、12473 字节 C11、gcc exit 0（0 error / 0 warning）、
+      四条 C 链（32303/0、82/82 两条、`-c infy_rt.c` 0 告警）全部为该提交上的实测复跑，非引用；RUNLOG 的 cron-08 行是同轮的审计行。
+      **该提交尚未推上去**：本轮三次推送全败（三种失败形态），见 §2 推送状态与 cron-08-push 行。
 - [ ] C3 `src/artifact.rs`：`INFYART2` 段尾 + `.inf meta/ifbc/sum` 段、`build-id`（§7.3 规范化输入 SHA-256）。
       验收：`infy artifact info` 能读回自己刚产出的产物；同一输入两次构建字节相同（`--verify-reproducible`）。
 - [ ] C4 `infy run examples/tour` 真跑出输出；退出码遵循 §13.4。
