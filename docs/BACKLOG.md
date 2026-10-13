@@ -439,9 +439,10 @@
 > 但提交完再推**第一次就 exit 0**（`6fa6dd3..14654c9`），`api.github.com` 回查远端 = 本地 HEAD `14654c9`。
 > 手法仍然适用：`github.com:443` 是**间歇**不通而不是坏了，失败不轰炸、下一轮照协议再推一次即可。
 > **C3 轮推送状态（本轮现算，别引用旧数）**：`gh api …/refs/heads/toolchain` 回查远端 = `a6ac175`，
-> `git rev-list --count a6ac175..HEAD` 在 `feat(C3)` = `75bf27a` 之后 = **7**（C2 轮的 3 条 + 其后的文档行 +
-> 本轮 `75bf27a` 与 cron-09/cron-09-push 行；**该数随每一条形提交自增，下一轮只认现算**）。
-> 本轮共尝试 **4 次**推送（开头 2 次 + 提交后 2 次），**全部失败**，形态各不相同 ——
+> `git rev-list --count a6ac175..HEAD` 在 `feat(C3)` = `75bf27a` 之后 = **7**，到本行为止 = **9**
+> （C2 轮的 3 条 + 其后的文档行 + 本轮 `75bf27a`/`1d2b77c`/`7a9e8f6` 与这条推送审计行；
+> **该数随每一条形提交自增，下一轮只认现算**）。
+> 本轮共尝试 **5 次**推送（开头 2 次 + `feat(C3)` 后 2 次 + 文档行后 1 次），**全部失败**，形态各不相同 ——
 > `Recv failure: Connection was reset`（128）、`fatal: Authentication failed`（128）、
 > `send-pack: unexpected disconnect while reading sideband packet` + `the remote end hung up unexpectedly`（1，
 > 且同一条输出里夹着 `Everything up-to-date` —— 那句**不算成功**）、又一次 `Connection was reset`（128）。
@@ -450,24 +451,29 @@
 > 下一轮开头先补推一次，失败再试一次即停；可以试一次 `git -c http.version=HTTP/1.1 push origin HEAD:toolchain`
 > （本轮没试过这个变体），它只是单次命令行参数，不落进配置。
 >
-> 已验证事实（**C2 轮全部复跑，非引用**）：`cargo test --offline --lib` **372 passed / 0 failed**
-> （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `codegen` **18** · `sema` 22 · `pkg` 19 · `hir` 20 ·
-> `toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `base64` 7 · `parser` 8 · `ifbc` 6 · `cli` 5 · `stdlib` 4 ·
-> `diag` 2 = 372）；`cargo check --offline --lib` 0 error / **51 warning**（C2 轮新增的 4 条已清，未让 F2 变大）；
-> `infy check examples/tour` exit 0；`infy build examples/tour` → 生成 12473 字节 C11、exit **6**（[9] 链接未做）；
+> 已验证事实（**C3 轮全部复跑，非引用**）：`cargo test --offline --lib` **391 passed / 0 failed**
+> （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `hir` 20 · `pkg` 19 · `codegen` 18 ·
+> `artifact` **18** · `toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `parser` 8 · `base64` 7 · `ifbc` 6 ·
+> `cli` **6** · `stdlib` 4 · `diag` 2 = 391）；`cargo check --offline --lib` 0 error / **51 warning**
+> （与 C2 轮同数，本轮未新增，F2 没变大）；`infy check examples/tour` exit 0；
+> **`infy build examples/tour` → exit 0**：12473 字节 C11 + `artifact ok — 199975 byte(s)`
+> （宿主镜像 199173 + 段 blob 738 + 段尾 64，6 段），`build-id 4d8250b58122ca2b76132029955e2d2005156dc0a6b021bf5f4ae761e5fd55ba`；
+> `--verify-reproducible` → 两个独立构建目录产物字节相同（199975 字节），exit 0；
+> `infy artifact info <产物> --nodes` → exit 0（节点表 6 行 = 8/9/10/11/16/19，与 C1 金样逐格相同）；
+> `infy artifact info README.md` → `E-0605` + exit **7**；`--cc /no/such/cc` → `E-0602` + exit **6**；
 > `gcc -std=c11 -Wall -Wextra -I runtime -c <生成的 .c>` → **exit 0，0 error / 0 warning**（5723 字节 .o）；
 > `(cd examples/tour && infy fmt --check)` **exit 2（2 file(s) are not canonical，见 F6）**；
 > **rt harness `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → 0 error / 0 warning，
-> `32303 assertions, 0 failures` exit 0**；
-> `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` → **0 warning**（C2 轮改了 `infy_rt.h`，四条链全部复跑）；
+> `32335 assertions, 0 failures` exit 0**（基线 32303，+32 = D-33 的 5 项 + Rust 写↔C 读夹具的 27 项）；
+> `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` → **0 warning**（本轮改了 `infy_rt.c`，四条链仍全部复跑）；
 > **IFBC 两条链都绿且 stdout 逐字节相同**：替身链 `gcc … infy_ifbc.c infy_dyn.c test_ifbc.c test_ifbc_stubs.c` →
 > `82 asserts, 82 pass, 0 FAIL` exit 0；**生产链** `gcc … infy_ifbc.c infy_dyn.c infy_rt.c test_ifbc.c` → 同为 82/82、0 告警。
-> A4 修掉的 4 个前端缺陷、B1 修掉的 7 个运行时缺陷、C1 修掉的 1 个判别式静默丢失缺陷都有回归测试；
-> C2 轮定位并修掉 **2 个自写代码里的真 bug**（参数清理项被写进上一个 item 的缓冲区而丢失；`return` 移动 owned 值
-> 会留下悬垂 → 现改为显式拒绝），并揪出 **3 个上游缺口**（F13 无后缀负字面量、F14 构造器模式绑定不入作用域、
-> F15 `fmt!` 无 lowering 路径）+ **1 个运行时 API 缺口**（F12 清理项不能按地址取消/搬迁）；
-> 未修只登记：D-18、D-19/F7、F8、F9/F10/F11、F12…F15；
-> D-22/D-23（B3）、D-24/D-25（C1）、**D-26…D-31（C2）** 均已裁决并落到实现 + 偏差 + 断言三处。
+> A4 修掉的 4 个前端缺陷、B1 修掉的 7 个运行时缺陷、C1 修掉的 1 个判别式静默丢失缺陷、C2 修掉的 2 个自写代码 bug
+> 都有回归测试；C3 轮修掉 **1 个规范级自检缺陷（D-33，两侧同改）+ 1 个 C 侧 NULL 解引用**
+> （`infy_art_parse_trailer` 在 `if (t) {…}` 之后无条件读 `t->hdr_ver`），并揪出 **3 个容器层缺口**
+> （F16 阶段 [10] 无人比对 `.inf sum`、F17 `ResourceKeys`/`EnvOffsets` 是空集、F18 C 侧 dump 写死 `meta off=0 len=0`）；
+> 未修只登记：D-18、D-19/F7、F8、F9/F10/F11、F12…F15、**F16/F17/F18**；
+> D-22/D-23（B3）、D-24/D-25（C1）、D-26…D-31（C2）、**D-32/D-33（C3）** 均已裁决并落到实现 + 偏差 + 断言三处。
 > `main` 与本地分叉（另一会话推了 `faa34ad`/`05da606`），**合并主干由人决定**。
 > 优先级最高的已知地雷：**D4**（Rust/C 的 IFBC 操作数个数 + `func_table` 记录布局都不一致，D2 之前必须先裁）、
 > **D1**（`src/btrack.rs` 端到端）、**F12**（移动语义没有运行时入口，`String`/`Vec` 的真实程序写不出来）、
