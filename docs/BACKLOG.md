@@ -250,7 +250,8 @@
       证据提交：**`75bf27a`**（`feat(C3)`）—— 上述 391/0、0/51、199975 字节产物、blob 738、exit 0、
       `--verify-reproducible` 两次相同、32335/0、82/82 两条链、`-c infy_rt.c` 0 告警、tour exit 0、
       `fmt --check` exit 2 全部为该提交上的实测复跑，非引用；RUNLOG 的 cron-09 行是同一轮的做账行。
-      **该提交尚未推上去**（本轮 4 次推送全败、四种失败形态），见 §2 推送状态与 cron-09-push 行。
+      **该提交已推上 `toolchain`**（本轮第 6、7 次尝试成功：`a6ac175..ef23a75`、`ef23a75..a0db263`，
+      `gh api` 回查远端 = 本地 HEAD；前 5 次全败，见 §2 推送状态与 cron-09-push/-push2/-push3 三行）。
       同轮登记 **F16**（阶段 [10] 无人比对 `.inf sum`）、**F17**（`ResourceKeys`/`EnvOffsets` 在容器里是空集，
       而 `hir` 早就算出 11 个偏移）、**F18**（C 侧 `infy_art_dump_meta` 把 meta 段行写成死值 `off=0 len=0`）。
 - [ ] C4 `infy run examples/tour` 真跑出输出；退出码遵循 §13.4。
@@ -438,18 +439,17 @@
 > **C1 轮欠账 = 0**：开头两次 `git push origin HEAD:toolchain` 都 exit **128**（`Recv failure: Connection was reset`），
 > 但提交完再推**第一次就 exit 0**（`6fa6dd3..14654c9`），`api.github.com` 回查远端 = 本地 HEAD `14654c9`。
 > 手法仍然适用：`github.com:443` 是**间歇**不通而不是坏了，失败不轰炸、下一轮照协议再推一次即可。
-> **C3 轮推送状态（本轮现算，别引用旧数）**：`gh api …/refs/heads/toolchain` 回查远端 = `a6ac175`，
-> `git rev-list --count a6ac175..HEAD` 在 `feat(C3)` = `75bf27a` 之后 = **7**，到本行为止 = **9**
-> （C2 轮的 3 条 + 其后的文档行 + 本轮 `75bf27a`/`1d2b77c`/`7a9e8f6` 与这条推送审计行；
-> **该数随每一条形提交自增，下一轮只认现算**）。
-> 本轮共尝试 **5 次**推送（开头 2 次 + `feat(C3)` 后 2 次 + 文档行后 1 次），**全部失败**，形态各不相同 ——
-> `Recv failure: Connection was reset`（128）、`fatal: Authentication failed`（128）、
-> `send-pack: unexpected disconnect while reading sideband packet` + `the remote end hung up unexpectedly`（1，
-> 且同一条输出里夹着 `Everything up-to-date` —— 那句**不算成功**）、又一次 `Connection was reset`（128）。
-> 按上一轮指针的要求核过凭据环节：`credential.helper = manager`、`gh auth status` 的 `GITHUB_TOKEN` 账号活跃且含
-> `repo` scope、同一时刻 `gh api` 可用 ⇒ 判定仍是 `github.com` 侧抖动，**没有**改 git 配置/换凭据/强推。
-> 下一轮开头先补推一次，失败再试一次即停；可以试一次 `git -c http.version=HTTP/1.1 push origin HEAD:toolchain`
-> （本轮没试过这个变体），它只是单次命令行参数，不落进配置。
+> **C3 轮推送结果（本轮现算，别引用旧数）**：**第 6、7 次都成功** —— `a6ac175..ef23a75`、
+> `ef23a75..a0db263`，`gh api …/refs/heads/toolchain` 回查远端 = 本地 HEAD `a0db263` ⇒
+> **C3 全量已在 `toolchain` 上**（更正行提交后又自增 1，**下一轮只认现算** `git rev-list --count <远端SHA>..HEAD`）。
+> 前 5 次全败、4 种不同报错（`Recv failure: Connection was reset` ×2、`fatal: Authentication failed`、
+> `send-pack: unexpected disconnect while reading sideband packet` + `the remote end hung up unexpectedly`
+> （其输出里夹的 `Everything up-to-date` **不算成功**）、`Failed to connect to github.com:443 after 21095 ms`），
+> 而同一时刻 `gh api`（`api.github.com`）每次都通 ⇒ 本轮实测 **5 败 2 成**，`github.com:443` 是**间歇**不通而不是坏了。
+> 凭据环节按上一轮指针的要求核过：`credential.helper = manager`、`gh auth status` 的 `GITHUB_TOKEN` 活跃且含
+> `repo` scope ⇒ 不是 token 失效；**没有**改 git 配置、没换凭据、没强推。
+> 下一轮照协议先推一次、失败再试一次即停；`git -c http.version=HTTP/1.1 push origin HEAD:toolchain` 这个变体
+> 本轮没试过（成功之后没必要），留作下次连败时的首个候选。
 >
 > 已验证事实（**C3 轮全部复跑，非引用**）：`cargo test --offline --lib` **391 passed / 0 failed**
 > （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `hir` 20 · `pkg` 19 · `codegen` 18 ·
