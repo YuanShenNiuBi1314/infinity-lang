@@ -5,19 +5,19 @@
 或 `⬜`（未实现，运行时显式报错）。`src/host.rs`、`src/hir.rs`、`src/codegen.rs`、`src/atrack.rs`、
 `src/conformance.rs`、`src/doc.rs` 六个模块的占位注释也指向这里。
 
-## 1. 证据命令（2026-10-13 B1 轮实测，主树非隔离副本；P11 于 B2 轮复跑并改判）
+## 1. 证据命令（2026-10-13 B1 轮起逐轮复跑，主树非隔离副本；P11 于 B2 轮改判，全部 10 条于 B3 轮复跑）
 
 | # | 命令 | 输出里的数字 | exit |
 | --- | --- | --- | --- |
-| P1 | `cargo test --offline --lib` | `332 passed; 0 failed; 0 ignored` | 0 |
+| P1 | `cargo test --offline --lib` | `333 passed; 0 failed; 0 ignored` | 0 |
 | P2 | `cargo check --offline --lib` | 0 error、`51 warnings`（全部 unused/dead code，BACKLOG F2） | 0 |
 | P3 | `infy check examples/tour` | `check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)` | 0 |
 | P4 | `infy build examples/tour` | 先打 P3 那行，再打 `notice: ... stages [8] codegen and [9] link are not implemented yet` | 6 |
 | P5 | `infy run` / `test` / `doc` / `ifbc` / `conformance` / `lsp` / `lib` | `notice: infy <cmd> is not implemented in this build` | 1 |
-| P6 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/test_ifbc.c runtime/test_ifbc_stubs.c -o ifbc_tests && ./ifbc_tests` | `IFBC harness: 79 asserts, 79 pass, 0 FAIL`；**0 编译告警**（B1 轮给 `InfyString` 补了结构标签，原先 4 条 `infy_rt.h:212` 前置引用告警随之消失 = B3 的第 4 项） | 0 |
+| P6 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/test_ifbc.c runtime/test_ifbc_stubs.c -o ifbc_tests && ./ifbc_tests` | `IFBC harness: 82 asserts, 82 pass, 0 FAIL`；**0 编译告警**（B1 轮给 `InfyString` 补了结构标签，原先 4 条 `infy_rt.h:212` 前置引用告警随之消失 = B3 的第 4 项；79 → 82 是 B3 轮为 D-22 裁决新增的一行 `closure.new` 拒绝断言，3 项） | 0 |
 | P9 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && ./rt_tests` | `32303 assertions, 0 failures`，0 error / 0 warning；诊断渲染单独再跑一次为 `rt_render.log` 逐字节比对。**链的是生产 `runtime/infy_rt.c`**，不是替身 | 0 |
-| P10 | `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` | 0 warning（B3 的验收命令本身已过，但 B3 列的另外三项——`InfyRCode` 缺 `R-0701`/`R-0713`、`R_IFBC_BOUNDARY` 与 §9.7 的 `R-0709` 语义冲突、`frame_kind` 只有模块级——仍未改，故 B3 保持未勾） | 0 |
-| P11 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/infy_rt.c runtime/test_ifbc.c -o ifbc_real && ./ifbc_real` | **B2 轮：真实链接跑通**。0 error / **0 warning**，`IFBC harness: 79 asserts, 79 pass, 0 FAIL`，exit 0，且 stdout 与 P6（替身链）**逐字节相同**。链接失败的根因不是工具链：`test_ifbc.c` 用 stub 专有的 `infy_stub_live_objs()` 当泄漏探针，改走公共 API `infy_mem_stats().live_objs`（`runtime/infy_rt.h`）后两侧皆可链接 | 0 |
+| P10 | `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` | 0 warning。**B3 已勾**：这条命令 B1 轮就绿，B3 轮真正落地的是另外三项语义——`InfyRCode` 补 `R_EMBED_TIMEOUT=0x0701`/`R_FIELD_OFF_REPR=0x0713`、删除规范里不存在的 `R_IFBC_BOUNDARY=0x070A` 并按 D-22 把装载期"边界"改报 `R-0707`、`frame_kind` 两级取值表进冻结头（`INFY_FRAME_STACK`/`INFY_FRAME_COROUTINE`） | 0 |
+| P11 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/infy_rt.c runtime/test_ifbc.c -o ifbc_real && ./ifbc_real` | **B2 轮：真实链接跑通**。0 error / **0 warning**，`IFBC harness: 82 asserts, 82 pass, 0 FAIL`，exit 0，且 stdout 与 P6（替身链）**逐字节相同**。链接失败的根因不是工具链：`test_ifbc.c` 用 stub 专有的 `infy_stub_live_objs()` 当泄漏探针，改走公共 API `infy_mem_stats().live_objs`（`runtime/infy_rt.h`）后两侧皆可链接 | 0 |
 | P7 | `(cd examples/tour && infy fmt --check)` | `2 file(s) are not canonical` — §14 的导览源码不是本格式化器的不动点（见 §5） | 2 |
 | P8 | `infy artifact info <任意非产物文件>` | `error[E-0605]: ... 找不到 INFYART2 段尾` | 7 |
 
@@ -29,7 +29,7 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 
 ## 2. 前端与语义（Rust 侧）
 
-`cargo test --offline --lib` 的 332 项按模块分布（`cargo test -- --list` 计数）：
+`cargo test --offline --lib` 的 333 项按模块分布（`cargo test -- --list` 计数）：
 
 | 模块 | 项数 | 条款 |
 | --- | --- | --- |
@@ -45,7 +45,7 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 | `codes` | 9 | §9.1–§9.3/§9.7，`count() == 210` |
 | `base64` | 7 | §5.8 |
 | `parser` | 7 | §3 文法 + §8.4 节点编号（1 项）+ §3.5 `start(chain=…)` + §3.6 嵌套泛型闭合 |
-| `ifbc` | 5 | §7.8 Rust 侧编码/反汇编 |
+| `ifbc` | 6 | §7.8 Rust 侧编码/反汇编；B3 轮加的 `frame_kind_header_and_function_value_sets` 锁住 D-23 的两级取值表 |
 | `cli` | 5 | §13.4 子命令与退出码 |
 | `stdlib` | 4 | §10 签名表 + §1.3 领域中立 |
 | `diag` | 2 | §9.2 版式（规范样例逐字节 1 项 + caret 行规则 1 项） |
@@ -75,7 +75,7 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 | §1.3 领域中立 | `stdlib.rs` | ✅ | 4 项（NFKCCaseFold 全角/大小写绕过） |
 | §10 `std` 签名表 | `stdlib.rs` | 🟡 | 表本身 4 项；其**消费者** `infy doc`（`doc.rs` 占位）与 codegen 映射（`codegen.rs` 占位）未实现 |
 | §7.3/§7.4 产物容器 | `cli.rs:758` `artifact_cmd` | 🟡 | 只识别 64 字节 `INFYART2` 段尾；`.inf meta`/`rodata 索引`/`ifbc`/`sum` 段的写入器与解析器都不存在（BACKLOG C3，P8） |
-| §7.8/附录 D IFBC | `src/ifbc.rs` + `runtime/infy_ifbc.c` | 🟡 | Rust 侧 5 项、C 侧 79 断言各自通过，但**两侧操作数个数不一致（BACKLOG D4）**，同一镜像的双侧反汇编目前必然错位，故不能记 ✅ |
+| §7.8/附录 D IFBC | `src/ifbc.rs` + `runtime/infy_ifbc.c` | 🟡 | Rust 侧 6 项、C 侧 82 断言各自通过；**码表已与 §9.7 对齐**（D-22 于 B3 轮裁决、D-23 钉死 `frame_kind` 两级取值），但两侧对同一镜像的读法仍不一致（BACKLOG D4：操作数个数不一致 + `func_table` 记录布局 Rust 36 / C 40 字节），双侧反汇编目前必然错位，故不能记 ✅ |
 | §7.7 B 轨 | `btrack.rs` | 🟡 | 4476 行、0 测试，端到端未收敛（D1） |
 | §7.6/§7.7 A 轨绑定 | `atrack.rs` | ⬜ | 占位（D3） |
 | §7.5 C11 发射 | `codegen.rs` | ⬜ | 占位（C2），P4 显式报错 |
@@ -87,10 +87,10 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 
 | 项 | 状态 | 证据 |
 | --- | --- | --- |
-| `infy_ifbc.c` 装载/校验/解释 | ✅ 对 harness 而言 | P6：79 asserts / 79 pass，含六项装载校验、逐字节截断、单字节变异、800 轮 fuzz。P11 链生产 `infy_rt.c` 再跑一次 = 同一 79 项、输出逐字节相同 |
-| 被测对象是**生产运行时**吗 | ✅ 两个 harness 都是（B2 轮） | P9 链 `infy_rt.c`（rt 32303 项）；P11 也链 `infy_rt.c`（IFBC 79 项）。P6 的替身链保留作为对照，`test_ifbc_stubs.c` 仍未从构建里退役。**这不等于 §12 合规**：`infy conformance` 与外部用例仍是 E1/E2，且 §7.8/附录 D 的双侧交叉验证受 D4（Rust/C 操作数个数不一致）阻塞 |
+| `infy_ifbc.c` 装载/校验/解释 | ✅ 对 harness 而言 | P6：82 asserts / 82 pass，含六项装载校验、逐字节截断、单字节变异、800 轮 fuzz。P11 链生产 `infy_rt.c` 再跑一次 = 同一 82 项、输出逐字节相同 |
+| 被测对象是**生产运行时**吗 | ✅ 两个 harness 都是（B2 轮） | P9 链 `infy_rt.c`（rt 32303 项）；P11 也链 `infy_rt.c`（IFBC 82 项）。P6 的替身链保留作为对照，`test_ifbc_stubs.c` 仍未从构建里退役。**这不等于 §12 合规**：`infy conformance` 与外部用例仍是 E1/E2，且 §7.8/附录 D 的双侧交叉验证受 D4（Rust/C 操作数个数与 `func_table` 布局不一致）阻塞 |
 | `infy_rt.c`（检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、xxHash64、std.fmt 字节精确、SplitMix64+PCG32+无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、std.fs、mem stats/leak check/包初始化） | ✅ 对 harness 而言（B1 轮收敛） | P9：`32303 assertions, 0 failures`，直接链生产 `infy_rt.c`（无替身）。**这不等于 §12 合规**：外部用例目录与 `infy conformance` 仍是 E1/E2 |
-| `infy_rt.h` 已知瑕疵 | 🟡 部分修 | 已修：`InfyString` 无结构标签造成的前置引用（顺带删掉 `infy_rt.c` 里为此写的函数指针绕过 cast）、`InfyMetaFixed.iter_guard_steps` 是 `uint32_t`（磁盘格式与 `infy_profile` 都是 64 位，§10.10 默认 2^32 会被截成 0）。**未修**：`InfyRCode` 缺 `R-0701`/`R-0713`、`R_IFBC_BOUNDARY=0x070A`/`R_IFBC_MEMBUDGET=0x0709` 与 §9.7 的 `R-0709 = 嵌入单元超 `max_mem_bytes`` 语义冲突、`frame_kind` 只有模块级（D.8 要函数级）→ B3 |
+| `infy_rt.h` 已知瑕疵 | ✅ B3 轮清完（四项） | B1 轮已修：`InfyString` 无结构标签造成的前置引用（顺带删掉 `infy_rt.c` 里为此写的函数指针绕过 cast）、`InfyMetaFixed.iter_guard_steps` 是 `uint32_t`（磁盘格式与 `infy_profile` 都是 64 位，§10.10 默认 2^32 会被截成 0）。B3 轮已修：`InfyRCode` 补 `R-0701`/`R-0713`；`R_IFBC_BOUNDARY=0x070A` 因不在规范任何码表里而删除，装载期"边界"按 D-22 改报 `R-0707`，`R-0709` 只表示 §9.7 的内存配额；`frame_kind` 的两级取值表以命名常量 `INFY_FRAME_STACK`/`INFY_FRAME_COROUTINE` 进冻结头（D-23，C 与 Rust 两侧同一判据）。**仍开且已明确记录不假实现**：头文件没有 IFBC 模块卸载入口与 host thunk 绑定入口（`runtime/IFBC.md` §7 记为 group-(b) 私有入口） |
 
 ## 5. 本轮核对时新发现的两个真实缺陷（未修，已进 BACKLOG）
 

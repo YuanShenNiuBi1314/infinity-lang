@@ -66,16 +66,20 @@ typedef enum {
     R_GOTO_TARGET    = 0x0010, /* R-0010 */
     R_DOUBLE_PANIC   = 0x0011, /* R-0011 */
     R_RADIX          = 0x0012, /* R-0012 */
+    R_EMBED_TIMEOUT  = 0x0701, /* R-0701 embed execution timeout (§9.7, §7.9: tickloop trips it, process not killed) */
     R_IFBC_INVALID   = 0x0703, /* R-0703 */
     R_IFBC_NONLINEAR = 0x0704,
     R_IFBC_STACK     = 0x0705,
     R_IFBC_TYPE      = 0x0706,
     R_IFBC_FRAME     = 0x0707,
     R_IFBC_HOSTSIG   = 0x0708,
-    R_IFBC_MEMBUDGET = 0x0709,
-    R_IFBC_BOUNDARY  = 0x070A,
+    R_IFBC_MEMBUDGET = 0x0709, /* §9.7 + §7.9 only: an embedded unit exceeded max_mem_bytes.
+                                * Appendix D.10 also maps the load-time "boundary" item here; that
+                                * clashes with this meaning (deviation D-22), so this implementation
+                                * reports boundary/tail-call/closure.new findings as R_IFBC_FRAME. */
     R_DYN_TAG        = 0x0710,
     R_DYN_TARGET     = 0x0712,
+    R_FIELD_OFF_REPR = 0x0713, /* R-0713 field_off on a type without #[repr(C)] (§9.3, D.9) */
     R_ATRACK_POINTER = 0x0720,
     R_ATRACK_UNWIND  = 0x0721,
     R_ATRACK_ERR_OUT = 0x0722,
@@ -329,6 +333,12 @@ typedef enum {
 } InfyDynTag;
 typedef struct InfyDyn { InfyDynTag tag; uint32_t rc; union { int64_t i; double f; struct { uint8_t* p; uint64_t n; } s; struct { void* items; uint64_t n, cap; uint32_t esz; } list; struct { struct InfyDyn** keys; struct InfyDyn** vals; uint64_t n, cap; } dict; struct { const struct InfyIfbcFunc* fn; struct InfyDyn** cap; uint32_t ncap; } clo; } v; } InfyDyn;
 typedef struct InfyIfbcModule InfyIfbcModule;
+/* `frame_kind` exists at two levels that are not interchangeable: the header's module-wide u8 is
+ * the *value model* (§7.8.1, only 0 defined), while the coroutine flag is per function in
+ * func_table (appendix D.8). The spec names the values "0" and "coroutine" but gives no numeric
+ * table, so 1 = coroutine is this implementation's choice (deviation D-23). */
+#define INFY_FRAME_STACK     0  /* single-address operand stack + local window (§7.8.1)      */
+#define INFY_FRAME_COROUTINE 1  /* yield/frame.enter legal; elsewhere -> R-0707 (D.8)         */
 /* §7.8.3: all six validations per function, wholly before any instruction executes; the first
  * failure rejects the whole module (appendix D.10). */
 int  infy_ifbc_load(const uint8_t* image, uint64_t len, InfyIfbcModule** out, uint8_t all_errors, FILE* report);

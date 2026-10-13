@@ -38,9 +38,12 @@ pub const IFBC_VERSION_V1: u16 = 1;
 pub const IFABI_V2: u16 = 2;
 /// `magic | ifbc_version | ifabi | lang_tag | module_hash | func_count | frame_kind`.
 pub const HEADER_LEN: usize = 4 + 2 + 2 + 2 + 32 + 4 + 1;
-/// §7.8.1 `frame_kind:u8`, 0 = single-address stack machine + local window.
+/// §7.8.1 header `frame_kind:u8`: the module-wide value model. 0 = single-address stack machine +
+/// local window, and 0 is the **only** legal header value (D-23). The frame kind of an individual
+/// function is `FuncEntry::frame`, below.
 pub const FRAME_KIND_STACK: u8 = 0;
-/// Documented addition: 1 = coroutine frame (D.8).
+/// Appendix D.8's per-function coroutine frame. The spec names the value but never numbers it, so
+/// `1` is this implementation's fixed choice, recorded as deviation D-23.
 pub const FRAME_KIND_COROUTINE: u8 = 1;
 /// Sentinel for "no type / no name" in a u32 field.
 pub const NONE32: u32 = u32::MAX;
@@ -1435,7 +1438,7 @@ impl IfbcModule {
         self.module_hash = self.compute_module_hash();
     }
 
-    /// Full container bytes: 49-byte header followed by the length-prefixed regions.
+    /// Full container bytes: the [`HEADER_LEN`]-byte header followed by the length-prefixed regions.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(HEADER_LEN + 256);
         out.extend_from_slice(MAGIC);
@@ -2005,7 +2008,10 @@ pub fn decode(bytes: &[u8]) -> Result<IfbcModule, IfbcDecodeErr> {
     let module_hash = r.hash(REGIONS[0])?;
     let func_count = r.u32(REGIONS[0])?;
     let frame_kind = r.u8(REGIONS[0])?;
-    if frame_kind > FRAME_KIND_COROUTINE {
+    // §7.8.1 defines exactly one module-wide value model (`0`); the coroutine flag is per function
+    // in func_table (appendix D.8), so accepting 1 here would let a module claim a value model the
+    // C loader rejects. C: `infy_ifbc.c` returns R-0703 for any header frame_kind != 0.
+    if frame_kind != FRAME_KIND_STACK {
         return Err(IfbcDecodeErr::BadFrameKind(frame_kind));
     }
 
@@ -2200,6 +2206,12 @@ fn decode_funcs(r: &mut Reader, func_count: u32) -> Result<Vec<FuncEntry>, IfbcD
         let sig = br.u32(region)?;
         let sig_hash = br.u32(region)?;
         let frame = br.u8(region)?;
+        // D.8 names the values "0" and "coroutine" without a numeric table; this implementation
+        // fixes 0 = stack + local window / 1 = coroutine and rejects anything else (deviation
+        // D-23). The C loader applies the same range check.
+        if frame > FRAME_KIND_COROUTINE {
+            return Err(IfbcDecodeErr::BadFrameKind(frame));
+        }
         let flags = br.u8(region)?;
         let _ = br.u16(region)?;
         out.push(FuncEntry {
@@ -3228,6 +3240,35 @@ mod tests {
         assert_eq!(d.strings.entries(), m.strings.entries());
         assert_eq!(d.lines, m.lines);
         assert_eq!(d.exceptions, m.exceptions);
+    }
+
+    /// §7.8.1 gives the header `frame_kind` one legal value (0 = single-address stack + local
+    /// window) while D.8 needs a *per-function* coroutine kind, so the two levels have different
+    /// value sets. `runtime/infy_ifbc.c` rejects a header value != 0 with R-0703 and a function
+    /// value > 1 the same way; deviation D-23 fixes `1 = coroutine`.
+    #[test]
+    fn frame_kind_header_and_function_value_sets() {
+        let m = sample();
+        let mut img = m.encode();
+        assert_eq!(img[HEADER_LEN - 1], FRAME_KIND_STACK, "header defaults to the 0 value model");
+        img[HEADER_LEN - 1] = FRAME_KIND_COROUTINE;
+        assert!(
+            matches!(decode(&img), Err(IfbcDecodeErr::BadFrameKind(1))),
+            "a module header may not claim the coroutine value model"
+        );
+
+        let mut ok = sample();
+        ok.funcs[0].frame = FRAME_KIND_COROUTINE;
+        ok.seal();
+        assert!(matches!(decode(&ok.encode()), Ok(_)), "1 = coroutine is legal per function (D.8)");
+
+        let mut bad = sample();
+        bad.funcs[0].frame = FRAME_KIND_COROUTINE + 1;
+        bad.seal();
+        assert!(
+            matches!(decode(&bad.encode()), Err(IfbcDecodeErr::BadFrameKind(2))),
+            "the per-function value set is closed at {{0, 1}}"
+        );
     }
 
     #[test]

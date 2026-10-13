@@ -37,11 +37,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* --------------------------------------------------------------------------- header gap
- * The frozen InfyRCode enum omits three codes the spec (appendix D / §9.7) uses. We carry
- * them as raw integers in the int returns; NOT added to the header (contract change). */
-#define IFBC_R_TIMEOUT     0x0701  /* R-0701 embed execution timeout             */
-#define IFBC_R_FIELDOFF    0x0713  /* R-0713 field_off on a non-repr(C) type     */
+/* --------------------------------------------------------------------------- code notes
+ * R-0701 and R-0713 live in the frozen InfyRCode enum (they were file-local raw integers until
+ * the B3 adjudication of deviation D-22). The only code carried locally here is the W-band value
+ * below: findings store W and R in one numeric field and disambiguate with the `warn` flag. */
 #define IFBC_W_LINEMAP     0x0705  /* W-0705 line-map gap (non-blocking notice)  */
 
 /* =========================================================================== byte order */
@@ -300,8 +299,8 @@ static int parse_sections(const uint8_t* img, uint64_t len, struct InfyIfbcModul
     if (!rd_skip(&r, 32))               return R_IFBC_INVALID;   /* module_hash */
     if (!rd_u32(&r, &m->func_count))    return R_IFBC_INVALID;
     if (!rd_u8(&r, &m->frame_kind))     return R_IFBC_INVALID;
-    /* §7.8.1: frame_kind 0 = single-address stack + local window. */
-    if (m->frame_kind != 0) return R_IFBC_INVALID;
+    /* §7.8.1: the module-wide frame_kind is the value model; 0 is the only defined value. */
+    if (m->frame_kind != INFY_FRAME_STACK) return R_IFBC_INVALID;
     if (m->ifabi != INFY_IFABI) return R_IFABI_MISMATCH;
 
     /* ---- type_table ---- */
@@ -351,6 +350,8 @@ static int parse_sections(const uint8_t* img, uint64_t len, struct InfyIfbcModul
             !rd_u32(&r, &f->frame_kind)) return R_IFBC_INVALID;
         if (f->locals > (1u << 24) || f->max_stack > (1u << 24) || f->nargs > (1u << 20) ||
             f->ret_arity > (1u << 20)) return R_IFBC_INVALID;
+        /* Appendix D.8 needs a per-function frame kind; only two values are defined (D-23). */
+        if (f->frame_kind > INFY_FRAME_COROUTINE) return R_IFBC_INVALID;
     }
 
     /* ---- code ---- */
@@ -674,7 +675,7 @@ static int check_type(const struct InfyIfbcModule* m, uint32_t fi, const uint32_
                 if (o[0] >= m->n_types) { findings_add(rep, R_IFBC_TYPE, fi, pc, "type index %u out of range (%u)", o[0], m->n_types); bad_here = 1; } break;
             case OP_FIELD_OFF:
                 if (o[0] >= m->n_types) { findings_add(rep, R_IFBC_TYPE, fi, pc, "field_off type index out of range"); bad_here = 1; }
-                else if (!(m->types[o[0]].flags & 1u)) { findings_add(rep, IFBC_R_FIELDOFF, fi, pc, "field_off on a non-repr(C) type"); bad_here = 1; }
+                else if (!(m->types[o[0]].flags & 1u)) { findings_add(rep, R_FIELD_OFF_REPR, fi, pc, "field_off on a non-repr(C) type"); bad_here = 1; }
                 else if (o[1] >= m->types[o[0]].nfields) { findings_add(rep, R_IFBC_TYPE, fi, pc, "field_off field index out of range"); bad_here = 1; }
                 break;
             case OP_DIV_I: case OP_DIV_F: case OP_REM_I: case OP_REM_F:
@@ -712,7 +713,7 @@ static int check_frame(const struct InfyIfbcModule* m, uint32_t fi, const uint32
         uint8_t op = m->code[pc];
         uint32_t o[OPS_MAX]; insn_operands(m, pc, op, o);
         int is_coro_op = (op == OP_YIELD || op == OP_YIELD_FROM || op == OP_FRAME_ENTER || op == OP_FRAME_EXIT);
-        if (is_coro_op && f->frame_kind != 1) {
+        if (is_coro_op && f->frame_kind != INFY_FRAME_COROUTINE) {
             findings_add(rep, R_IFBC_FRAME, fi, pc, "%s in a non-coroutine frame", OPS[op].name); err = 1;
         }
         if (op == OP_RET) {
@@ -751,7 +752,11 @@ static int check_host(const struct InfyIfbcModule* m, uint32_t fi, const uint32_
     return err;
 }
 
-/* validation 6 — boundary / tail-call frame-size legality (R-0709). */
+/* D.10's "边界" row — tail-call / closure.new frame legality. D.10 maps it to R-0709, but §9.7
+ * reserves R-0709 for "embedded unit exceeded max_mem_bytes" (§7.9 says the same), so this
+ * implementation reports these findings as R-0707, which §7.8.3 item 4 defines as frame
+ * legality and which already covers "call/tailcall target not in func_table" above.
+ * Deviation D-22 records the clash and this choice. */
 static int check_boundary(const struct InfyIfbcModule* m, uint32_t fi, const uint32_t* b, uint32_t nb, Findings* rep) {
     const struct InfyIfbcFunc* f = &m->funcs[fi];
     int err = 0;
@@ -765,7 +770,7 @@ static int check_boundary(const struct InfyIfbcModule* m, uint32_t fi, const uin
         /* tail call can only reuse the frame when the shapes match exactly */
         if (c->locals != f->locals || c->max_stack != f->max_stack ||
             c->nargs != f->nargs || c->ret_arity != f->ret_arity || c->frame_kind != f->frame_kind) {
-            findings_add(rep, R_IFBC_MEMBUDGET, fi, pc, "tailcall to f%u not frame-size compatible (locals %u/%u stack %u/%u)", t, c->locals, f->locals, c->max_stack, f->max_stack);
+            findings_add(rep, R_IFBC_FRAME, fi, pc, "tailcall to f%u not frame-size compatible (locals %u/%u stack %u/%u)", t, c->locals, f->locals, c->max_stack, f->max_stack);
             err = 1;
         }
     }
@@ -774,7 +779,7 @@ static int check_boundary(const struct InfyIfbcModule* m, uint32_t fi, const uin
         uint32_t pc = b[i];
         if (m->code[pc] != OP_CLOSURE_NEW) continue;
         uint32_t code_idx = be32(m->code + pc + 1);
-        if (code_idx >= m->func_count) { findings_add(rep, R_IFBC_MEMBUDGET, fi, pc, "closure.new code_idx %u outside func_table", code_idx); err = 1; }
+        if (code_idx >= m->func_count) { findings_add(rep, R_IFBC_FRAME, fi, pc, "closure.new code_idx %u outside func_table", code_idx); err = 1; }
     }
     return err;
 }
@@ -948,7 +953,7 @@ static int exec(InfyIfbcModule* m, uint32_t fi, InfyDyn** args, uint32_t nargs,
     VmFrame fr = {0};
     fr.f = f;
     fr.pc = f->code_off;
-    fr.in_coro = (f->frame_kind == 1);
+    fr.in_coro = (f->frame_kind == INFY_FRAME_COROUTINE);
     fr.locals_n = f->locals;
     fr.locals = f->locals ? (InfyDyn**)calloc(f->locals, sizeof(InfyDyn*)) : 0;
     fr.moved = f->locals ? (uint8_t*)calloc(f->locals, 1) : 0;
@@ -961,7 +966,7 @@ static int exec(InfyIfbcModule* m, uint32_t fi, InfyDyn** args, uint32_t nargs,
     int code = 0;
 
     while (fr.pc >= lo && fr.pc < hi) {
-        if (++(*steps) > EXEC_STEP_CAP) { code = IFBC_R_TIMEOUT; break; }
+        if (++(*steps) > EXEC_STEP_CAP) { code = R_EMBED_TIMEOUT; break; }
         uint8_t op = m->code[fr.pc];
         if (!OPS[op].name) { code = R_IFBC_TYPE; break; }
         uint32_t o[OPS_MAX]; insn_operands(m, fr.pc, op, o);
@@ -1160,8 +1165,8 @@ static int exec(InfyIfbcModule* m, uint32_t fi, InfyDyn** args, uint32_t nargs,
             }
             case OP_TICKLOOP: {
                 fr.ticks++;
-                if (o[0] && fr.ticks > o[0]) { code = IFBC_R_TIMEOUT; break; }
-                if (has_deadline && infy_monotonic_ms() >= deadline_ms) { code = IFBC_R_TIMEOUT; break; }
+                if (o[0] && fr.ticks > o[0]) { code = R_EMBED_TIMEOUT; break; }
+                if (has_deadline && infy_monotonic_ms() >= deadline_ms) { code = R_EMBED_TIMEOUT; break; }
                 break;
             }
             case OP_LEAVE: break;
@@ -1436,7 +1441,7 @@ static int exec(InfyIfbcModule* m, uint32_t fi, InfyDyn** args, uint32_t nargs,
             case OP_SIZE_OF: { if (o[0] >= m->n_types) { code = R_IFBC_TYPE; break; } InfyDyn* t = infy_dyn_int((int64_t)m->types[o[0]].size); if (!t || !vpush(&fr, t)) { if (t) infy_dyn_decr(t); code = t ? R_IFBC_STACK : R_IFBC_INVALID; } break; }
             case OP_ALIGN_OF: { if (o[0] >= m->n_types) { code = R_IFBC_TYPE; break; } InfyDyn* t = infy_dyn_int((int64_t)m->types[o[0]].align); if (!t || !vpush(&fr, t)) { if (t) infy_dyn_decr(t); code = t ? R_IFBC_STACK : R_IFBC_INVALID; } break; }
             case OP_FIELD_OFF: {
-                if (o[0] >= m->n_types || !(m->types[o[0]].flags & 1u)) { code = IFBC_R_FIELDOFF; break; }
+                if (o[0] >= m->n_types || !(m->types[o[0]].flags & 1u)) { code = R_FIELD_OFF_REPR; break; }
                 if (o[1] >= m->types[o[0]].nfields) { code = R_IFBC_TYPE; break; }
                 uint32_t off = be32(m->types[o[0]].fields + o[1] * 12u + 4u);
                 InfyDyn* t = infy_dyn_int((int64_t)off);

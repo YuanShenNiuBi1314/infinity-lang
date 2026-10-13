@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 332 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 333 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
 Finished `dev` profile  (51 warnings，全部为 unused/dead code，见 BACKLOG F2)
 $ infy check examples/tour
@@ -45,21 +45,21 @@ $ infy build examples/tour
 （同一行 check ok，再）notice: `infy build` stops here in this build — stages [8] codegen and [9] link are not implemented yet   # exit 6
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
       runtime/test_ifbc.c runtime/test_ifbc_stubs.c -o ifbc_tests && ./ifbc_tests
-IFBC harness: 79 asserts, 79 pass, 0 FAIL        # exit 0；B1 轮起 0 编译告警（原 4 条 infy_rt.h 前置引用 = B3 第 4 项，已修）
+IFBC harness: 82 asserts, 82 pass, 0 FAIL        # exit 0；B1 轮起 0 编译告警（原 4 条 infy_rt.h 前置引用 = B3 第 4 项，已修）
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
       runtime/infy_rt.c runtime/test_ifbc.c -o ifbc_real && ./ifbc_real
-IFBC harness: 79 asserts, 79 pass, 0 FAIL        # exit 0，0 error / 0 warning；B2 轮真实链生产 infy_rt.c，stdout 与上一行逐字节相同
+IFBC harness: 82 asserts, 82 pass, 0 FAIL        # exit 0，0 error / 0 warning；B2 轮真实链生产 infy_rt.c，stdout 与上一行逐字节相同
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && ./rt_tests
 32303 assertions, 0 failures                     # exit 0，0 error / 0 warning；链的是生产 infy_rt.c（B1 轮收敛）
 $ gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c
-（无输出）                                        # exit 0，0 warning（B3 的验收命令已过，另外三项未改 → B3 仍开着）
+（无输出）                                        # exit 0，0 warning（B3 的验收命令；三项语义已于 B3 轮落地，见下文 B3 一节）
 $ (cd examples/tour && infy fmt --check)
 2 file(s) are not canonical                        # exit 2，见下文"导览源码不是格式化不动点"
 ```
 
-332 项按模块（`cargo test --offline --lib -- --list` 分组计数，合计 332）：
+333 项按模块（`cargo test --offline --lib -- --list` 分组计数，合计 333）：
 `lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `pkg` 19 · `toml` 15 · `borrow` 15 ·
-`sha256` 12 · `codes` 9 · `base64` 7 · `parser` 7 · `ifbc` 5 · `cli` 5 · `stdlib` 4 · `diag` 2。
+`sha256` 12 · `codes` 9 · `base64` 7 · `parser` 7 · `ifbc` 6 · `cli` 5 · `stdlib` 4 · `diag` 2。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -75,8 +75,8 @@ B 轨 lowering(`src/btrack.rs`) 尚未收敛；C 侧 harness(`runtime/test_rt.c`
 `src/codegen.rs`、`src/hir.rs`、`src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs`
 是 1 行占位文件（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
 A 轨绑定、`std.net` TLS、`infy lsp` 未实现。
-79 项 IFBC 断言**B2 轮起既链 `runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，
-两侧同为 79/79、stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 Rust↔C 双侧交叉验证（D4 阻塞）。
+IFBC 断言（B3 轮 79 → **82**，新增的是 `closure.new` 越出 `func_table` 的拒绝路径）**B2 轮起既链
+`runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，两侧同为 82/82、stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 Rust↔C 双侧交叉验证（D4 阻塞）。
 
 ## A2 本轮修掉的真实缺陷（每条都有回归测试）
 
@@ -101,10 +101,10 @@ A 轨绑定、`std.net` TLS、`infy lsp` 未实现。
 `lexer`、`formatter`、`rt-core`(C 侧 harness)、`ifbc-rust`(B 轨摄取) 四个并行子任务曾撞到 agent 轮次上限被截断。
 A2 轮收敛了 `formatter` 与词法/语法侧的缺口；`lexer` 的 E-0020 保留字集经核与 §2.4 一致（含
 `use`/`mod`/`union`/`linkage` 这组"保留但本版文法未用"的字）。**仍未收敛**：
-`src/btrack.rs` 的端到端 lowering（D1）。`runtime/test_rt.c`（B1）已于 B1 轮收敛。已完成的 C 侧里程碑不变：`ifbc-vm`(`runtime/test_ifbc.c`) 79 项断言通过，
-含六项装载校验、逐字节截断/单字节变异/800 轮随机 fuzz；`codes`、`infra`(哈希/TOML) 已交付。
-（A3 轮当时的限定"这 79 项链的是替身不是生产运行时"已于 **B2 轮解除**：同一 harness 现在也链生产
-`runtime/infy_rt.c` 跑通 79/79，见上文 P11。）
+`src/btrack.rs` 的端到端 lowering（D1）。`runtime/test_rt.c`（B1）已于 B1 轮收敛。已完成的 C 侧里程碑不变：`ifbc-vm`(`runtime/test_ifbc.c`) **82** 项断言通过（B3 轮 79 → 82），
+含六项装载校验、逐字节截断、单字节变异、800 轮 fuzz；`codes`、`infra`(哈希/TOML) 已交付。
+（A3 轮当时的限定"这些项链的是替身不是生产运行时"已于 **B2 轮解除**：同一 harness 现在也链生产
+`runtime/infy_rt.c` 跑通 82/82，见上文 P11。）
 
 新发现（未修，已记入 BACKLOG 阶段 D）：Rust 侧 IFBC 编码与 C 侧虚拟机的**操作数个数**不一致 —
 `push`（Rust 2 个：池索引 + 类型；C 表 `nops=1`）、`box.dyn`（Rust 1；C `nops=0`，附录 D.7 与 `runtime/IFBC.md` 也是 0）、
@@ -192,6 +192,40 @@ SplitMix64→PCG-XSH-RR→Lemire 无偏→从尾到头 Fisher–Yates 推出来�
 
 未修只登记：`g_host_nesting` 在 host 调用 panic 跨出边界时不回滚（`infy_rt.c:2654` 起的全局计数，`++`/`--`
 被 longjmp 跳过），harness 只能在 catch 之后手工复位——已开 BACKLOG **F8**。
+
+## B3 本轮：`infy_rt.h` 的三项语义瑕疵落地 + D-22 裁决
+
+B3 的验收命令（`gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` 无告警）在 B1 轮就已绿，所以本轮勾的是
+**三项语义**，不是那条命令。
+
+1. **`InfyRCode` 补齐为规范的闭集**：新增 `R_EMBED_TIMEOUT = 0x0701`（§9.7 spec:1495；`tickloop` 预算越线
+   与 `timeout_ms` 越 deadline 时由 `infy_ifbc.c` 返回，规范明言"不杀进程"）与 `R_FIELD_OFF_REPR = 0x0713`
+   （spec:1627 / 附录 D.9，`field_off` 作用于非 `repr(C)` 类型）。这两个码此前只以 `infy_ifbc.c` 文件内的
+   `#define` 裸整数存在，`infy_rt.h` 的注释却自称闭集（"closed set, no implementation extensions"）；
+   `test_ifbc.c` 的两处断言原来写死 `0x0701`/`0x0713`，现改断言枚举常量（断言强度不变）。
+2. **D-22 裁决**：`0x0709` 被规范自己用了三种语义（附录 D.10 的"边界"行、spec:2417 的 tailcall 帧尺寸、
+   §9.7/§7.9 的 `max_mem_bytes`）。§9.7 是码表权威，故 `R_IFBC_MEMBUDGET` 只保留内存配额一条语义；
+   装载期"边界"类两处发现（tailcall 帧尺寸不兼容、`closure.new` 的 `code_idx` 越出 `func_table`）改报
+   `R_IFBC_FRAME`（`R-0707`，§7.8.3 第 4 项"帧合法"，与同一函数里早已存在的"call/tailcall 目标越界 → `R-0707`"同类）。
+   未使用的 `R_IFBC_BOUNDARY = 0x070A` 从枚举与 `infy_rt.c` 诊断码表删除（`0x070A` 不见于规范任何码表）。
+   没有借用 `R-0702`/`E-0701`：spec:1508 明令那两个编号永久废止。取证补充：D.10 的"边界"在 §7.8.3 的 1→6 里
+   并不存在（第 6 项是行映射完备 → `W-0705` 不阻断），说明该末项是顺号编出来的而非语义选择。
+   `test_ifbc.c` 的映射表新增一行 `SC_CLOSURE_BAD`，断言只增不减：**79 → 82**。
+3. **`frame_kind` 两级分开**：模块级（容器头第 46 字节）只允许 `0` = 值模型，其它值装载失败 `R-0703`；
+   函数级（`func_table` 每条记录）取 `0 = 栈式帧` / `1 = 协程帧`，`> 1` 装载失败。C 侧原来用裸 `== 1`/`!= 1`，
+   现用冻结公共头里的命名常量 `INFY_FRAME_STACK` / `INFY_FRAME_COROUTINE`（`infy_rt.h`）。
+   **本轮取证纠正了 BACKLOG 的旧描述**：`frame_kind` 的函数级字段实现里早就有（`InfyIfbcFunc.frame_kind`），
+   缺的是头文件侧的命名常量与取值来源，所以没有"补字段"，改为补常量 + 范围校验 + 文档。
+   顺带发现并修掉一处 Rust↔C 不一致：`src/ifbc.rs::decode` 原本判据是 `frame_kind > 1` 才拒，即允许模块头写 `1`，
+   而 C 侧要求必须为 `0` —— 现两侧同规则，并加 `frame_kind_header_and_function_value_sets` 测试锁住
+   （头 `1` 被拒 / 函数级 `1` 可装载 / 函数级 `2` 被拒）。取值表本身规范未钉数字，记偏差 **D-23**。
+
+回归：四条 C 链全部复跑（`-c infy_rt.c` 0 warning、rt harness 32303/0、替身链 82/82、生产链 82/82 且两份
+stdout 逐字节相同）；`cargo test --offline --lib` **333 passed / 0 failed**（基线 332，+1 为新增的 `ifbc` 测试）；
+`cargo check --offline --lib` 0 error / 51 warning；`infy check examples/tour` exit 0；`(cd examples/tour && infy fmt --check)`
+仍 exit 2（F6 未裁决）。**未做**：`docs/coverage.md` 的 §7.8/附录 D 仍保持 🟡 —— 码表现已与 §9.7 对齐，但双侧
+交叉验证仍被 D4 阻塞；本轮另外核实到 D4 的范围比原描述更大（`func_table` 记录布局两侧也不同：Rust 36 字节/条
+含 `arity/ret_ty/sig/sig_hash`，C 40 字节/条含 `max_stack/ret_arity/ret_sig/flags/frame_kind`），已写进 BACKLOG D4。
 
 ## 仍未实现
 

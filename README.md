@@ -47,16 +47,16 @@ infy conformance --report   # 未实现：notice + exit 1
 | §1.3 | 领域中立判据（`NFKCCaseFold` 匹配 `domain_terms` 黑名单） | ✅ 4 项 |
 | §8.4 | 节点表编号 | 🟡 7 项（`parser` 编号 1 项 + `sema` 的 `goto` 三条 `E-0301` 越界路径、`start` 链名/锚点、序言不移动编号） |
 | §7.4 / §7.3 | 产物容器：宿主可执行文件 + `INFYART2` 段尾 + `.inf meta/rodata 索引/ifbc/sum`；`build-id` | 🟡 `infy artifact info` 只识别段尾魔数；段写入器与 `.inf meta` 解析都不存在（BACKLOG C3） |
-| §7.8 / 附录 D | IFBC 编码、反汇编、装载期六项校验（`R-0704`…`R-0708`）、UB-019 | 🟡 Rust 侧 5 项 + C 侧 79 断言**各自**通过；两侧操作数个数不一致（BACKLOG D4），双侧交叉验证目前必然错位 |
+| §7.8 / 附录 D | IFBC 编码、反汇编、装载期六项校验（`R-0704`…`R-0708`）、UB-019 | 🟡 Rust 侧 6 项 + C 侧 82 断言**各自**通过；B3 轮已把码表对回 §9.7（偏差 D-22 裁决、D-23 钉死 `frame_kind` 两级取值），但两侧操作数个数与 `func_table` 记录布局仍不一致（BACKLOG D4），双侧交叉验证必然错位 |
 | §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ⬜ `src/host.rs` 是占位文件 —— **未实现** |
-| 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32303 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 79 断言 B2 轮起也链生产 `infy_rt.c`（同为 79/79，输出逐字节相同）。仍不等于 §12 合规：外部用例为 0，双侧交叉验证受 D4 阻塞 |
+| 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32303 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 82 断言 B2 轮起也链生产 `infy_rt.c`（同为 82/82，输出逐字节相同）。仍不等于 §12 合规：外部用例为 0，双侧交叉验证受 D4 阻塞 |
 
-`cargo test --offline --lib` 目前 **332 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
+`cargo test --offline --lib` 目前 **333 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
 "绿灯"只表示已写测试的模块自洽：A4 轮之后 `sema`(22) 与 `pkg`(19) 已不再是零单测，
 但 `hir`、`codegen`、`host`、`btrack`、`atrack`、`conformance`、`doc` **一项单测都没有**，仍在进行中或未开始。
 C 侧另有两份独立 harness，**两份都直接链生产 `runtime/infy_rt.c`**：`runtime/test_rt.c` →
 **32303 assertions / 0 failures**（B1 轮收敛，`-Wall -Wextra` 零告警）；`runtime/test_ifbc.c` →
-**79 asserts, 79 pass, 0 FAIL**（B2 轮真实链接，零告警；同一 harness 链 `test_ifbc_stubs.c` 替身也同为 79/79，
+**82 asserts, 82 pass, 0 FAIL**（B2 轮真实链接，零告警；同一 harness 链 `test_ifbc_stubs.c` 替身也同为 82/82，
 两份输出逐字节相同）。
 以上都只说明"已写用例自洽"，**不等于 §12 合规**（外部用例仍为 0）。
 

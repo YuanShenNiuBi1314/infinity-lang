@@ -32,7 +32,7 @@ loader returns a code, it does not read or write out of bounds.
 | 8..9   | `lang_tag` u16 | source language + bytecode/capability version (diagnostic) |
 | 10..41 | `module_hash[32]` | not checked by the VM |
 | 42..45 | `func_count` u32 | must equal the `func_table` count |
-| 46     | `frame_kind` u8 | **module‑wide value model**: must be `0` = single‑address operand stack + local window (§7.8.1). The *per‑function* coroutine flag lives in `func_table` (see 1.5). |
+| 46     | `frame_kind` u8 | **module‑wide value model**: must be `0` = single‑address operand stack + local window (§7.8.1); any other value → R‑0703. The *per‑function* coroutine flag lives in `func_table` (see 1.5), and its numeric table is deviation D‑23. |
 
 ### 1.2 type_table
 ```
@@ -86,7 +86,7 @@ n_funcs × {                      # 40-byte fixed record
    u32 ret_sig                 # scalar code (§2), diagnostic
    u32 name_str
    u32 flags                   # bit0 = has_return
-   u32 frame_kind               # 0=normal  1=coroutine   (yield legality, R-0707)
+   u32 frame_kind               # 0=stack  1=coroutine  (yield legality, R-0707; >1 rejected at load, deviation D-23)
 }
 ```
 `func_idx` = 0‑based index. Closures store a pointer to their `InfyIfbcFunc` record; the runtime
@@ -284,7 +284,10 @@ Within a function the checks run in the D.10 order (1→6), then 6b, then the ex
    missing the IFABI‑signed flag, or a `sig` code outside §2 → **R‑0708**.
 6. **Boundary / tail‑call frame size** — a `tailcall.stat` to a frame whose `locals`/`max_stack`/
    `nargs`/`ret_arity`/`frame_kind` differ from the caller, or a `closure.new code_idx` outside
-   `func_table` → **R‑0709** (also `R_IFBC_MEMBUDGET`; see §7).
+   `func_table` → **R‑0707** (`R_IFBC_FRAME`, the same code as "call/tailcall target not in
+   `func_table`"). D.10 maps this row to R‑0709, but §9.7 and §7.9 both reserve R‑0709 for
+   "embedded unit exceeded `max_mem_bytes`" — deviation **D‑22** records the clash and this
+   mapping, so R‑0709 is produced only by the run‑time arena check (§7).
    6b. **Line‑map completeness** — an instruction boundary with no covering `line_map` entry is a
    non‑blocking **W‑0705** (the module still loads).
 
@@ -294,9 +297,9 @@ Extra dyn/reference checks folded into pass 3 (their codes are not in the R‑07
   an `is.dyn` or `tag.get`; otherwise → **R‑0710** (`R_DYN_TAG`). This is the load‑time half of
   §7.7.7; the runtime half is `cast.dyn`/`unbox.dyn` mismatch, also R‑0710.
 * **`invoke.dynamic` target** — index outside `func_table` → **R‑0712** (`R_DYN_TARGET`).
-* **`field_off` on non‑`repr(C)`** — type whose `flags` bit0 is clear → **R‑0713** (header gap:
-  this code is in the spec table but not in `InfyRCode`; the loader returns it as the raw integer
-  0x0713).
+* **`field_off` on non‑`repr(C)`** — type whose `flags` bit0 is clear → **R‑0713**
+  (`R_FIELD_OFF_REPR`; the header gap is closed — `InfyRCode` carries it, as it now carries
+  R‑0701 `R_EMBED_TIMEOUT` too).
 
 ### 5.5 host routing and signature comparison
 `call.host idx`/`call.embed idx` never branch to an address embedded in the bytecode. The runtime
@@ -338,18 +341,25 @@ not crash on any prefix of a truncated image).
 
 ## 7. Deviations, header gaps, capability limits
 
-* **Header gaps** (`infy_rt.h`, reported not edited): `InfyRCode` omits `R‑0701` (timeout) and
-  `R‑0713` (field_off); there is no module‑unload entry point and no host‑thunk bind entry point.
-  This impl returns the two missing codes as raw integers (loader/invoke return `int`, so no enum
-  member is required) and adds `infy_ifbc_module_free` / `infy_ifbc_bind_host` as group‑(b) private
-  entry points (also declared in `infy_rt_internal.h`'s "header gaps" spirit).
-* **`R‑0709` overload**: the spec maps both "tail‑call/boundary frame size" (validation 6) and
-  "`@embed` exceeds `max_mem_bytes`" (§7.9) to R‑0709; `InfyRCode` also has an unused
-  `R_IFBC_BOUNDARY = 0x070A`. Per the task/§7.8.3 and D.10 the load‑time boundary/tail‑call failure
-  is reported as **R‑0709**, and the run‑time arena check (against `max_mem_bytes`) is R‑0709 too.
-* **`frame_kind`**: the header carries one module‑wide `frame_kind` u8 that D.1 says is the *value
-  model* (`0` = stack+local window); D.8's per‑function "coroutine frame" test needs a per‑function
-  flag, which lives in `func_table.frame_kind`. This reconciles the two uses.
+* **Header gaps** (`infy_rt.h`): `InfyRCode` now carries `R‑0701` (`R_EMBED_TIMEOUT`) and `R‑0713`
+  (`R_FIELD_OFF_REPR`) — closed in the B3 round, which is also when the raw‑integer `#define`s this
+  file used before were removed. Still open: the header declares no module‑unload entry point and no
+  host‑thunk bind entry point, so this impl keeps `infy_ifbc_module_free` / `infy_ifbc_bind_host` as
+  group‑(b) private entry points (declared in `infy_rt_internal.h`).
+* **`R‑0709` overload — adjudicated (deviation **D‑22**)**: D.10 maps the load‑time "boundary" row
+  (tail‑call frame size, `closure.new` outside `func_table`) to R‑0709 while §9.7 and §7.9 reserve
+  that number for "`@embed` exceeds `max_mem_bytes`". §9.7 is the code table, so the boundary
+  findings report **R‑0707** (frame legality, §7.8.3 item 4 — the same code "call/tailcall target
+  not in `func_table`" already used) and R‑0709 now means only the arena check. The unused
+  `R_IFBC_BOUNDARY = 0x070A` was deleted: no spec table defines 0x070A and `InfyRCode` is a closed
+  set. `R‑0702`/`E‑0701` were not used as the escape hatch — spec:1508 keeps them permanently dead.
+* **`frame_kind`** (numeric table = deviation **D‑23**): the header carries one module‑wide
+  `frame_kind` u8, which §7.8.1 defines as the *value model* with a single legal value `0`
+  (stack + local window), so the loader rejects any other header value with R‑0703. D.8's
+  "coroutine frame" test is per function and lives in `func_table.frame_kind`:
+  `INFY_FRAME_STACK = 0`, `INFY_FRAME_COROUTINE = 1` (both in `infy_rt.h`). The spec names the
+  values ("0", "coroutine") but never numbers them, so `1` is this implementation's fixed choice,
+  and a function record with `frame_kind > 1` is rejected at load.
 * **`InfyDyn` union** has no slot for a coroutine continuation or a `repr(C)` instance: DY_CORO
   stashes a heap control‑block pointer in `v.list.items` and its `func_idx` in `v.list.esz`
   (`u32`); a per‑module `coro_release` hook frees it. DY_INSTANCE holds only its tag.

@@ -102,8 +102,8 @@ A panic raised while unwinding (double panic) switches immediately to `process` 
 `R-0011` (§4.16). Boundary checks are **never** compiled out: array index (`R-0004`), divide by
 zero (`R-0002`), shift width (`R-0007`), integer overflow (`R-0001` or saturate per the module
 profile, §4.4), `Option::unwrap` on `None` (`R-0005`), `bool` bit pattern (`R-0006`), NUL in a
-`str` crossing an A-track boundary (`R-0003`), IFBC load validation (`R-0703`…`R-0709`), `dyn`
-tag mismatch (`R-0710`).
+`str` crossing an A-track boundary (`R-0003`), IFBC load validation (`R-0703`…`R-0708`, plus
+`R-0712`/`R-0713` for `invoke.dynamic` and `field_off`), `dyn` tag mismatch (`R-0710`).
 
 ## 5. Chains, nodes, focuses (§8)
 
@@ -235,9 +235,17 @@ exception_table : count u32, then count × { start u32, end u32, handler u32, de
 
 The loader runs §7.8.3's six validations **per function in `func_table` order, wholly before any
 instruction executes**; the first failure rejects the entire module (D.10) with `R-0704`
-(linearity), `R-0705` (stack height), `R-0706` (operand type), `R-0707` (frame legality), `R-0708`
-(host signature), `R-0709` (boundary/tail-call frame size). `infy ifbc verify --all-errors` lists
-every violation instead of only the first.
+(linearity), `R-0705` (stack height), `R-0706` (operand type), `R-0707` (frame legality — including
+D.10's "boundary" row: tail-call frame size and `closure.new` outside `func_table`; deviation D-22
+keeps `R-0709` for the §7.9 `max_mem_bytes` arena check alone), `R-0708` (host signature).
+`infy ifbc verify --all-errors` lists every violation instead of only the first.
+
+`frame_kind` has two levels with different value sets (deviation D-23): the header u8 is the
+module-wide value model and only `0` (single-address operand stack + local window, §7.8.1) is legal,
+while D.8's coroutine test is a **per-function** field in `func_table` — `0` = stack frame,
+`1` = coroutine (`INFY_FRAME_STACK` / `INFY_FRAME_COROUTINE` in `infy_rt.h`, `FRAME_KIND_STACK` /
+`FRAME_KIND_COROUTINE` in `src/ifbc.rs`); any other value fails the load. The spec never numbers
+D.8's values, so `1` is this implementation's fixed choice.
 
 ## 10. `env` (§4.6)
 

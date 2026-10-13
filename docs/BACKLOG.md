@@ -111,22 +111,43 @@
       §4"被测对象是生产运行时吗"❌→✅；`docs/status.md` 与 `README.md` 里"79 断言链的是替身"的限定已解除。
       **B2 不改变** §7.8/附录 D 的 🟡：Rust↔C 双侧交叉验证仍被 **D4**（操作数个数不一致）阻塞。
       证据提交：`466e43e`（上述全部数字为该提交上的实测复跑，非引用；远端 `toolchain` 回查 = `466e43e`，推送欠账 0）。
-- [ ] B3 修 `infy_rt.h` 已知瑕疵：`InfyRCode` 缺 `R-0701`/`R-0713`；`R_IFBC_BOUNDARY` 与 D.10/§7.9 的映射冲突（都指 0x0709）；
+- [x] B3 修 `infy_rt.h` 已知瑕疵：`InfyRCode` 缺 `R-0701`/`R-0713`；`R_IFBC_BOUNDARY` 与 D.10/§7.9 的映射冲突（都指 0x0709）；
       `frame_kind` 是模块级而 D.8 需要函数级；`infy_rt.h:212` typedef 前置引用告警。改完在 `docs/spec-deviations.md` 追加条目。
       验收：`gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` 无告警。
-      **B1 轮进度（保持未勾）**：第 4 项已修——`InfyString` 补了结构标签，`typedef struct InfyString {…}`，
-      `infy_rt.h` 的前置引用告警消失，`gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` 现在 **0 warning（exit 0）**，
-      IFBC 那条编译也从 4 告警降到 0；`infy_rt.c` 里为此存在的 `InfyDebugWriteFn` 绕过 cast 与它的"不能改头文件"注释一并删除。
-      顺带修了同头的另一处布局错：`InfyMetaFixed.iter_guard_steps` 由 `uint32_t` 改 `uint64_t`（磁盘字段是 8 字节、
-      §10.10 默认 2^32，读回来被截成 0 后 `infy_art_apply_meta` 会静默换成默认值）。
-      **仍开着的三项**（本轮验收命令已过，但那三项是语义问题，不因命令绿而勾）：
-      (1) `InfyRCode` 没有 `0x0701`（§9.7 `R-0701` 嵌入执行超时，注释里在用它）与 `0x0713`（§9.7 非 `repr(C)` 求字段偏移）；
-      (2) `R_IFBC_MEMBUDGET = 0x0709` 与 §9.7 的 `R-0709 = 嵌入单元超出 max_mem_bytes` 语义相撞，`R_IFBC_BOUNDARY` 现占 `0x070A`
-          而附录 D.10 另有指定——需要先按附录 D/§9.7 定谁让路，再改枚举；
-          **B2 轮回查规范后确认为规范级自相矛盾**（附录 D spec:2441"边界→`R-0709`"与 §9.7 spec:1502 争同一号，
-          且 spec:2417 把 tailcall 帧尺寸也称为装载期 `R-0709`；实现侧 `R_IFBC_MEMBUDGET` 目前背了三处语义），
-          已逐条带行号登记为偏差 **D-22（OPEN）**；
-      (3) `frame_kind` 在头文件里根本没有字段（只有 §7.4 meta 里的模块级形态），D.8 要的是函数级。
+      **B1 轮进度**：第 4 项已修——`InfyString` 补了结构标签，`typedef struct InfyString {…}`，`infy_rt.h` 的前置引用告警消失，
+      `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` 现在 **0 warning（exit 0）**，IFBC 那条编译也从 4 告警降到 0；
+      `infy_rt.c` 里为此存在的 `InfyDebugWriteFn` 绕过 cast 与它的"不能改头文件"注释一并删除。顺带修了同头的另一处布局错：
+      `InfyMetaFixed.iter_guard_steps` 由 `uint32_t` 改 `uint64_t`（磁盘字段是 8 字节、§10.10 默认 2^32，读回来被截成 0 后
+      `infy_art_apply_meta` 会静默换成默认值）。那三项语义留到本轮。
+      **B3 轮落地的三项**（验收命令 B1 轮就绿，所以勾的是语义而不是那条命令）：
+      (1) `InfyRCode` 补 `R_EMBED_TIMEOUT = 0x0701`（§9.7 spec:1495；`tickloop` 预算越线与 `timeout_ms` 越 deadline 时由
+          `infy_ifbc.c` 返回，规范明言不杀进程）与 `R_FIELD_OFF_REPR = 0x0713`（spec:1627 / 附录 D.9）。这两个码此前只是
+          `infy_ifbc.c` 文件内 `#define` 的裸整数，而该枚举注释自称闭集；`test_ifbc.c` 里两处写死的 `0x0701`/`0x0713`
+          改成断言枚举常量（强度不变）。
+      (2) **D-22 裁决**：§9.7 是码表权威 → `R-0709` 只表示"嵌入单元超出 `max_mem_bytes`"；装载期"边界"两处发现
+          （tailcall 帧尺寸不兼容、`closure.new` 的 `code_idx` 越出 `func_table`，都在 `check_boundary()`）改报
+          `R_IFBC_FRAME`（`R-0707` = §7.8.3 第 4 项"帧合法"，与同函数里早已存在的"call/tailcall 目标越界 → `R-0707`"同类）；
+          不在规范任何码表里的 `R_IFBC_BOUNDARY = 0x070A` 从枚举与 `infy_rt.c` 诊断码表删除；**没有**借用废止号
+          `R-0702`/`E-0701`（spec:1508 明令永久保留）。取证补充：D.10 的"边界"在 §7.8.3 的 1→6 里根本不存在
+          （第 6 项是"行映射完备"→ `W-0705` 不阻断），而它对应的 `ret`/`ret.multi` 那条 spec:1256 已归入第 4 项，
+          可见 D.10 末项是顺号编出来的、不是语义选择。`test_ifbc.c` 新增一行 `SC_CLOSURE_BAD`，IFBC harness **79 → 82**。
+      (3) `frame_kind` 两级分开，并**纠正 BACKLOG 的旧描述**：函数级字段实现里早就有（`InfyIfbcFunc.frame_kind`），
+          缺的是取值表与命名常量，所以没有"补字段"。现在 `infy_rt.h` 出 `INFY_FRAME_STACK` / `INFY_FRAME_COROUTINE`，
+          C 侧两处裸 `== 1`/`!= 1` 换掉，函数记录 `> 1` 装载失败 `R-0703`，模块级只允许 `0`（其它值同样 `R-0703`）。
+          顺带修掉一处 Rust↔C 不一致：`src/ifbc.rs::decode` 原判据是 `frame_kind > 1` 才拒，即**允许容器头写 1**，
+          而 C 侧要求必须为 0 → 两侧收成同一规则，新增测试 `frame_kind_header_and_function_value_sets`
+          （头 `1` 被拒 / 函数级 `1` 可装载 / 函数级 `2` 被拒）。规范只写了 D.8 的取值名字、没写数值，记偏差 **D-23**。
+      回归（四条链共用一个头，全部复跑）：`gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` **0 warning** exit 0；
+      rt harness **32303 assertions / 0 failures** exit 0；替身链 IFBC **82 asserts / 82 pass** exit 0；
+      **生产链** IFBC **82 / 82** exit 0、0 error / 0 warning、两份 stdout 逐字节相同；
+      `cargo test --offline --lib` **333 passed / 0 failed**（基线 332，+1）；`cargo check --offline --lib` 0 error / 51 warning；
+      `infy check examples/tour` exit 0；`(cd examples/tour && infy fmt --check)` 仍 exit 2（F6 未裁决，未变）。
+      文档同步（不留旧声称）：`runtime/IFBC.md` §1.1/§1.5/§5/§7、`docs/internals/runtime-abi.md` §4/§9、
+      `docs/spec-deviations.md`（D-22 改"已裁决"＋新增 D-23）、`docs/coverage.md`（P1/P6/P10/P11、§7.8 行、
+      `infy_rt.h` 已知瑕疵行）、`docs/status.md` 与 `README.md` 的 333/82 与 B3 一节。
+      **§7.8/附录 D 仍保持 🟡**：码表已对齐，但 D4 未裁；本轮另核实 D4 范围比原描述更大（`func_table` 记录布局
+      Rust 36 字节/条 vs C 40 字节/条，字段集也不同），已写进 D4。头文件仍缺"模块卸载/host thunk 绑定"公共入口，
+      已在 `runtime/IFBC.md` §7 明确记录，不假实现。
 
 ### 阶段 C：把 tour 从 check 推到 build/run（P6 单文件承诺的落地）
 
@@ -152,6 +173,10 @@
       `box.dyn` Rust 1 vs C 0（附录 D.7 与 `runtime/IFBC.md` 都写 0 操作数，Rust 侧不符规范）；
       `guard.nonzero`/`guard.shift` Rust 1 vs C 0；`ldw` Rust 1 vs C 2（`/* ldw i, ty */`）。
       字节宽度 = `1 + 4*nops`，任一条不一致都让两边对同一镜像的指令流错位。
+      **B3 轮另核实一处同族缺口，范围比"操作数个数"更大**：`func_table` 的记录布局两侧也不同 —— Rust `FuncEntry`
+      是 36 字节/条（`name code_off code_len locals arity ret_ty sig sig_hash` 八个 u32 + `frame` u8 + `flags` u8 + u16 填充），
+      C 侧按 40 字节/条读（`code_off code_len locals max_stack nargs ret_arity ret_sig name_str flags frame_kind` 十个 u32）。
+      裁决 D4 时要把这两层（指令流 + 函数表）一起定，否则 D2 的双侧读法仍然对不上。
       验收：以附录 D 为唯一权威逐条判定哪侧改（`push k` 的类型操作数若保留，必须同时进 D.2 与 C 表），
       再让 D2 的双侧反汇编逐指令相等测试通过；结论与选择写进 `docs/spec-deviations.md`。
 
@@ -195,20 +220,23 @@
 
 ## 2. 当前指针
 
-> **下一轮第一件事：取 B3**（§1 里第一个 `[ ]`：`infy_rt.h` 的三项语义瑕疵；验收命令 `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c`
-> 在 B1 轮就已 0 warning，所以**不要**因为命令绿就勾——三项语义没改完就不勾）。B2 轮已把取证做齐，直接从这里接：
-> (1) `InfyRCode` 缺 `0x0701`（§9.7 spec:1495 `R-0701 = 嵌入执行超时`，spec:1191/2178 均为 `tickloop` 超限、不杀进程）
->     与 `0x0713`（spec:1627/2438 `field_off` 于非 `repr(C)` → `R-0713`；`test_ifbc.c` 已在用裸 `0x0713`）；
-> (2) **规范级自相矛盾，已确认**：附录 D 的装载校验映射（spec:2441）写"边界→`R-0709`"，而 §9.7 码表
->     （spec:1502）把 `R-0709` 定义为"嵌入单元超出 `max_mem_bytes`"；现状 `R_IFBC_MEMBUDGET=0x0709`、`R_IFBC_BOUNDARY=0x070A`。
->     裁决时注意 spec:1508：`R-0702`/`E-0701` 编号**永久保留不得赋新语义**，所以不能靠"挪号"了事；
->     选一个确定实现并写 `docs/spec-deviations.md`（§9.7 是码表权威，倾向让 IFBC 边界让路，但必须逐条写明依据）；
-> (3) `frame_kind`：**B2 轮查到实现其实已有函数级字段**（`infy_ifbc.c:242` `FDesc.frame_kind`、`:351` 读取、
->     `:715/:951` 以 `== 1` 判 coroutine、`:767` tailcall 兼容性比较），而 §7.8.1（spec:1232）只定义了**模块级**
->     `frame_kind:u8 = 0`。真正缺的是 `infy_rt.h` / ABI 文档侧的函数级声明与"1 = coroutine"这个取值来源——
->     先确认 D.8 的取值表，再决定是补文档还是补头文件字段，别照旧描述直接加字段。
+> **下一轮第一件事：取 C1**（§1 里第一个 `[ ]`：`src/hir.rs` 把 §14 tour 需要的构造落成带类型的中间表示）。
+> B3 轮已把接活需要的取证做齐，直接从这里接：
+> (1) `src/hir.rs` 目前是 1 行占位，`src/lib.rs:40` 已挂 `pub mod hir`，`src/lib.rs:15` 的阶段表把 §7.1 阶段 [7]
+>     "IFIR + optimise"指给它 —— 也就是说 HIR 是**前端与 codegen 之间唯一的接口**，字段命名要和
+>     `docs/internals/runtime-abi.md` 对齐而不是和 `src/ast.rs` 对齐：§1 标量/聚合表示、§5 链-节点-焦点、
+>     §10 `env` 封闭字段集（`env.*` 写操作 = `E-0140`，`sema` 已有测试锁住）；验收要求的"尺寸/对齐金样"就抄这三节。
+> (2) 可复用的现成件（别重造）：`src/sema.rs` 的 `Ty`（§4 类型）、`runtime/infy_rt.h` 的 `InfyMetaFixed`
+>     （§7.4 磁盘 meta 布局，B1 轮刚把 `iter_guard_steps` 修成 64 位）、`InfyChainDesc` / `InfyNodeLoc`
+>     （§8 链表与诊断定位）。tour 的两个文件是 `examples/tour/core/build/mod.infy` 与 `examples/tour/cmd/runner/main.infy`，
+>     需要的构造 = fn/event/struct/enum/const/链节点，`infy check` 已经在它们上面 exit 0，所以 AST 侧不缺信息。
+> (3) **不要碰 D4 的两侧布局**：C1 只落 Rust 侧表示。B3 轮核实 D4 比原描述大 —— 除了操作数个数，
+>     `func_table` 记录 Rust 36 字节/条 vs C 40 字节/条也不同；那两条一起留给 D2/D4 裁决（`infy run` 之前不必动）。
 > 输出二进制一律写 `target/scratch/`（写 `/tmp` 会让 `ld` 直接返回 5）；改 `infy_rt.h` 后**四条链**都要复跑
 > （P6 替身 IFBC、P11 生产 IFBC、P9 rt、`-c infy_rt.c`），因为它们共用一个头。
+> **B3 手法留档**：码表冲突的裁决顺序 = §9.7 码表 > 附录 D 的顺号表；附录 D.10 的"边界"在 §7.8.3 的 1→6 里并不存在
+> （第 6 项是行映射完备 → `W-0705`），这类"表末项是顺号编出来的"痕迹可以直接作为让路的依据；而废止号（`R-0702`/`E-0701`，
+> spec:1508）不能当逃生舱用。改枚举时记得 `infy_rt.c` 的 `r_table` 是第二份真相（诊断标题表），删码要同步删行。
 >
 > **B2 已完成，手法留档**：静默的 `collect2: error: ld returned 5` 用逐对象 `gcc -c` + `nm --defined-only`/`nm -u` +
 > `comm -23` 一减就露出真缺口（本轮唯一缺口是 harness 私用的 `infy_stub_live_objs`）。`nm -u -P` 在本机只输出单列 `U`，别用它解析。
@@ -216,18 +244,19 @@
 > **推送欠账**：只认现算 `git rev-list --count <远端SHA>..HEAD`；远端 SHA 用
 > `gh api repos/YuanShenNiuBi1314/infinity-lang/git/refs/heads/toolchain --jq .object.sha` 回查，`Everything up-to-date` 不算成功。
 >
-> 已验证事实（B2 轮全部复跑，非引用）：`cargo test --offline --lib` **332 passed / 0 failed**
+> 已验证事实（B3 轮全部复跑，非引用）：`cargo test --offline --lib` **333 passed / 0 failed**
 > （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `pkg` 19 · `toml` 15 · `borrow` 15 · `sha256` 12 ·
-> `codes` 9 · `base64` 7 · `parser` 7 · `ifbc` 5 · `cli` 5 · `stdlib` 4 · `diag` 2 = 332）；
+> `codes` 9 · `base64` 7 · `parser` 7 · `ifbc` 6 · `cli` 5 · `stdlib` 4 · `diag` 2 = 333）；
 > `cargo check --offline --lib` 0 error / 51 warning；`infy check examples/tour` exit 0；
 > `(cd examples/tour && infy fmt --check)` **exit 2（2 file(s) are not canonical，见 F6）**；
 > **rt harness `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → 0 error / 0 warning，
 > `32303 assertions, 0 failures` exit 0**；
-> `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` → **0 warning**（B3 的验收命令已过，B3 另外三项语义问题仍开着）；
+> `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` → **0 warning**（B3 已勾，三项语义同轮落地）；
 > **IFBC 两条链都绿且 stdout 逐字节相同**：替身链 `gcc … infy_ifbc.c infy_dyn.c test_ifbc.c test_ifbc_stubs.c` →
-> `79 asserts, 79 pass, 0 FAIL` exit 0；**生产链** `gcc … infy_ifbc.c infy_dyn.c infy_rt.c test_ifbc.c` → 同为 79/79、0 告警（B2）。
-> A4 修掉的 4 个前端缺陷与 B1 修掉的 7 个运行时缺陷都有回归测试；未修只登记：D-18、D-19/F7、F8（host 嵌套计数跨 panic 不回滚）。
+> `82 asserts, 82 pass, 0 FAIL` exit 0；**生产链** `gcc … infy_ifbc.c infy_dyn.c infy_rt.c test_ifbc.c` → 同为 82/82、0 告警。
+> A4 修掉的 4 个前端缺陷与 B1 修掉的 7 个运行时缺陷都有回归测试；未修只登记：D-18、D-19/F7、F8（host 嵌套计数跨 panic 不回滚）；
+> D-22 与 `frame_kind` 取值表（D-23）已于 B3 裁决完毕。
 > `main` 与本地分叉（另一会话推了 `faa34ad`/`05da606`），**合并主干由人决定**。
-> 优先级最高的已知地雷：**D4**（Rust/C 的 IFBC 操作数个数不一致，D2 之前必须先裁）、**D1**（`src/btrack.rs` 端到端）、
-> **F5/F6**（CLI 目录参数不一致、§14 源码不是格式化不动点）、**F7**、**F8**。
+> 优先级最高的已知地雷：**D4**（Rust/C 的 IFBC 操作数个数 + `func_table` 记录布局都不一致，D2 之前必须先裁）、
+> **D1**（`src/btrack.rs` 端到端）、**F5/F6**（CLI 目录参数不一致、§14 源码不是格式化不动点）、**F7**、**F8**。
 > **编译 C 侧测试时四个 .c 必须一起给**（少 `infy_dyn.c` 时 `ld` 只返回 `collect2: error: ld returned 5`，不打印任何 undefined reference）。

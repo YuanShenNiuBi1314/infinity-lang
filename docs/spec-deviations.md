@@ -153,18 +153,44 @@ F7 验收 = 逐条判定数值绑定是否必须报、以及局部 `var` 是否�
 **选择**：`infy_sched_init` 把 `next_focus_id` 置 1，0 永久保留为哨兵（回绕判定仍是 `>= 0xFFFFFFFF`，
 可分配 id 为 `1 … 0xFFFFFFFE`）。锁定点 = `runtime/test_rt.c` 的 §11.4 节流用例（`CK(tf != 0u)`）。
 
-## D-22 `R-0709` 被规范自身双重占用：附录 D 的 IFBC"边界"校验 vs §9.7 的嵌入内存配额 —— **未裁决（OPEN，BACKLOG B3）**
-B2 轮为写指针逐条回查规范时确认这是**规范级自相矛盾**，不是实现错误：
+## D-22 `R-0709` 被规范自身双重占用：附录 D 的 IFBC"边界"校验 vs §9.7 的嵌入内存配额 —— **已裁决（BACKLOG B3）**
+B2 轮逐条回查规范后确认这是**规范级自相矛盾**，不是实现错误：
 - §9.7 运行时码表（spec:1502）：`R-0709 = 嵌入单元超出 max_mem_bytes`，与 spec:1267（`@embed(max_mem_bytes=…)` → 独立 arena，超限 `R-0709`）一致；
 - 附录 D 装载校验映射（spec:2441）："任一失败即整体拒绝该模块，错误码经首失败项映射：线性 0x→`R-0704`、高度→`R-0705`、类型→`R-0706`、帧→`R-0707`、host 签名→`R-0708`、**边界→`R-0709`**"；
 - spec:2417 又把"tailcall 帧尺寸不兼容"称为装载期 `R-0709`。
 
-同一个 `0x0709` 因此有三种语义。本仓库现状：`runtime/infy_rt.h:75-76` 把 `R_IFBC_MEMBUDGET` 定义为 `0x0709`、
-`R_IFBC_BOUNDARY` 顺延为 `0x070A`；而 `R_IFBC_MEMBUDGET` 在 `infy_ifbc.c` 里被用在**三处不同语义**上——
-装载期 tailcall 帧尺寸不兼容（`:768`）、`closure.new` 的 `code_idx` 越出 `func_table`（`:777`）、
-执行期 `live_bytes > max_mem_bytes`（`:1475`，这才是 §9.7 的原意），`test_ifbc.c:418` 则把它当作
-"R-0709 tail-call frame size"断言。附录 D.10 对 `R_IFBC_BOUNDARY` 另有指定，与本现状不符。
-**本轮不选择、不改动枚举**（改号会同时动 `infy_rt.h`、`infy_ifbc.c`、`test_ifbc.c` 与 Rust 侧 `src/ifbc.rs` 四处，
-必须与 B3 的 `R-0701`/`R-0713` 缺失、`frame_kind` 层级一并裁决）。裁决时的约束：spec:1508 明文
-`R-0702`/`E-0701` 编号"永久保留、不得赋予新语义"，因此不能靠把冲突项挪到废弃号上来消解。
-追踪项 = BACKLOG B3；裁决前 `docs/coverage.md` 的 §7.8/附录 D 一行保持 🟡，不得声称 IFBC 码表与 §9.7 对齐。
+裁决前仓库的现状：`infy_rt.h` 把 `R_IFBC_MEMBUDGET` 定为 `0x0709`、`R_IFBC_BOUNDARY` 顺延为 `0x070A`（**无人使用**），
+而 `R_IFBC_MEMBUDGET` 在 `infy_ifbc.c` 里同时背三种语义——装载期 tailcall 帧尺寸不兼容、`closure.new` 的 `code_idx`
+越出 `func_table`、执行期 `live_bytes > max_mem_bytes`（只有最后一条是 §9.7 的原意），`test_ifbc.c` 还把它当
+"R-0709 tail-call frame size"断言。另一条取证：D.10 的"边界"在 §7.8.3 的 1→6 里**不存在**（第 6 项是"行映射完备"→
+`W-0705`，不阻断），"边界"来自 §7.8.2 的指令分类表（`ret`/`ret.multi` 与声明返回类型逐元一致），而 spec:1256 已把
+这一条归进第 4 项"帧合法"（`R-0707`）。也就是说 D.10 的末项是把六个格子顺号编下来的结果，不是语义选择。
+
+**裁决（B3 轮已落地）**：§9.7 是码表权威，`R-0709` 只表示"嵌入单元超出 `max_mem_bytes`"。
+- 装载期"边界"类发现改报 `R_IFBC_FRAME`（`R-0707`）：`infy_ifbc.c` 的 `check_boundary()` 两处（tailcall 帧尺寸不兼容、
+  `closure.new` 目标越出 `func_table`）；后者与同函数里早已存在的"call/tailcall 目标越出 `func_table` → `R-0707`"同类；
+  `spec:2417` 所称"装载期 `R-0709`"因此一并改判，内存配额号不再被装载期借用。
+- `R_IFBC_BOUNDARY = 0x070A` 从枚举与 `infy_rt.c` 的诊断码表里删除：`0x070A` 不见于规范任何码表，而该枚举自称闭集
+  （`infy_rt.h` 注释 "closed set, no implementation extensions"），删除前它也确实没有任何使用点。
+- **没有**把冲突项挪到 `R-0702`/`E-0701`：spec:1508 明文这两个编号"永久保留、不得赋予新语义"。
+锁定点 = `runtime/test_ifbc.c` 的校验映射表（逐行断言确切码，`SC_TAILCALL_BAD` 与新增的 `SC_CLOSURE_BAD` 现断言
+`R_IFBC_FRAME`；断言只增不减：79 → **82**）。同批把 `InfyRCode` 补齐为规范闭集：新增 `R_EMBED_TIMEOUT = 0x0701`
+（§9.7 spec:1495，`tickloop` 预算/`timeout_ms` 越线时触发，不杀进程）与 `R_FIELD_OFF_REPR = 0x0713`
+（spec:1627/D.9，此前 `infy_ifbc.c` 用文件内 `#define` 的裸整数返回），这两项是**补齐规范已有的码**，不构成偏差。
+`docs/coverage.md` 的 §7.8/附录 D 一行因此可以声称"码表与 §9.7 对齐"；仍不改判 🟡 的原因是 **D4**（Rust↔C 的
+IFBC 操作数个数与 `func_table` 记录布局不一致，双侧交叉验证尚不可行）。
+
+## D-23 `frame_kind` 的两级取值表：模块级只有 `0`，函数级 `1 = coroutine` 由实现选定
+§7.8.1（spec:1232 起的容器头定义）在头部放了 `frame_kind:u8 (= 0: 单地址栈式 + 局部窗口)`，那是**值模型**；
+附录 D.8（spec:2434）要判的却是"`yield` 出现在 `frame_kind != coroutine` 的**函数**"→ `R-0707`。
+规范既没把这两级分开写，也没给 D.8 的数值表（只出现 `coroutine` 这个名字），所以 `coroutine` 等于几必须由实现定死。
+**选择**：两级分开，且两级的取值集合不同——
+- 模块级（容器头第 46 字节）只允许 `0`，其它值视为容器非法：C 侧 `infy_ifbc_load` 返回 `R_IFBC_INVALID`（`R-0703`），
+  Rust 侧 `src/ifbc.rs::decode` 返回 `IfbcDecodeErr::BadFrameKind`。Rust 侧此前允许头部写 `1`（判据是 `> 1` 才拒），
+  与 C 侧的"必须为 0"不一致，本轮收紧成同一条规则；
+- 函数级（`func_table` 每条记录）取 `0 = 栈式帧` / `1 = 协程帧`，`> 1` 装载失败（同上两个错误）。常量已在冻结公共头里
+  命名：`infy_rt.h` 的 `INFY_FRAME_STACK` / `INFY_FRAME_COROUTINE`（Rust 侧对应 `FRAME_KIND_STACK` /
+  `FRAME_KIND_COROUTINE`），此前 C 侧是裸 `== 1` / `!= 1`。
+锁定点 = `src/ifbc.rs` 的 `frame_kind_header_and_function_value_sets`（头部 `1` 被拒、函数级 `1` 可装载、函数级 `2` 被拒）。
+文档同批更新：`runtime/IFBC.md` §1.1/§1.5/§7、`docs/internals/runtime-abi.md` §9。
+若 §12 合规套件以后给出 D.8 的正式数值表，以规范为准改实现，本条改判。

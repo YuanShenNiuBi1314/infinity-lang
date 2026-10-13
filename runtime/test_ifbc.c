@@ -156,7 +156,7 @@ typedef enum {
     SC_VALID = 0, SC_NO_MAP, SC_LDNULL, SC_LDNULL_MID, SC_DIV_NOGUARD, SC_SHL_NOGUARD,
     SC_YIELD_NORMAL, SC_UNBOX_NOIS, SC_INVOKE_BAD, SC_FIELDOFF_BAD, SC_JUMP_MID,
     SC_STACK_DIVERGE, SC_HOST_BAD, SC_TAILCALL_BAD, SC_TICKET, SC_ALL_ERRORS,
-    SC_CLOSURE_OK, SC_THROW_OK, SC_OBJ_OK, SC_SWITCH_OK
+    SC_CLOSURE_OK, SC_CLOSURE_BAD, SC_THROW_OK, SC_OBJ_OK, SC_SWITCH_OK
 } Scenario;
 
 /* assemble one scenario's image into `out` (caller frees). */
@@ -301,6 +301,22 @@ static void build_img(Scenario s, Buf* out) {
             bu_free(&cbA); bu_free(&cbB);
             break;
         }
+        case SC_CLOSURE_BAD: { /* same shape, but closure.new targets func index 999 (outside func_table) */
+            nf = 2;
+            Buf cbA; bu_init(&cbA); Buf cbB; bu_init(&cbB);
+            c1(&cbA, OP_PUSHB, 21);
+            c2(&cbA, OP_CLOSURE, 999, 0);
+            c1(&cbA, OP_CALL_STAT, 1);
+            c0(&cbA, OP_RET);
+            c1(&cbB, OP_PUSHB, 21);
+            c0(&cbB, OP_RET);
+            uint32_t lA = (uint32_t)cbA.n, lB = (uint32_t)cbB.n;
+            bu_raw(&cb, cbA.b, cbA.n); uint32_t offB = (uint32_t)cb.n; bu_raw(&cb, cbB.b, cbB.n);
+            funcs[0] = (FDesc){0, lA, 0, 8, 0, 1, 7, 0, 1, 0};
+            funcs[1] = (FDesc){offB, lB, 0, 8, 0, 1, 7, 0, 1, 0};
+            bu_free(&cbA); bu_free(&cbB);
+            break;
+        }
         case SC_THROW_OK: { /* throw.inf with a matching exception region -> jumps to handler */
             c1(&cb, OP_PUSHB, 1);   /* 0..4  error payload */
             c1(&cb, OP_THROW, 0);   /* 5..9  throw.inf k=0 */
@@ -405,7 +421,7 @@ static void test_valid_add(void) {
     CHECK(live_objs() == base, "(a) no leak after load+invoke+free");
 }
 
-/* ===== (b) each of the six validations rejects with the exact code ===== */
+/* ===== (b) each validation rejects with the exact code (§7.8.3 + D.10, mapped per D-22) ===== */
 static void test_six_validations(void) {
     struct { Scenario s; int code; const char* nm; } t[] = {
         { SC_JUMP_MID,     R_IFBC_NONLINEAR, "(b) R-0704 linearity" },
@@ -415,7 +431,8 @@ static void test_six_validations(void) {
         { SC_SHL_NOGUARD,  R_IFBC_TYPE,      "(b) R-0706 shl w/o guard" },
         { SC_YIELD_NORMAL, R_IFBC_FRAME,     "(b) R-0707 frame legality" },
         { SC_HOST_BAD,     R_IFBC_HOSTSIG,   "(b) R-0708 host signature" },
-        { SC_TAILCALL_BAD, R_IFBC_MEMBUDGET, "(b) R-0709 tail-call frame size" },
+        { SC_TAILCALL_BAD, R_IFBC_FRAME,     "(b) R-0707 tail-call frame size (D-22: not R-0709)" },
+        { SC_CLOSURE_BAD,  R_IFBC_FRAME,     "(b) R-0707 closure.new outside func_table (D-22: not R-0709)" },
     };
     for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
         uint64_t base = live_objs();
@@ -455,7 +472,7 @@ static void test_tickloop_timeout(void) {
         uint64_t base = live_objs();
         InfyDyn* ret = 0;
         int irc = infy_ifbc_invoke(m, 0, 0, 0, &ret, 60000, infy_current_node_loc());
-        CHECK(irc == 0x0701, "(f) tickloop budget trips R-0701");
+        CHECK(irc == R_EMBED_TIMEOUT, "(f) tickloop budget trips R-0701");
         CHECK(ret == 0, "(f) no value delivered on timeout");
         CHECK(live_objs() == base, "(f) timeout unwinds frames without touching process/leaking");
         infy_ifbc_module_free(m);
@@ -474,7 +491,7 @@ static void test_invoke_target(void) {
 
 /* ===== (i) field_off on a non-repr(C) type -> R-0713 ===== */
 static void test_field_off(void) {
-    CHECK(load_scenario(SC_FIELDOFF_BAD, 0, 0, 0) == 0x0713, "(i) field_off on non-repr(C) -> R-0713");
+    CHECK(load_scenario(SC_FIELDOFF_BAD, 0, 0, 0) == R_FIELD_OFF_REPR, "(i) field_off on non-repr(C) -> R-0713");
 }
 
 /* ===== (j)/(k) already covered; assert they are distinct from linearity codes ===== */
