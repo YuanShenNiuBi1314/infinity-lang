@@ -19,7 +19,7 @@ infy fmt --check      # §9.5，可用；文件不是规范写法时 exit 2（�
 infy expand --stage macro   # §6.8，可用（与 fmt 一样：positional 目前只吃文件，目录参数会报"找不到 module 根"，BACKLOG F5）
 infy build            # 阶段 [1]-[5] + [7] hir + [8] codegen + [9] 链接与 §7.4 段容器：exit 0，产出单文件产物
 infy artifact info <产物> [--nodes]   # §7.4：读回 .inf meta 与节点表；非产物 → E-0605 + exit 7
-infy run              # 未实现：notice + exit 1
+infy run              # §13.4 开发态：[1]-[9] 建到临时目录 + 立即执行，程序的 stdout/stderr 逐字节转发；exit 0（tour），运行时 panic 时 exit 3
 infy test             # 未实现：notice + exit 1
 infy doc              # 未实现：notice + exit 1
 infy ifbc dump|verify # 未实现：notice + exit 1
@@ -52,10 +52,10 @@ infy conformance --report   # 未实现：notice + exit 1
 | §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ⬜ `src/host.rs` 是占位文件 —— **未实现**（偏移表本身已由 `src/hir.rs::env_table` 落成并有金样） |
 | 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32335 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 82 断言 B2 轮起也链生产 `infy_rt.c`（同为 82/82，输出逐字节相同）。仍不等于 §12 合规：外部用例为 0，双侧交叉验证受 D4 阻塞 |
 
-`cargo test --offline --lib` 目前 **391 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
+`cargo test --offline --lib` 目前 **395 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
 "绿灯"只表示已写测试的模块自洽：A4 轮之后 `sema`(22) 与 `pkg`(19) 已不再是零单测，C2 轮之后 `codegen` 也不再是
-（**18** 项，锁 §4.1/§4.8 布局自检、§4.9/§7.2 检查永不关、§4.11 `?`、§3.12 `match`、§4.7.4 清理序、
-§8.4 节点表、§5.3 调用解析、§7.3 字节稳定），C3 轮新建的 `artifact` 直接带 **18** 项
+（**19** 项，锁 §4.1/§4.8 布局自检、§4.9/§7.2 检查永不关、§4.11 `?`、§3.12 `match`、§4.7.4 清理序、
+§8.4 节点表、§8.2 `goto` 转移控制、§5.3 调用解析、§7.3 字节稳定），C3 轮新建的 `artifact` 直接带 **18** 项
 （§7.4 容器逐字段读回、七个拒绝理由各一条、§7.3 九类输入逐个绑定、`INFY_META_OFF_*` 钉回冻结头文本），仍在进行中或未开始的只剩
 `host`、`btrack`、`atrack`、`conformance`、`doc`（`hir` 于 C1 轮补了 20 项声明层金样，语句/表达式级 IFIR 仍未落 ——
 阶段 [8] 是 AST→C 直接发射）。

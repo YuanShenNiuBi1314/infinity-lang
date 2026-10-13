@@ -6,8 +6,9 @@
 //!
 //! What this build actually does end to end: the front end — stages [1]–[5] of §7.1 — over a whole
 //! module, stages [7]–[9] (`hir` lowering + C11 codegen + link + the §7.4 container) behind
-//! `infy build`, plus `init`, `fmt`, `expand`, `mod tidy`, `toolchain probe|list` and
-//! `artifact info|sections`. `infy run`/`test`/`doc`/`ifbc …`/`lib pack` still report that the
+//! `infy build`, `infy run` = the same pipeline into a temporary directory plus execution
+//! (§13.4), plus `init`, `fmt`, `expand`, `mod tidy`, `toolchain probe|list` and
+//! `artifact info|sections`. `infy test`/`doc`/`ifbc …`/`lib pack` still report that the
 //! stage behind them is open work rather than pretending to succeed (see `docs/status.md`).
 
 use std::collections::BTreeMap;
@@ -30,6 +31,10 @@ pub mod exit {
     pub const TOOLCHAIN: i32 = 6;
     pub const CHECKSUM: i32 = 7;
 }
+
+/// `infy run` builds into a fresh temporary directory per invocation (§13.4: 开发态), so two runs
+/// inside one process (a test suite, a script) must not share or overwrite one another's image.
+static RUN_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 pub fn run(args: &[String]) -> i32 {
     let argv: Vec<String> = args.iter().skip(1).cloned().collect();
@@ -57,12 +62,15 @@ pub fn run(args: &[String]) -> i32 {
         "target" => target_cmd(&positional),
         "artifact" => artifact_cmd(&positional, &rest),
         "clean" => clean_cmd(flag("--cache")),
-        "run" | "test" | "bench" | "doc" | "lib" | "ifbc" | "ingest" | "conformance" | "lsp" | "pack" | "unpack" | "install" | "sumdb" | "database" => {
+        "run" => run_cmd(&positional, &rest),
+        "test" | "bench" | "doc" | "lib" | "ifbc" | "ingest" | "conformance" | "lsp" | "pack" | "unpack" | "install" | "sumdb" | "database" => {
             eprintln!(
-                "notice: `infy {cmd}` is not implemented in this build — it needs code generation \
-                 (stage [8]) and the artifact writer (stage [9]), which are still open work items. \
-                 See docs/status.md. Front-end commands (check, fmt, expand, init, mod tidy, \
-                 toolchain, target, artifact info) are available."
+                "notice: `infy {cmd}` is not implemented in this build — stages [7]-[9] are wired \
+                 (`infy build`, `infy run`), but this command still needs its own stage: `test` = \
+                 the §5.9 `#[test]` harness (BACKLOG C5), `ifbc`/`ingest` = the B-track bytecode \
+                 path (D1/D2), `doc`/`lib`/`conformance`/`lsp`/… = see docs/status.md. Commands \
+                that do work: check, build, run, fmt, expand, init, mod tidy, toolchain, target, \
+                 artifact info."
             );
             exit::GENERIC
         }
@@ -84,7 +92,7 @@ fn usage() -> String {
         ("init <module-path>", "scaffold a module + MODULE.infy.toml (§5.2)"),
         ("check [--strict] [--diag-json f] [--deadlock]", "stages [1]-[5], emits no code, needs no cc (§9.4)"),
         ("build [--target T] [--cc P] [--reproducible] [--verify-reproducible]", "stages [1]-[9]: codegen, link, §7.4 container"),
-        ("run [mod]", "executes the §7.4 artifact — not wired up yet"),
+        ("run [mod] [--target T] [--cc P]", "stages [1]-[9] into a temporary directory, then executes the artifact (§13.4)"),
         ("fmt [-w] [--check]", "official formatting, byte-unique (§9.5)"),
         ("expand [--macro name] [--stage all|macro|derive]", "auditable macro/derive output (§6.8)"),
         ("mod tidy|why|verify|upgrade|vendor", "dependency resolution, MVS (§5.7)"),
@@ -389,12 +397,15 @@ fn init(positional: &[String]) -> i32 {
     exit::OK
 }
 
-fn check(positional: &[String], rest: &[String], building: bool) -> i32 {
+/// Stages [1]-[5] (§7.1) plus the §9.2 report: shared by `infy check`, `infy build` and
+/// `infy run` so all three agree on what a module is and on the exit code the diagnostics give.
+/// `Err(code)` is the exit code the caller must return without proceeding.
+fn frontend(positional: &[String], rest: &[String]) -> Result<(Loaded, sema::Program, String, i32), i32> {
     let root = match pkg_root(positional) {
         Some(r) => r,
         None => {
             eprintln!("error: 找不到 {}——先 infy init <module-path>，或在 module 目录内运行（§5.1）", pkg::MANIFEST_NAME);
-            return exit::GENERIC;
+            return Err(exit::GENERIC);
         }
     };
     let mut handler = Handler::default();
@@ -406,7 +417,7 @@ fn check(positional: &[String], rest: &[String], building: bool) -> i32 {
         None => {
             let text = handler.render(&handler_empty_sources(&root));
             eprint!("{text}");
-            return exit::DIAGNOSED;
+            return Err(exit::DIAGNOSED);
         }
     };
     if rest.contains(&"--lenient".to_string()) {
@@ -419,11 +430,19 @@ fn check(positional: &[String], rest: &[String], building: bool) -> i32 {
         let json = l.handler.render_json(&l.sources, &crate::VERSION);
         if let Err(e) = std::fs::write(out, json) {
             eprintln!("error: 无法写 {out}: {e}");
-            return exit::PERMISSION;
+            return Err(exit::PERMISSION);
         }
     }
     let summary = l.handler.summary();
     let code = l.handler.exit_code();
+    Ok((l, prog, summary, code))
+}
+
+fn check(positional: &[String], rest: &[String], building: bool) -> i32 {
+    let (l, prog, summary, code) = match frontend(positional, rest) {
+        Ok(x) => x,
+        Err(c) => return c,
+    };
     if code == exit::OK {
         println!("check ok — {} file(s), {}", l.files.len(), summary);
     } else {
@@ -437,6 +456,110 @@ fn check(positional: &[String], rest: &[String], building: bool) -> i32 {
         return code;
     }
     code
+}
+
+/// §13.4 `infy run`: what the executed program produced, kept byte-exact so a test can assert on
+/// it (`code` is the §13.4 exit code `infy run` itself returns).
+#[derive(Debug)]
+pub struct RunOutcome {
+    pub code: i32,
+    pub exe: PathBuf,
+    pub program_stdout: Vec<u8>,
+    pub program_stderr: Vec<u8>,
+}
+
+/// §13.4: `infy run` = build to a temporary directory, then execute. The stages are the same
+/// [1]-[5] + [7]-[9] that `infy build` runs; only the output directory and the execution differ.
+fn run_module(positional: &[String], rest: &[String]) -> RunOutcome {
+    for f in ["--arg", "--feature"] {
+        if rest.iter().any(|a| a == f) {
+            eprintln!(
+                "error: `infy run {f}` 未实现：§13.4 列了这两个开关，但 {f} 在当前实现里没有任何消费者 \
+                 （`env` 的字段集合 §4.6 是封闭的、不含参数；`[features]` 也没有从命令行接进 §2.2 的约束求值）。\
+                 拒绝而不是静默忽略 —— 见 docs/BACKLOG.md F19。"
+            );
+            return RunOutcome { code: exit::GENERIC, exe: PathBuf::new(), program_stdout: Vec::new(), program_stderr: Vec::new() };
+        }
+    }
+    let (l, prog, summary, diag_code) = match frontend(positional, rest) {
+        Ok(x) => x,
+        Err(c) => return RunOutcome { code: c, exe: PathBuf::new(), program_stdout: Vec::new(), program_stderr: Vec::new() },
+    };
+    if diag_code != exit::OK {
+        println!("check FAILED — {summary}");
+        eprintln!("error: `infy run` 中止于阶段 [1]-[5]：诊断里有阻断项（§7.1）");
+        return RunOutcome { code: diag_code, exe: PathBuf::new(), program_stdout: Vec::new(), program_stderr: Vec::new() };
+    }
+    println!("check ok — {} file(s), {}", l.files.len(), summary);
+
+    let triple = flag_value(rest, "--target").unwrap_or_else(host_triple);
+    let stem = l.manifest.module_path.rsplit('/').next().unwrap_or("crate").to_string();
+    let seq = RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let work = std::env::temp_dir().join(format!("infy-run-{}-{seq}", std::process::id()));
+    if let Err(e) = std::fs::create_dir_all(&work) {
+        eprintln!("error: 无法创建临时构建目录 {}: {e}（§13.4 退出码 4：缓存/写入错误）", work.display());
+        return RunOutcome { code: exit::PERMISSION, exe: PathBuf::new(), program_stdout: Vec::new(), program_stderr: Vec::new() };
+    }
+    let mut build_args = rest.to_vec();
+    build_args.push("--out".to_string());
+    build_args.push(work.join(format!("{stem}.c")).to_string_lossy().into_owned());
+    // `--verify-reproducible` is a build-time audit, not something `run` promises; two extra
+    // link passes would only slow the dev loop down.
+    build_args.retain(|a| a != "--verify-reproducible");
+    let code = build_c(&l, &prog, &build_args);
+    let exe = work.join(host_file_name(&stem, &triple));
+    if code != exit::OK {
+        return RunOutcome { code, exe, program_stdout: Vec::new(), program_stderr: Vec::new() };
+    }
+    let out = match std::process::Command::new(&exe).output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("error: 产物 {} 无法启动：{e}（§13.4 退出码 6：工具链/链接一类）", exe.display());
+            let _ = std::fs::remove_dir_all(&work);
+            return RunOutcome { code: exit::TOOLCHAIN, exe, program_stdout: Vec::new(), program_stderr: Vec::new() };
+        }
+    };
+    let _ = std::fs::remove_dir_all(&work);
+    // §13.4: 3 = runtime panic, and `infy_runtime_start` returns exactly that for a failed focus.
+    // A child that died from a signal has no exit code; it is a runtime failure, so 3 as well
+    // (the spec has no separate code — recorded in docs/spec-deviations.md D-35).
+    let code = match out.status.code() {
+        Some(c) => c,
+        None => {
+            eprintln!("error: 程序被信号/异常终止（无退出码），按 §13.4 记为 3");
+            exit::RUNTIME
+        }
+    };
+    RunOutcome { code, exe, program_stdout: out.stdout, program_stderr: out.stderr }
+}
+
+fn run_cmd(positional: &[String], rest: &[String]) -> i32 {
+    let out = run_module(positional, rest);
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut so = stdout.lock();
+    let _ = so.write_all(&out.program_stdout);
+    let _ = so.flush();
+    let stderr = std::io::stderr();
+    let mut se = stderr.lock();
+    let _ = se.write_all(&out.program_stderr);
+    let _ = se.flush();
+    drop(se);
+    if out.code == exit::OK {
+        eprintln!(
+            "run ok — 程序退出码 0（stdout {} 字节 / stderr {} 字节，§13.4）",
+            out.program_stdout.len(),
+            out.program_stderr.len()
+        );
+    } else if out.program_stderr.is_empty() && out.exe.as_os_str().is_empty() {
+        eprintln!("run FAILED — 退出码 {}", out.code);
+    } else {
+        eprintln!(
+            "run FAILED — 程序退出码 {}（§13.4：3 = 运行时 panic）",
+            out.code
+        );
+    }
+    out.code
 }
 
 /// Stages [7], [8] and [9] of §7.1: lower to HIR, emit C11, write it under `.infy-build/`, then
@@ -1272,6 +1395,14 @@ mod tests {
         v
     }
 
+    /// The C4 acceptance strings, read off the real processes in docs/RUNLOG.md cron-10 rather
+    /// than written first. `infy run` forwards the program's streams byte-for-byte; the panic
+    /// report line is §9.2's own bytes as `infy_rt.c` renders them.
+    const TOUR_EXPECTED_STDOUT: &str = "";
+    const TOUR_EXPECTED_STDERR: &str = "";
+    const PANIC_EXPECTED_STDOUT: &str = "";
+    const PANIC_EXPECTED_LINE: &str = "runtime[R-0001]: 整数溢出（`overflow=panic`）";
+
     #[test]
     fn version_banner_lists_lang_tool_ifabi_ifbc() {
         let b = crate::VERSION.banner();
@@ -1290,7 +1421,73 @@ mod tests {
         // no fake success: §13.4 exit 1 = generic failure, and the message names the missing stage
         assert_eq!(run(&argv(&["build"])), exit::GENERIC);
         assert_eq!(run(&argv(&["test"])), exit::GENERIC);
+        assert_eq!(run(&argv(&["doc"])), exit::GENERIC);
     }
+
+    /// §13.4: `--arg K=V` and `--feature f` are listed for `infy run` but have no consumer in this
+    /// implementation (`env` is a closed field set without arguments, §4.6, and `[features]` never
+    /// reaches §2.2 constraint evaluation from the command line). They must fail loudly, not be
+    /// ignored — the check runs before the front end, so this costs no compiler.
+    #[test]
+    fn run_refuses_flags_it_cannot_honour() {
+        assert_eq!(run(&argv(&["run", "--arg", "K=V", "examples/tour"])), exit::GENERIC);
+        assert_eq!(run(&argv(&["run", "--feature", "gpu", "examples/tour"])), exit::GENERIC);
+    }
+
+    /// §13.4 + §7.4 + §8.2: `infy run examples/tour` runs stages [1]-[9] into a temporary
+    /// directory, executes the artifact, and the chain *terminates* — `goto("done")` in node 3's
+    /// linkage block moves the focus, so the `goto(+1)` after it never overwrites the target.
+    /// Exit 0 (§13.4: success). These three constants are the expected strings the C4 acceptance
+    /// asks for; they were read off the real process output (docs/RUNLOG.md cron-10).
+    ///
+    /// `TOUR_EXPECTED_STDOUT` is empty because **no INFY construct in the codegen subset can write
+    /// to stdout yet** — §14.3's tour prints nothing and §7.7.1 item 4 sends B-track `print()` to
+    /// the log sink, not to stdout (registered as BACKLOG F19, not hidden). The byte-exact
+    /// *forwarding* is pinned by the panic test below. Empty stderr is itself an assertion here:
+    /// a container the runtime cannot read prints `artifact rejected: …` / `runtime: no INFY
+    /// artifact container …` (§7.4), so this pins "the profile came from `.inf meta`".
+    #[test]
+    fn run_executes_the_tour_and_exits_zero() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples").join("tour");
+        let p = root.to_string_lossy().to_string();
+        let out = run_module(&[p], &[]);
+        assert_eq!(out.code, exit::OK, "infy run examples/tour: {:?}", String::from_utf8_lossy(&out.program_stderr));
+        assert_eq!(String::from_utf8_lossy(&out.program_stdout), TOUR_EXPECTED_STDOUT);
+        assert_eq!(String::from_utf8_lossy(&out.program_stderr), TOUR_EXPECTED_STDERR);
+    }
+
+    /// §13.4 exit code 3 = runtime panic, and the report is the §9.2 bytes. `overflow = "panic"`
+    /// (§4.4 / UB-003) turns `u32::MAX + 1` in a chain node into `R-0001`; the focus fails, so
+    /// `infy_sched_run_until_idle` returns 3 and `infy run` forwards it. A missing `cc` makes the
+    /// build step fail this test instead of silently skipping it.
+    #[test]
+    fn run_forwards_the_program_streams_and_a_runtime_panic_maps_to_exit_3() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("scratch")
+            .join("cli-run-boom");
+        std::fs::create_dir_all(dir.join("cmd").join("boom")).expect("scratch module dir");
+        std::fs::write(
+            dir.join(pkg::MANIFEST_NAME),
+            "[module]\npath    = \"example/boom\"\nversion = \"0.1.0\"\ninfy    = \"2.0\"\n\n\
+             [profile]\noverflow = \"panic\"\nopt_level = 0\n\n[[bin]]\nname = \"boomer\"\npath = \"cmd/boom\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.join("cmd").join("boom").join("main.infy"),
+            "#![entry_chain = \"Boom\"]\n\npackage boom\n\nchain Boom {\n    tick();\n}\n\n\
+             fn tick() -> u32 {\n    let a: u32 = 4294967295u32;\n    a + 1u32\n}\n",
+        )
+        .expect("source");
+        let out = run_module(&[dir.to_string_lossy().to_string()], &[]);
+        let err = String::from_utf8_lossy(&out.program_stderr).replace("\r\n", "\n");
+        assert_eq!(out.code, exit::RUNTIME, "stderr was: {err}");
+        assert_eq!(String::from_utf8_lossy(&out.program_stdout), PANIC_EXPECTED_STDOUT);
+        assert!(err.starts_with(PANIC_EXPECTED_LINE), "first §9.2 line must be the panic report: {err}");
+        assert!(err.contains("infy_add_u32 overflowed"), "the note names the operation: {err}");
+        assert!(err.contains("(node_idx 0)"), "§12.4: the report carries the node: {err}");
+    }
+
 
     #[test]
     fn internal_visibility_rule_matches_the_spec_example() {

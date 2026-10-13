@@ -36,16 +36,29 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 391 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 395 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
 Finished `dev` profile  (51 warnings，全部为 unused/dead code，见 BACKLOG F2)
 $ infy check examples/tour
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)   # exit 0
 $ infy build examples/tour
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)
-codegen ok — 12473 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
+codegen ok — 12513 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
 artifact ok — 199975 byte(s) 写到 examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe（§7.4：宿主镜像 199173 + 段 blob 738 + 段尾 64，6 段）
   build-id 4d8250b58122ca2b76132029955e2d2005156dc0a6b021bf5f4ae761e5fd55ba   # exit 0（C3 轮起阶段 [9] 已落地）
+$ infy run examples/tour                                        # C4 轮起：[7]-[9] 建到临时目录 + 立即执行
+check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)
+codegen ok — 12513 byte(s) of C11 written to %TEMP%\infy-run-<pid>-<n>\ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
+artifact ok — 199975 byte(s) 写到 %TEMP%\infy-run-<pid>-<n>\ci.exe（…）       # 程序的 stdout/stderr 逐字节转发
+run ok — 程序退出码 0（stdout 0 字节 / stderr 0 字节，§13.4）                  # 这行在 stderr
+$ echo $?
+0                                                                # 程序 stdout 为空的原因见 BACKLOG F19：没有任何 INFY 构造能写 stdout
+$ infy run <overflow="panic" 的 u32::MAX+1 module>               # 同一命令，程序里发生 panic
+runtime[R-0001]: 整数溢出（`overflow=panic`）                     # §9.2 报告逐字节转发在 stderr
+  = note: infy_add_u32 overflowed (§4.4: overflow="panic", §4.9 UB-003)
+run FAILED — 程序退出码 3（§13.4：3 = 运行时 panic）
+$ echo $?
+3                                                                # §13.4 的 3；两条都由 cli::tests 断言
 $ infy build examples/tour --verify-reproducible
 verify-reproducible ok — 两个独立构建目录产物字节相同（199975 字节）            # exit 0，§7.3 第 3 项
 $ infy build examples/tour --cc /no/such/cc
@@ -70,17 +83,17 @@ $ (cd examples/tour && infy fmt --check)
 2 file(s) are not canonical                        # exit 2，见下文"导览源码不是格式化不动点"
 ```
 
-391 项按模块（`cargo test --offline --lib -- --list` 分组计数，合计 391）：
-`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `codegen` 18 · `artifact` **18** · `sema` 22 ·
-`pkg` 19 · `hir` 20 · `toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `parser` 8 · `base64` 7 ·
-`ifbc` 6 · `cli` **6** · `stdlib` 4 · `diag` 2。
+395 项按模块（`cargo test --offline --lib -- --list` 分组计数，合计 395）：
+`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `codegen` **19** · `artifact` 18 · `sema` 22 ·
+`pkg` 19 · `hir` 20 · `toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `cli` **9** · `parser` 8 · `base64` 7 ·
+`ifbc` 6 · `stdlib` 4 · `diag` 2。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
   借用检查（`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006`/`E-0121` 正反例）、哈希与 base64 与 TOML 往返、
   `infy` CLI 自身、IFBC Rust 侧编码/解码/反汇编：都有上表的测试。
 - **仍没有一项独立单测**：`btrack.rs`（§7.7 B 轨）。它的证据目前只有"对 `examples/tour` 跑完 §7.1 阶段 [1]–[5] 且 exit 0"这一条端到端。
-  `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成有 18 项独立单测的模块，`hir.rs` 的 20 项锁阶段 [7]，
+  `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成独立单测模块（C4 轮 **19** 项，新增的是 `goto` 必须转移控制那条例），`hir.rs` 的 20 项锁阶段 [7]，
   `artifact.rs`（§7.1 阶段 [9] / §7.3 / §7.4）在 C3 轮新建并直接带 18 项单测 + 一份被 C 侧读取器消费的逐字节夹具。
 - 先前记为"§9.2 字节级金样"实际是 1 条规范样例逐字节 + 1 条 caret 行规则（`diag` 2 项）；
   `goto` 的三条 `E-0301` 越界路径与 `E-0121` 在 A4 轮之前无测试（**A4 轮已补**，见下）。
@@ -89,7 +102,8 @@ $ (cd examples/tour && infy fmt --check)
 `infy build` **自 C3 轮起跑完 §7.1 阶段 [1]–[9]**：前端 → HIR → C11 → 用 A 轨 `cc` 链成宿主镜像 →
 追加 §7.4 段容器与 64 字节段尾，`infy artifact info` 读得回自己刚产出的文件（P4/P13/P14），故 exit **0**。
 阶段 [10]（sumdb 校验与运行时自校验比对）仍**未做**，`.inf sum` 只是把 `MODULE.infy.lock` 的 dirhash 清单抄进容器；
-`run`/`test`/`doc`/`lib pack`/`ifbc dump`/`conformance` 仍显式报"未实现"（exit 1）；
+`test`/`doc`/`lib pack`/`ifbc dump`/`conformance` 仍显式报"未实现"（exit 1）；**`run` 自 C4 轮起真执行**（§13.4 的
+开发态 = [7]-[9] 建到临时目录 + 立即执行，退出码按 §13.4，见下文 C4 一节）；
 B 轨 lowering(`src/btrack.rs`) 尚未收敛；C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（C3 轮复跑 **32335 断言 / 0 失败**，直接链生产 `infy_rt.c`）；
 `src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs` 是 1 行占位文件（`src/artifact.rs` 已于 C3 轮从"不存在"落成 §7.4 容器写入器 + 读取器 + §7.3 build-id，18 项独立单测）（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
 A 轨绑定、`std.net` TLS、`infy lsp` 未实现。
@@ -378,10 +392,48 @@ tour 无依赖 → 实例上是 0 条）；`ResourceKeys`/`EnvOffsets` 区写空
 `infy artifact dump --nodes`/`diff` 的其余形态；C 侧 `infy_art_dump_meta` 那行 `meta off=0 len=0` 是**写死的显示值**
 （不是容器内容错，是打印错），本轮未改，登记在 RUNLOG 下一步。
 
+## C4 · `infy run`：第一次真执行，并修掉一条只在执行时才现形的控制流缺陷（本轮）
+
+`cli.rs` 的 `frontend()`（阶段 [1]-[5]）现在被 `check`/`build`/`run` 三条命令共用；
+`run_module()` 把 [7]-[9] 建进临时目录（`%TEMP%/infy-run-<pid>-<n>/`，跑完即删）后执行产物，
+`RunOutcome{code, exe, program_stdout, program_stderr}` 是被测试直接断言的那层（`run_cmd()` 只负责把
+程序的两条流用 `write_all` **逐字节**转发到自己的 stdout/stderr，`run ok`/`run FAILED` 状态行在 stderr，
+构建信息仍按 `infy build` 的原样在 stdout —— §13.4 没规定这个分流，选定实现记 **D-35(a)**）。
+
+**退出码（§13.4）**：程序正常退出 → 原样转发（INFY 产物的 `main` 只会给 0 或 `infy_runtime_start` 的 3）；
+无退出码（信号/异常终止）→ 记 3；产物启动失败 → 6；临时目录创建失败 → 4。规范没有"异常终止"这一档，
+不新造数字，见 **D-35(b)**。
+
+**修掉的真实缺陷（D-34）**：`examples/tour` 的产物**第一次执行就挂住**（120 秒无输出、被强杀），
+而 `infy check`/`infy build`/`infy artifact info` 全部是绿的 —— 这条路径此前从未被执行过。根因：
+§8.2"`goto` 语义（移动焦点，暂停当前节点之后）"被实现成"只登记 `pending_node`、节点照常跑完"，
+于是 §14.3 导览节点 3 的连携块 `if (all_green()) { goto("done"); } goto(+1);` 里两条 `goto` 都执行，
+`pending_node` 先写 5 再被 `+1` 覆盖成 4 → `retry_once()` → `{ goto("begin"); }` → 回节点 0 **无限循环**。
+裁决 = 第一个 `goto` **立即结束该节点**：发射 `infy_goto_checked(...); drain_pops(); return;`，
+`drain_pops()` 保住 §8.4 规则 4"defer/临时量 drop 计入该节点的退出动作集"。运行时 `infy_goto_checked`
+与 §4.9 UB-013 的 `R-0010` 兜底都不动，**C 侧零改动**（四条链仍按纪律复跑：`-c infy_rt.c` 0 告警、
+rt 32335/0、两条 IFBC 82/82 且 stdout `cmp` 相同）。生成的 C11 因此从 12473 → **12513 字节**，
+产物仍是 199975 字节、build-id 不变（build-id 的输入集合不含生成的 C，§7.3）。
+
+**取证手法**：`goto` 的三条目标常量原本已有断言（`goto_targets_are_resolved_at_compile_time`），
+绿而程序死循环 —— 缺的是**次序**断言。新测试 `codegen::tests::the_first_goto_in_a_node_ends_it`
+在节点 3 的函数体里要求 `goto("done")` < `return;` < `goto(+1)`；`cli::tests::run_executes_the_tour_and_exits_zero`
+真执行、真退出码；`cli::tests::run_forwards_the_program_streams_and_a_runtime_panic_maps_to_exit_3`
+用 `overflow="panic"` 的 `u32::MAX + 1` 造运行时 panic，逐字节断言 §9.2 首行 `runtime[R-0001]: 整数溢出（…）`
+并断言退出码 3。
+
+**明确未做**（不用假成功掩盖）：程序的 **stdout 对现有一切实例恒为 0 字节** —— codegen 的子集里没有任何构造能写
+stdout，§7.7.1 第 4 项又把 B 轨 `print()` 判给日志汇（`infy_log` → stderr），登记 **F19**；
+`--arg K=V` / `--feature f` 没有任何消费者 → **显式 exit 1**（`cli::tests::run_refuses_flags_it_cannot_honour`，
+见 D-35(c) 与 F19(b)），没有静默忽略；`infy run` 不向程序传 argv（§13.4 未定义该通道）；
+运行时按 §9.2 尝试读源行时用的是 module 相对路径，CWD 不在 module 根就恒打 `<source unavailable>` → **F20**；
+`#[test]` 的执行 = C5。
+
 ## 仍未实现
 
-`run`/`test`/`doc`/`lib pack`/`ifbc dump`/`conformance`/`lsp`（exit 1）目前明确返回"未实现"而不是假成功
-（`infy build` 自 C3 轮起 exit **0**：阶段 [1]–[9] 全通，产物容器可被 `infy artifact info` 与 C 侧运行时读回）；
+`test`/`doc`/`lib pack`/`ifbc dump`/`conformance`/`lsp`（exit 1）目前明确返回"未实现"而不是假成功
+（`infy build` 自 C3 轮起 exit **0**：阶段 [1]–[9] 全通，产物容器可被 `infy artifact info` 与 C 侧运行时读回；
+**`infy run` 自 C4 轮起 exit **0/3** 真执行**，见上文 C4 一节）；
 A 轨绑定生成（`src/atrack.rs`）、§11 `HostApi`（`src/host.rs`）、§12 合规用例集（`src/conformance.rs`）、
 `infy doc`（`src/doc.rs`）同样未实现 —— 这四个文件当前是 1 行占位。
 HIR（`src/hir.rs`）于 C1 轮落成**声明层**；**语句/表达式级 IFIR 仍没有独立表示**（C2 是 AST→C 直接发射），

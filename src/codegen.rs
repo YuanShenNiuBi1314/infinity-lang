@@ -1959,6 +1959,13 @@ impl<'a> Cg<'a> {
                     target,
                     at
                 ));
+                // §8.2: `goto` *moves* the focus, so it ends the node — the statements after it in
+                // the same linkage block do not run. Setting the pending node and falling through
+                // lets a later `goto` overwrite it, and `if (all_green()) { goto("done"); }
+                // goto(+1);` from the §14 tour then always took `+1`: the chain never ended.
+                // The node's exit action set (§8.4 rule 4) still runs, hence `drain_pops`.
+                self.drain_pops();
+                self.b("return;");
                 Ok(())
             }
             LinkageStmt::Start { chain, node, .. } => {
@@ -3942,6 +3949,28 @@ mod tests {
         assert!(t.contains("infy_goto_checked(0u, 4u,"), "goto(+1) from node 3");
         assert!(t.contains("infy_goto_checked(0u, 0u,"), "goto(\"begin\")");
         assert!(!t.contains("goto(+1)"), "no source text may survive into the C");
+    }
+
+    /// §8.2 `goto` 语义（**移动**焦点）: the first `goto` of a node ends that node, so a later
+    /// `goto` in the same linkage block cannot overwrite the pending target. `if (all_green()) {
+    /// goto("done"); } goto(+1);` is the §14 tour's own shape, and with fall-through the `+1`
+    /// always won: `Pipeline` re-ran node 0 forever and `infy run` never returned (first execution
+    /// of a built artifact, 2026-10-13 — see docs/RUNLOG.md cron-10).
+    #[test]
+    fn the_first_goto_in_a_node_ends_it() {
+        let t = tour_text();
+        let body = t
+            .split("Pipeline_node_3(void* frame_) {")
+            .nth(1)
+            .and_then(|s| s.split("Pipeline_node_4(").next())
+            .expect("node 3 body");
+        let goto_done = body.find("infy_goto_checked(0u, 5u,").expect("goto(\"done\") is emitted");
+        let transferred = body.find("return;").expect("the goto must transfer control");
+        let goto_rel = body.find("infy_goto_checked(0u, 4u,").expect("goto(+1) is still emitted");
+        assert!(
+            goto_done < transferred && transferred < goto_rel,
+            "node 3 has to leave at the first goto, got: {body}"
+        );
     }
 
     // ------------------------------------------------------------ §4.9 / §7.2 checks are never off

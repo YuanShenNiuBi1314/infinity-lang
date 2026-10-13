@@ -6,19 +6,21 @@
 四个模块的占位注释也指向这里（`src/hir.rs` 于 C1 轮从占位落成声明层 IR、`src/codegen.rs` 于 C2 轮落成
 阶段 [8] 的 C11 发射，证据分别是 §3 的 stage [7] 与 stage [8] 两行）。
 
-## 1. 证据命令（2026-10-13 B1 轮起逐轮复跑，主树非隔离副本；P11 于 B2 轮改判，P1/P2/P4/P9/P10/P11/P12 于 C3 轮逐条复跑）
+## 1. 证据命令（2026-10-13 B1 轮起逐轮复跑，主树非隔离副本；P11 于 B2 轮改判，P1/P2/P4/P9/P10/P11/P12 于 C3 轮逐条复跑，**C4 轮复跑 P1-P4/P9-P15/P16 并新增 P16/P17**）
 
 | # | 命令 | 输出里的数字 | exit |
 | --- | --- | --- | --- |
-| P1 | `cargo test --offline --lib` | `391 passed; 0 failed; 0 ignored`（C3 轮 +18 `artifact` +1 `cli`；基线 372） | 0 |
+| P1 | `cargo test --offline --lib` | `395 passed; 0 failed; 0 ignored`（C4 轮 +1 `codegen` +3 `cli`；基线 391） | 0 |
 | P2 | `cargo check --offline --lib` | 0 error、`51 warnings`（全部 unused/dead code，BACKLOG F2） | 0 |
 | P3 | `infy check examples/tour` | `check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)` | 0 |
-| P4 | `infy build examples/tour` | 先打 P3 那行，再打 `codegen ok — 12473 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))`，再打 `artifact ok — 199975 byte(s) 写到 …\ci.exe（§7.4：宿主镜像 199173 + 段 blob 738 + 段尾 64，6 段）` + `build-id 4d8250b5…55ba`。**C3 轮起阶段 [9] 已落地，不再有"尚未实现"的 notice** | 0 |
+| P4 | `infy build examples/tour` | 先打 P3 那行，再打 `codegen ok — 12513 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))`（C4 轮起从 12473 变来：`goto` 要 `return` 才能转移控制，偏差 D-34），再打 `artifact ok — 199975 byte(s) 写到 …\ci.exe（§7.4：宿主镜像 199173 + 段 blob 738 + 段尾 64，6 段）` + `build-id 4d8250b5…55ba`。**C3 轮起阶段 [9] 已落地，不再有"尚未实现"的 notice** | 0 |
 | P13 | `infy build examples/tour --verify-reproducible` | `verify-reproducible ok — 两个独立构建目录产物字节相同（199975 字节）`（§7.3 第 3 项；不一致时打 `E-0603 · 首个差异在偏移 N（…段名…）` 并 exit 7） | 0 |
 | P14 | `infy artifact info examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe --nodes` | `.inf meta` 全字段读回：`ifabi 2 / opt_level 2 / usize_bits 64 / iter_guard_steps 4294967296 / target x86_64-pc-windows-gnu / source_toolchain gcc 16.2.0 / n_nodes 6 / entry chain 'Pipeline'`，节点表 6 行 = `cmd/runner/main.infy` 的 8/9/10/11/16/19（gate 与 retry_once 各 1 个连携块，锚点 begin=0·done=5，与 C1 金样一致） | 0 |
 | P15 | `infy build examples/tour --cc /no/such/cc` | `error: E-0602 · … 无法启动 …（§7.6.2：A 轨工具链缺失或未注册，绝不静默跳过链接）`——缺编译器是**报错**不是"跳过链接后假装成功" | 6 |
 | P12 | `gcc -std=c11 -Wall -Wextra -I runtime -c examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c -o ci.o` | **0 error / 0 warning**（无输出），产出 5723 字节 .o；这就是 BACKLOG C2 的验收命令。生成的 C 自带 `sizeof`/`_Alignof`/`offsetof` 断言，所以这条命令同时复核了阶段 [7] 的布局表 | 0 |
-| P5 | `infy run` / `test` / `doc` / `ifbc` / `conformance` / `lsp` / `lib` | `notice: infy <cmd> is not implemented in this build` | 1 |
+| P5 | `infy test` / `doc` / `ifbc` / `conformance` / `lsp` / `lib` | `notice: infy <cmd> is not implemented in this build`（`run` 自 C4 轮起不在此列，见 P16/P17） | 1 |
+| P16 | `infy run examples/tour` | 构建信息按 P4 原样在 stdout，然后**执行**产物并逐字节转发其流：程序 stdout **0 字节** / stderr **0 字节**，`run ok — 程序退出码 0（stdout 0 字节 / stderr 0 字节，§13.4）` 在 stderr。**链真的结束了**（D-34 之前它会无限循环）；stderr 为空同时钉住"容器被 `infy_art_self` 读到、策略取自 `.inf meta`"（读不到会打 `artifact rejected: …` 或 `runtime: no INFY artifact container …`）。程序 stdout 为空是因为**没有任何 INFY 构造能写 stdout**（F19），不是转发没接上 | 0 |
+| P17 | `infy run <overflow="panic" 的 u32::MAX+1 module>` | §9.2 的运行时报告逐字节转发在 stderr：首行 `runtime[R-0001]: 整数溢出（\`overflow=panic\`）`，含 `infy_add_u32 overflowed (§4.4: overflow="panic", §4.9 UB-003)` 与 `(node_idx 0)`；`run FAILED — 程序退出码 3（§13.4：3 = 运行时 panic）`。锁定点 = `cli::tests::run_forwards_the_program_streams_and_a_runtime_panic_maps_to_exit_3`，`--arg`/`--feature` 的显式拒绝 = `cli::tests::run_refuses_flags_it_cannot_honour`（exit 1） | 3 |
 | P6 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/test_ifbc.c runtime/test_ifbc_stubs.c -o ifbc_tests && ./ifbc_tests` | `IFBC harness: 82 asserts, 82 pass, 0 FAIL`；**0 编译告警**（B1 轮给 `InfyString` 补了结构标签，原先 4 条 `infy_rt.h:212` 前置引用告警随之消失 = B3 的第 4 项；79 → 82 是 B3 轮为 D-22 裁决新增的一行 `closure.new` 拒绝断言，3 项） | 0 |
 | P9 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && ./rt_tests` | `32335 assertions, 0 failures`，0 error / 0 warning；诊断渲染单独再跑一次为 `rt_render.log` 逐字节比对。**链的是生产 `runtime/infy_rt.c`**，不是替身。C3 轮 +32（基线 32303）：D-33 的 `mode=2`"宿主镜像自带 `INFYART2` 字面量仍须可读"5 项，
 加用生产读取器 `infy_art_read_file` 读回 **Rust 写入器**逐字节夹具

@@ -372,3 +372,60 @@ NUL（只有跨 A 轨边界才是 `R-0003`/UB-007）。若后端照发 `infy_str
 读回成功；段尾再附一次 → `DuplicateMagic`；节点名叫 `INFYART2` → 写入端 `BlobCarriesMagic`）+
 `runtime/test_rt.c` 的 `build_artifact(..., mode=2)` 那条（宿主镜像含魔数的容器 `infy_art_read_file`
 返回 0，且 `n_nodes`/`opt_level` 仍对）。
+
+## D-34 §8.2 的"`goto` 语义（移动焦点，暂停当前节点之后）"括号有歧义：裁为**第一个 `goto` 立即结束该节点**
+
+§8.2 只给了七个字的括号说明"（移动焦点，暂停当前节点之后）"。它有两种读法：
+
+1. **移动焦点 = 转移控制**：`goto` 之后的同节点语句不再执行，节点在 `goto` 处结束，"暂停当前节点
+   之后"说的是*推进*这个动作发生在节点边界（§8.5 抢占点 ①"节点边界（`node_idx += 1` 前）"）。
+2. **只登记目标、节点照常跑完**：一个节点里多条 `goto` 以**最后一条**为准。
+
+读法 2 让 §14.3 的导览**永不终止**：节点 3 的连携块是
+`if (build::all_green()) { goto("done"); } goto(+1);`，两条都会执行，`pending_node` 先写 5 再被
+`+1` 覆盖成 4 → `retry_once()` → `{ goto("begin"); }` → 回到节点 0 无限循环。C4 轮第一次真执行
+`examples/tour` 的产物时现场撞上（进程挂住 120 s 无输出、被强杀），而 `infy check`/`infy build`/
+`infy artifact info` 全都是绿的 —— 这条路径此前从未被执行过。
+
+**选定实现 = 读法 1**。依据：§8.2 的措辞是"**移动**焦点"（与 `start` 的"不移动焦点"成对反义），
+§8.4 规则 3 说"焦点推进只看节点编号"，而 §14.3 把 `goto(+1)` 写在条件 `goto` 之后正是"否则顺延一个
+节点"的惯用写法 —— 按读法 2 这个规范样例自己就是死循环。
+
+发射形态：`infy_goto_checked(chain, target, loc);` 之后 `drain_pops(); return;`，即节点函数在此离开。
+先 `drain_pops()` 是为了保住 §8.4 规则 4"defer、临时量 drop 计入该节点的**退出动作集**"——提前离开
+节点不等于跳过该节点的 drop。`infy_goto_checked` 自身不变（它只写 `pending_node`），因此运行时侧
+无需改动，也保持了 §4.9 UB-013 的 `R-0010` 兜底路径。
+
+**锁定点** = `codegen::tests::the_first_goto_in_a_node_ends_it`（断言 `goto("done")` → `return;` →
+`goto(+1)` 的**先后次序**，而不是只断言三条 goto 的目标常量存在）与
+`cli::tests::run_executes_the_tour_and_exits_zero`（真执行、真退出码）。
+
+## D-35 §13.4 的 `infy run` 有三处规范没写：自身输出与程序输出怎么分、退出码怎么映射、`--arg`/`--feature` 指向什么
+
+§13.4 只给了一行 `infy run [mod|src.infy] [--arg K=V] [--feature f]  开发态：build 到临时目录 + 立即执行`。
+
+**(a) 输出分流（规范未定）**：`infy build` 的状态行一直打在自己的 stdout 上，而"立即执行"必然让
+被跑程序的 stdout 也进同一个流。选定实现：**阶段 [1]-[9] 的构建信息留在 stdout（与 `infy build`
+逐字相同，不改已有声称），`run` 自己的状态行（`run ok — 程序退出码 0（stdout N 字节 / stderr M 字节）`）
+打 stderr，程序的 stdout/stderr 用 `write_all` **逐字节转发**、不加前缀不改行尾**。这样程序输出仍然是
+可 pipe 的原始字节，而构建噪声与 run 结论都在 stderr 上可分离。
+
+**(b) 退出码映射（§13.4 只定义了 `infy` 自己的 7 档）**：
+- 子进程正常退出 → **原样转发**它的码（INFY 产物的 `main` 只会给 0 或 §13.4 的 3，见 `infy_runtime_start`
+  → `infy_sched_run_until_idle()` 的 `n_failed ? 3 : 0`）；
+- 子进程**没有**退出码（被信号/异常终止）→ 记 **3**。规范没有"异常终止"这一档，3 = 运行时失败是
+  最贴近的既有码，且不新造数字；
+- 产物存在但**启动失败** → **6**（§13.4 的工具链/链接一类）；
+- 临时构建目录创建失败 → **4**（§13.4 的权限/缓存写入错误）。
+
+**(c) `--arg K=V` / `--feature f`：没有任何消费者，显式拒绝（exit 1）而不是静默忽略**。
+`env` 的字段集合在 §4.6 是**封闭**的且不含运行参数（明令"不得新增 `env` 字段"），所以 `--arg` 无处可放；
+`[features]` 虽然有 §2.2 的约束求值（`pkg::constraint_matches` 收 `features` 形参），但 CLI 从来没把
+命令行的 feature 接进 `load()`/`Manifest`，`infy build`/`check` 也不收这两个开关 —— 在 `run` 上单独
+发明一条 feature 通道会造成三命令不一致（同类问题已登记 F5）。按硬约束"不实现的功能必须显式报错"
+处理，登记为 BACKLOG **F19**。
+
+**锁定点** = `cli::tests::run_executes_the_tour_and_exits_zero`（退出码 0 + 程序流逐字节）、
+`cli::tests::run_forwards_the_program_streams_and_a_runtime_panic_maps_to_exit_3`（§13.4 的 3 与
+§9.2 报告首行 `runtime[R-0001]: 整数溢出（\`overflow=panic\`）`）、
+`cli::tests::run_refuses_flags_it_cannot_honour`。
