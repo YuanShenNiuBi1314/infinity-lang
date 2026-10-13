@@ -292,9 +292,10 @@
       **明确未做**（不用假成功掩盖）：`#[test]` 的执行 = C5；程序侧 stdout 没有任何构造可写 = **F19**；
       运行时按 §9.2 尝试读源行时拿的是 module 相对路径，进程 CWD 不在 module 根就必然打
       `<source unavailable>`（本轮 panic 现场实证）= **F20**；`infy run` 不向程序传 argv（§13.4 未定义该通道）。
-      证据提交：见本节末尾的提交号与 RUNLOG cron-10 行（上述 395/0、0/51、run exit 0/exit 3、12513 字节、
-      199975 字节、`--verify-reproducible` 0、`gcc -c` 0/0、四条 C 链（32335/0、82/82×2、`-c` 0 告警）
-      全部为该提交上的实测复跑，非引用）。
+      证据提交：**`7f7a4ce`**（`feat(C4)`）—— 上述 395/0、0/51、run exit 0/exit 3、12513 字节、199975 字节、
+      `--verify-reproducible` 0、`gcc -c` 0/0、四条 C 链（32335/0、82/82×2、`-c` 0 告警）全部为该提交上的
+      实测复跑，非引用。**该提交已推上 `toolchain`**：本轮第 1 次尝试就 exit 0
+      （`96f09b0..7f7a4ce`），`gh api …/refs/heads/toolchain` 回查远端 = 本地 HEAD，现算欠账 **0**。
 - [ ] C5 `infy test`：编 `#[test]` 函数 + 执行 + 退出码（§5.9/§13.4）。
 
 ### 阶段 D：双轨嵌入的真实端到端
@@ -523,6 +524,10 @@
 > `repo` scope ⇒ 不是 token 失效；**没有**改 git 配置、没换凭据、没强推。
 > 下一轮照协议先推一次、失败再试一次即停；`git -c http.version=HTTP/1.1 push origin HEAD:toolchain` 这个变体
 > 本轮没试过（成功之后没必要），留作下次连败时的首个候选。
+> **C4 轮推送结果（本轮现算，别引用旧数）**：**第 1 次尝试就 exit 0**（`96f09b0..7f7a4ce`），
+> `gh api …/refs/heads/toolchain` 回查远端 = 本地 HEAD `7f7a4ce` ⇒ **C4 全量已在 `toolchain` 上，欠账现算 0**
+> （本节的更正行提交后又 = 1，下一轮仍只认现算）。上一轮连败 5 次后第 6、7 次成功 ⇒ 再次印证
+> `github.com:443` 是**间歇**不通而不是坏了：照协议推，不要预先加变体、也不要循环轰炸。
 >
 > 已验证事实（**C4 轮全部复跑，非引用**）：`cargo test --offline --lib` **395 passed / 0 failed**
 > （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `hir` 20 · `pkg` 19 · `codegen` **19** ·
