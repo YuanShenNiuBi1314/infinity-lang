@@ -369,7 +369,7 @@
 > **C1 轮欠账 = 0**：开头两次 `git push origin HEAD:toolchain` 都 exit **128**（`Recv failure: Connection was reset`），
 > 但提交完再推**第一次就 exit 0**（`6fa6dd3..14654c9`），`api.github.com` 回查远端 = 本地 HEAD `14654c9`。
 > 手法仍然适用：`github.com:443` 是**间歇**不通而不是坏了，失败不轰炸、下一轮照协议再推一次即可。
-> **C2 轮当前欠账 = 2**（`2b0fcdb` + cron-08/cron-08-push 两个文档提交）：本轮共尝试三次，**全部失败**，形态各不相同 ——
+> **C2 轮当前欠账 = 3**（`2b0fcdb` + cron-08 行提交 `d0d4459` + 补记第三次尝试的 `a1988f6`，现算 `git rev-list --count a6ac175..HEAD` = 3）：本轮共尝试三次，**全部失败**，形态各不相同 ——
 > `Recv failure: Connection was reset`、`fatal: Authentication failed`、`Failed to connect to github.com:443 after 21076 ms`。
 > 同一时刻 `gh api`（`api.github.com`）回查正常，远端 `toolchain` 仍 = `a6ac175`，所以不是 token 失效就是 `github.com` 侧抖动。
 > 下一轮先补推一次、失败再试一次即停；若又是 `Authentication failed`，先查 `git config credential.helper` 与 `gh auth status` 再决定。
