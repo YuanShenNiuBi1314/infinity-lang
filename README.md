@@ -17,7 +17,7 @@ infy init github.com/me/hello
 infy check            # §7.1 阶段 [1]–[5]，可用；exit 0
 infy fmt --check      # §9.5，可用；文件不是规范写法时 exit 2（需 cd 进 module 或传 .infy 文件）
 infy expand --stage macro   # §6.8，可用（与 fmt 一样：positional 目前只吃文件，目录参数会报"找不到 module 根"，BACKLOG F5）
-infy build            # 跑完前端后停在阶段 [8]：notice + exit 6
+infy build            # 阶段 [1]-[5] + [7] hir + [8] codegen：写出可编译的 C11，仍停在 [9] 链接 → notice + exit 6
 infy run              # 未实现：notice + exit 1
 infy test             # 未实现：notice + exit 1
 infy doc              # 未实现：notice + exit 1
@@ -43,7 +43,7 @@ infy conformance --report   # 未实现：notice + exit 1
 | §5.2/E.2–E.4 | 无依赖 TOML 子集解析 + 稳定输出（`parse→emit→parse` 幂等） | ✅ 15 项 |
 | §6.1–§6.5 / §6.7 | `macro_rules!` 展开与 derive 生成 | ✅ 35 + 57 项 |
 | §9.5 | 格式化十四条规则 | ✅ 39 项 |
-| §10 | `std` 签名表 | 🟡 表有 4 项测试；其消费者 `infy doc`、codegen 映射未实现 |
+| §10 | `std` 签名表 | 🟡 表有 4 项测试；消费者 `infy doc` 未实现，codegen 只发射 §10 里有 `infy_rt.h` 入口的那部分（`Vec`/`String`/`fmt` 的构造入口缺 → 见下） |
 | §1.3 | 领域中立判据（`NFKCCaseFold` 匹配 `domain_terms` 黑名单） | ✅ 4 项 |
 | §8.4 | 节点表编号 | 🟡 7 项（`parser` 编号 1 项 + `sema` 的 `goto` 三条 `E-0301` 越界路径、`start` 链名/锚点、序言不移动编号） |
 | §7.4 / §7.3 | 产物容器：宿主可执行文件 + `INFYART2` 段尾 + `.inf meta/rodata 索引/ifbc/sum`；`build-id` | 🟡 `infy artifact info` 只识别段尾魔数；段写入器与 `.inf meta` 解析都不存在（BACKLOG C3） |
@@ -51,20 +51,26 @@ infy conformance --report   # 未实现：notice + exit 1
 | §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ⬜ `src/host.rs` 是占位文件 —— **未实现**（偏移表本身已由 `src/hir.rs::env_table` 落成并有金样） |
 | 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32303 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 82 断言 B2 轮起也链生产 `infy_rt.c`（同为 82/82，输出逐字节相同）。仍不等于 §12 合规：外部用例为 0，双侧交叉验证受 D4 阻塞 |
 
-`cargo test --offline --lib` 目前 **354 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
-"绿灯"只表示已写测试的模块自洽：A4 轮之后 `sema`(22) 与 `pkg`(19) 已不再是零单测，
-但 `codegen`、`host`、`btrack`、`atrack`、`conformance`、`doc` **一项单测都没有**，仍在进行中或未开始
-（`hir` 于 C1 轮补了 20 项声明层金样，语句/表达式层仍未落）。
+`cargo test --offline --lib` 目前 **372 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
+"绿灯"只表示已写测试的模块自洽：A4 轮之后 `sema`(22) 与 `pkg`(19) 已不再是零单测，C2 轮之后 `codegen` 也不再是
+（新增 **18** 项，锁 §4.1/§4.8 布局自检、§4.9/§7.2 检查永不关、§4.11 `?`、§3.12 `match`、§4.7.4 清理序、
+§8.4 节点表、§5.3 调用解析、§7.3 字节稳定），仍在进行中或未开始的只剩
+`host`、`btrack`、`atrack`、`conformance`、`doc`（`hir` 于 C1 轮补了 20 项声明层金样，语句/表达式级 IFIR 仍未落 ——
+阶段 [8] 是 AST→C 直接发射）。
 C 侧另有两份独立 harness，**两份都直接链生产 `runtime/infy_rt.c`**：`runtime/test_rt.c` →
 **32303 assertions / 0 failures**（B1 轮收敛，`-Wall -Wextra` 零告警）；`runtime/test_ifbc.c` →
 **82 asserts, 82 pass, 0 FAIL**（B2 轮真实链接，零告警；同一 harness 链 `test_ifbc_stubs.c` 替身也同为 82/82，
 两份输出逐字节相同）。
 以上都只说明"已写用例自洽"，**不等于 §12 合规**（外部用例仍为 0）。
 
-明确未实现（不使用即报错，不做静默降级）：`src/codegen.rs`（§7.5 C11 发射）、`src/atrack.rs`（A 轨绑定）、
-`src/host.rs`（§11 `HostApi`）、`src/doc.rs`（`infy doc`）、`src/conformance.rs`（§12 用例集）——这五个文件目前是 1 行占位；
-`src/hir.rs` 不再是占位文件，但它只落**声明层**（类型布局、链节点表、`env` 偏移、符号名），**语句/表达式级 IFIR 尚未实现**，
-`infy build` 也没有接它（仍是 exit 6 的显式未实现）；
+明确未实现（不使用即报错，不做静默降级）：`src/atrack.rs`（A 轨绑定）、
+`src/host.rs`（§11 `HostApi`）、`src/doc.rs`（`infy doc`）、`src/conformance.rs`（§12 用例集）——这四个文件目前是 1 行占位；
+`src/artifact.rs`（§7.4 段写入器）**还不存在**，它是 C3 要新建的模块，所以 `infy build` 仍以 exit 6 结束（阶段 [9]/[10] 未做）；
+`src/hir.rs` 与 `src/codegen.rs` 不再是占位文件：前者只落**声明层**（类型布局、链节点表、`env` 偏移、符号名），
+后者发射 C11 但**没有独立的语句/表达式级 IR**；
+`src/codegen.rs` 明确拒绝的构造（逐条指名条款，见偏差 D-26…D-31 与 BACKLOG F12…F15）：闭包、`dyn`、`@embed`、
+A 轨 `extern` 调用、`event` 调用、`for`/`defer`/`const_assert`、128 位算术与字面量、窄位宽移位、
+`overflow = "saturate"`、含 NUL 的 `str` 字面量、字节串字面量、owned 值的三种移动形式；
 `std.net` 的 TLS 后端（§10.4）、`infy lsp`（§13.4 标注为可选）、`dyn Trait` 的跨实现 vtable 偏移表（规范缺口 C-7 ②）、
 `line_map`/`exception_table` 的规范字节格式（缺口 C-7 ①，本实现自行固定并写入 `runtime/IFBC.md`）。
 

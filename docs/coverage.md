@@ -2,18 +2,19 @@
 
 本文件回答一个问题：**"某条声称完成了"到底是被什么证明的？**
 规则只有一条：标 `✅` 必须能在 §1 的命令里数出对应的测试/断言；数不出来的一律写 `🟡`（实现了但证据不足）
-或 `⬜`（未实现，运行时显式报错）。`src/host.rs`、`src/codegen.rs`、`src/atrack.rs`、
-`src/conformance.rs`、`src/doc.rs` 五个模块的占位注释也指向这里（`src/hir.rs` 于 C1 轮从占位落成声明层 IR，
-证据是 §3 的 stage [7] 一行）。
+或 `⬜`（未实现，运行时显式报错）。`src/host.rs`、`src/atrack.rs`、`src/conformance.rs`、`src/doc.rs`
+四个模块的占位注释也指向这里（`src/hir.rs` 于 C1 轮从占位落成声明层 IR、`src/codegen.rs` 于 C2 轮落成
+阶段 [8] 的 C11 发射，证据分别是 §3 的 stage [7] 与 stage [8] 两行）。
 
 ## 1. 证据命令（2026-10-13 B1 轮起逐轮复跑，主树非隔离副本；P11 于 B2 轮改判，全部 10 条于 B3 轮复跑）
 
 | # | 命令 | 输出里的数字 | exit |
 | --- | --- | --- | --- |
-| P1 | `cargo test --offline --lib` | `354 passed; 0 failed; 0 ignored` | 0 |
+| P1 | `cargo test --offline --lib` | `372 passed; 0 failed; 0 ignored`（C2 轮 +18 `codegen`） | 0 |
 | P2 | `cargo check --offline --lib` | 0 error、`51 warnings`（全部 unused/dead code，BACKLOG F2） | 0 |
 | P3 | `infy check examples/tour` | `check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)` | 0 |
-| P4 | `infy build examples/tour` | 先打 P3 那行，再打 `notice: ... stages [8] codegen and [9] link are not implemented yet` | 6 |
+| P4 | `infy build examples/tour` | 先打 P3 那行，再打 `codegen ok — 12473 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))` + `notice: 阶段 [9] 链接…尚未实现` | 6 |
+| P12 | `gcc -std=c11 -Wall -Wextra -I runtime -c examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c -o ci.o` | **0 error / 0 warning**（无输出），产出 .o；这就是 BACKLOG C2 的验收命令。生成的 C 自带 `sizeof`/`_Alignof`/`offsetof` 断言，所以这条命令同时复核了阶段 [7] 的布局表 | 0 |
 | P5 | `infy run` / `test` / `doc` / `ifbc` / `conformance` / `lsp` / `lib` | `notice: infy <cmd> is not implemented in this build` | 1 |
 | P6 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/test_ifbc.c runtime/test_ifbc_stubs.c -o ifbc_tests && ./ifbc_tests` | `IFBC harness: 82 asserts, 82 pass, 0 FAIL`；**0 编译告警**（B1 轮给 `InfyString` 补了结构标签，原先 4 条 `infy_rt.h:212` 前置引用告警随之消失 = B3 的第 4 项；79 → 82 是 B3 轮为 D-22 裁决新增的一行 `closure.new` 拒绝断言，3 项） | 0 |
 | P9 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && ./rt_tests` | `32303 assertions, 0 failures`，0 error / 0 warning；诊断渲染单独再跑一次为 `rt_render.log` 逐字节比对。**链的是生产 `runtime/infy_rt.c`**，不是替身 | 0 |
@@ -75,12 +76,13 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 | §9.4/E.5 `--diag-json` | `cli.rs:416` | 🟡 | 能写出 `{"version":1,"tool":{...},"diagnostics":[...]}`，但结构无金样测试 |
 | §9.5 格式化 | `fmt.rs` | ✅ | 39 项 |
 | §1.3 领域中立 | `stdlib.rs` | ✅ | 4 项（NFKCCaseFold 全角/大小写绕过） |
-| §10 `std` 签名表 | `stdlib.rs` | 🟡 | 表本身 4 项；其**消费者** `infy doc`（`doc.rs` 占位）与 codegen 映射（`codegen.rs` 占位）未实现 |
+| §10 `std` 签名表 | `stdlib.rs` | 🟡 | 表本身 4 项；消费者 `infy doc`（`doc.rs` 占位）未实现。codegen 侧自 C2 轮起**有映射**，但只覆盖 `infy_rt.h` 里有入口的部分：`Vec`/`String` 的 `push`/`len`/`as_str`、`Option`/`Result` 的 `unwrap` 族、`std.fmt` 的 `infy_fmt_run`（但 `fmt!` 宏本身没有 lowering 路径 → F15），其余 std 调用一律显式拒绝 |
 | §7.3/§7.4 产物容器 | `cli.rs:758` `artifact_cmd` | 🟡 | 只识别 64 字节 `INFYART2` 段尾；`.inf meta`/`rodata 索引`/`ifbc`/`sum` 段的写入器与解析器都不存在（BACKLOG C3，P8） |
 | §7.8/附录 D IFBC | `src/ifbc.rs` + `runtime/infy_ifbc.c` | 🟡 | Rust 侧 6 项、C 侧 82 断言各自通过；**码表已与 §9.7 对齐**（D-22 于 B3 轮裁决、D-23 钉死 `frame_kind` 两级取值），但两侧对同一镜像的读法仍不一致（BACKLOG D4：操作数个数不一致 + `func_table` 记录布局 Rust 36 / C 40 字节），双侧反汇编目前必然错位，故不能记 ✅ |
 | §7.7 B 轨 | `btrack.rs` | 🟡 | 4476 行、0 测试，端到端未收敛（D1） |
 | §7.6/§7.7 A 轨绑定 | `atrack.rs` | ⬜ | 占位（D3） |
-| §7.5 C11 发射 | `codegen.rs` | ⬜ | 占位（C2），P4 显式报错 |
+| §7.1 阶段 [8] / §7.2 检查永不关 | `codegen.rs` | 🟡 | C2 轮落成：**18 项独立单测** + P12（gcc 编译生成的 C，0 告警）。记 🟡 而不是 ✅ 的理由：① §12 外部用例仍为 0；② tour 之外的构造多数是**显式拒绝**（闭包、`dyn`、`@embed`、A 轨调用、`for`/`defer`、128 位、窄位移、`saturate`、移动 owned 值）；③ 没有独立的语句/表达式级 IR，阶段 [7] 与 [8] 之间不可优化；④ 单 TU 发射（偏差 D-26），§5.10 的按 package 增量未做 |
+| §7.1 阶段 [9]/[10] 链接与段写入 | **无 `artifact.rs`** | ⬜ | `src/artifact.rs` 还不存在（C3 新建）；因此 P4 的 exit 6 是"链接未实现"，不再谎称"codegen 未实现" |
 | §11 `HostApi`/三步握手 | `host.rs` | ⬜ | **占位**。（`EnvSnapshot` 的偏移表已由 C1 轮在 `hir.rs::env_table` 落成并有金样，握手本身仍未实现）（本轮之前的 README 把它写成 ✅，是文档错误，非实现事实） |
 | §12 合规套件 | `conformance.rs` | ⬜ | 0 个外部用例；规范要求 2300（§12.1 1244 + §12.2 256 + §12.5 800），**通过率目前不可测**（E1/E2/E3） |
 | §13.4 CLI | `cli.rs` | ✅ | 5 项 + P3/P4/P5/P7/P8 的 exit 码逐条对上 |

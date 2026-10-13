@@ -36,13 +36,17 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 354 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 372 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
 Finished `dev` profile  (51 warnings，全部为 unused/dead code，见 BACKLOG F2)
 $ infy check examples/tour
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)   # exit 0
 $ infy build examples/tour
-（同一行 check ok，再）notice: `infy build` stops here in this build — stages [8] codegen and [9] link are not implemented yet   # exit 6
+check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)
+codegen ok — 12473 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
+notice: 阶段 [9] 链接与 §7.4 产物容器尚未实现（BACKLOG C3），因此 `infy build` 仍以 6 退出。   # exit 6
+$ gcc -std=c11 -Wall -Wextra -I runtime -c examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c -o ci.o
+（无输出）                                        # exit 0，0 error / 0 warning；这是 BACKLOG C2 的验收命令（BACKLOG §1 C2）
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
       runtime/test_ifbc.c runtime/test_ifbc_stubs.c -o ifbc_tests && ./ifbc_tests
 IFBC harness: 82 asserts, 82 pass, 0 FAIL        # exit 0；B1 轮起 0 编译告警（原 4 条 infy_rt.h 前置引用 = B3 第 4 项，已修）
@@ -57,23 +61,24 @@ $ (cd examples/tour && infy fmt --check)
 2 file(s) are not canonical                        # exit 2，见下文"导览源码不是格式化不动点"
 ```
 
-354 项按模块（`cargo test --offline --lib -- --list` 分组计数，合计 354）：
-`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `pkg` 19 · `hir` 20 · `toml` 15 · `borrow` 15 ·
-`sha256` 12 · `codes` 9 · `base64` 7 · `parser` 8 · `ifbc` 6 · `cli` 5 · `stdlib` 4 · `diag` 2。
+372 项按模块（`cargo test --offline --lib -- --list` 分组计数，合计 372）：
+`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `codegen` **18** · `sema` 22 · `pkg` 19 · `hir` 20 ·
+`toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `base64` 7 · `parser` 8 · `ifbc` 6 · `cli` 5 · `stdlib` 4 · `diag` 2。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
   借用检查（`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006`/`E-0121` 正反例）、哈希与 base64 与 TOML 往返、
   `infy` CLI 自身、IFBC Rust 侧编码/解码/反汇编：都有上表的测试。
 - **仍没有一项独立单测**：`btrack.rs`（§7.7 B 轨）。它的证据目前只有"对 `examples/tour` 跑完 §7.1 阶段 [1]–[5] 且 exit 0"这一条端到端。
+  `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成有 18 项独立单测的模块，`hir.rs` 的 20 项锁阶段 [7]。
 - 先前记为"§9.2 字节级金样"实际是 1 条规范样例逐字节 + 1 条 caret 行规则（`diag` 2 项）；
   `goto` 的三条 `E-0301` 越界路径与 `E-0121` 在 A4 轮之前无测试（**A4 轮已补**，见下）。
 
 **绿灯的含义要如实限定**：`cargo test --lib` 全绿只说明"已写的模块自洽"，不等于 §12 合规。
-`infy build`/`run`/`test`/`doc`/`lib pack`/`ifbc dump`/`conformance` 仍显式报"未实现"（build 是 exit 6，其余 exit 1）；
+`infy build` **自 C2 轮起真跑阶段 [7]+[8] 并写出可编译的 C11**，但阶段 [9]（链接成 §7.4 单文件产物）未实现，故仍以 exit **6** 结束；
+`run`/`test`/`doc`/`lib pack`/`ifbc dump`/`conformance` 仍显式报"未实现"（exit 1）；
 B 轨 lowering(`src/btrack.rs`) 尚未收敛；C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（32303 断言 / 0 失败，直接链生产 `infy_rt.c`）；
-`src/codegen.rs`、`src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs`
-是 1 行占位文件（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
+`src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs` 是 1 行占位文件（`src/artifact.rs` **还不存在**，它是 C3 要新建的模块）（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
 A 轨绑定、`std.net` TLS、`infy lsp` 未实现。
 IFBC 断言（B3 轮 79 → **82**，新增的是 `closure.new` 越出 `func_table` 的拒绝路径）**B2 轮起既链
 `runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，两侧同为 82/82、stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 Rust↔C 双侧交叉验证（D4 阻塞）。
@@ -278,13 +283,61 @@ stdout 逐字节相同）；`cargo test --offline --lib` **333 passed / 0 failed
 `-c infy_rt.c` **0 warning** exit 0、rt harness **32303 assertions / 0 failures** exit 0、
 替身链 IFBC **82/82** exit 0、生产链 IFBC **82/82** exit 0 且与替身链 stdout 逐字节相同。
 
+## C2 · `src/codegen.rs`：阶段 [8] 的 INFY → C11 发射（本轮）
+
+原先是 1 行占位。现在它是 §7.1 阶段 [8] 的实现，输入只有阶段 [7] 的 `HirCrate` + `sema::Program` +
+解析后的 AST（函数体不在 HIR 里，C1 的遗留），输出**一个 C11 翻译单元**（偏差 D-26）。
+
+**布局自检是这一轮的结构性决定**：尺寸/对齐/偏移一律从 `HirCrate` 取，codegen 绝不重算；同时生成的 C
+自带 `sizeof`/`_Alignof`/`offsetof` 的负数组 typedef 断言。于是 **gcc 编译生成的 .c = 把 HIR 的表复核一遍**，
+`Result<u32, Fail>` 的 20 字节、`Phase` 的 4/4、`Pipeline` 帧的 `node_idx@0` 都不再是"文档里写着"而是"编译器拒收"。
+这比 C1 的一次性探针更强：探针要人手重跑，断言每次编译都在。
+
+**发射面（18 项单测，每项 doc comment 指名条款）**：§4.1 全部标量与聚合表示（`Option` 的指针 niche 走
+`NULL == None`，§1 的 `bool` 只发 `1u/0u` 因为头里没有 `<stdbool.h>`）、§4.8/ABI §1 记录与 union 布局、
+§8.4 节点表（6 行、连携计数、显示路径）、§8.2 `goto` 编译期解析成常量、§4.9/§7.2 检查型算术与下标/`unwrap`
+/移位全部走 `infy_rt.h` 入口（**没有任何裸的 C 整数 `+`**）、§4.11 `?` 的两种情形、§3.12 `match`
+（含或模式与载荷绑定）、§4.7.4 清理项的 push/pop 与 `infy_drop_*` shim（`Vec` 带元素大小，§10.13）、
+§4.13 规则 2/7 的字面量取型、§2.8 的 `UINT*_C/INT*_C` 字面量、§4.6 `env.x` 的编译期偏移装载、
+§5.3 的调用解析、§7.4 入口与 `main` 驱动。
+
+**本轮在自己代码里揪出并修掉 2 个真 bug**（都是测试逼出来的，不是重构）：
+(1) 形参的清理项被写进了**上一个 item 的缓冲区**（`emit_fn` 在 `buf.clear()` 之前调 `register_drop`），
+    于是 owned 形参根本不释放 —— 泄漏。现在清理登记发生在函数体 `{` 之后。
+(2) `return s;`（s 是 owned 形参）会先跑 pop 再返回同一份缓冲 → 悬垂。现在与 `let d = s`、
+    `take(s)` 三种移动形式一起显式拒绝（偏差 D-31 / BACKLOG **F12**），因为 `infy_cleanup_*` 只能弹栈顶。
+
+**顺带修的一处解析歧义**：tour 的 `gate` 在 `cmd/runner` 与 `core/build` 各有一个，原实现按简单名全局匹配 →
+静默选错。现在按 §5.3/§4.14 以**调用方 package 优先**解析，多候选才报错（有测试）。
+
+**测试反过来暴露的 3 个上游缺口**（都不是 codegen 能修的，登记为 F13/F14/F15）：
+`-128` 这类无后缀负字面量在阶段 [4] 就 `E-0110`（F13）；`Q::Y(n)` 的绑定不进作用域（F14）；
+`fmt!` 在阶段 [2]/[4] 没有 lowering 路径，`sema` 见残留 `MacroCall` 就发 `E-0402`（F15）——
+所以 C2 验收清单里的 `fmt` 覆盖被上游阻塞，本轮**没有**为了让它过而在后端假展开。
+
+**改了冻结头**：`infy_chain_register` / `_table` / `infy_chain_desc` / `infy_chain_count` 四个入口
+`infy_rt.c:1893-1906` 早就定义了，但从未进 `infy_rt.h`（而这个头自称"codegen 与运行时之间的契约"）；
+补声明后四条 C 链全部复跑（数字见上表与下一段）。
+
+回归（全部为本轮实测，非引用）：`cargo test --offline --lib` **372 passed / 0 failed**（基线 354，+18 `codegen`）；
+`cargo check --offline --lib` 0 error / **51 warning**（本轮新增的 4 条已清掉，没让 F2 变大）；
+`infy check examples/tour` exit **0**；`infy build examples/tour` → 12473 字节 C11、exit **6**（[9] 未做）；
+`gcc -std=c11 -Wall -Wextra -I runtime -c <生成的 .c>` exit **0**、0 error / 0 warning；
+`(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决）；四条 C 链：
+`-c infy_rt.c` **0 warning** exit 0、rt harness **32303 assertions / 0 failures** exit 0、
+替身链 IFBC **82/82** exit 0、生产链 IFBC **82/82** exit 0 且与替身链 stdout 逐字节相同。
+
 ## 仍未实现
 
-`infy build` 的 C11 发射（阶段 [8]）与产物段写入（阶段 [9]）→ 因此 `build`（exit 6）、
+产物段写入与链接（阶段 [9]/[10]，§7.4 的单文件容器）→ 因此 `build` 在**已能发射并编译 C11** 之后仍以 exit 6 结束（C2 轮落地阶段 [8]），
 `run`/`test`/`doc`/`lib pack`/`ifbc dump`/`conformance`/`lsp`（exit 1）目前明确返回"未实现"而不是假成功；
 A 轨绑定生成（`src/atrack.rs`）、§11 `HostApi`（`src/host.rs`）、§12 合规用例集（`src/conformance.rs`）、
-`infy doc`（`src/doc.rs`）同样未实现 —— 这五个文件当前是 1 行占位。
-HIR（`src/hir.rs`）于 C1 轮落成**声明层**，但**语句/表达式级 IFIR 仍未实现**，`infy build` 也尚未接它。
+`infy doc`（`src/doc.rs`）同样未实现 —— 这四个文件当前是 1 行占位。
+HIR（`src/hir.rs`）于 C1 轮落成**声明层**；**语句/表达式级 IFIR 仍没有独立表示**（C2 是 AST→C 直接发射），
+因此后端与阶段 [7] 之间没有可优化的中间层。
+`codegen` 明确拒绝、没有假成功的构造：闭包、`dyn`、`@embed`（B 轨 D1 / A 轨 D3）、A 轨 `extern` 调用、
+`event` 调用、`for`/`defer`/`const_assert`、128 位算术与字面量、窄位宽移位、`overflow = "saturate"`、
+含 NUL 的 `str` 字面量、字节串字面量、owned 值的移动（F12）。逐条见 `src/codegen.rs` 的 `CgError` 与偏差 D-26…D-31。
 
 **本实现不声称「INFY v2.0 兼容」**：§12 的 2300 个用例（§12.1 的 1244 + §12.2 的 256 + §12.5 的 800）
 目前外部用例为 **0**，逐分类通过率不可测。

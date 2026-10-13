@@ -5,9 +5,10 @@
 //! 7 checksum / reproducibility mismatch.
 //!
 //! What this build actually does end to end: the front end — stages [1]–[5] of §7.1 — over a whole
-//! module, plus `init`, `fmt`, `expand`, `mod tidy`, `toolchain probe|list`, `artifact info`.
-//! Commands that need code generation (`build`, `run`, `test`, `doc`, `ifbc …`, `lib pack`) report
-//! that honestly instead of pretending to succeed; see `docs/status.md`.
+//! module, stages [7]–[8] (`hir` lowering + C11 codegen) behind `infy build`, plus `init`, `fmt`,
+//! `expand`, `mod tidy`, `toolchain probe|list`, `artifact info`. Stage [9] (link into the §7.4
+//! single-file artifact) is not implemented, so `build`/`run`/`test`/`doc`/`ifbc …`/`lib pack`
+//! report that honestly instead of pretending to succeed; see `docs/status.md`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use crate::ast::{ItemKind, ParsedFile};
 use crate::diag::{Diagnostic, Handler, LintConfig, Phase};
 use crate::span::Position;
 use crate::span::{FileId, Sources};
-use crate::{borrow, derive, lexer, macro_expand, parser, pkg, sema};
+use crate::{borrow, codegen, derive, hir, lexer, macro_expand, parser, pkg, sema};
 
 /// §13.4 exit codes.
 pub mod exit {
@@ -176,7 +177,7 @@ pub fn load(root: &Path, handler: &mut Handler) -> Option<Loaded> {
 }
 
 /// Run stages [2]–[5] over an already-loaded module and return it with diagnostics filled in.
-pub fn analyse(l: &mut Loaded) {
+pub fn analyse(l: &mut Loaded) -> sema::Program {
     // [2] macro expansion + derive, then attribute validation (§6.5/§6.6/§6.7)
     let mut opts = macro_expand::ExpandOptions::default();
     opts.stage = macro_expand::Stage::All;
@@ -229,6 +230,7 @@ pub fn analyse(l: &mut Loaded) {
 
     // §7.4 entry rules: #![entry_chain] > fn main > first chain of the main package
     resolve_entry(l, &prog);
+    prog
 }
 
 fn internal_visible(target_rel: &str, importer_rel: &str) -> bool {
@@ -410,7 +412,7 @@ fn check(positional: &[String], rest: &[String], building: bool) -> i32 {
     if rest.contains(&"--lenient".to_string()) {
         l.handler.lint.strict = false;
     }
-    analyse(&mut l);
+    let prog = analyse(&mut l);
     let rendered = l.handler.render(&l.sources);
     eprint!("{rendered}");
     if let Some(out) = rest.iter().position(|a| a == "--diag-json").and_then(|i| rest.get(i + 1)) {
@@ -428,11 +430,125 @@ fn check(positional: &[String], rest: &[String], building: bool) -> i32 {
         println!("check FAILED — {summary}");
     }
     if building && code == exit::OK {
-        eprintln!("notice: `infy build` stops here in this build — stages [8] codegen and [9] link \
-                   are not implemented yet (docs/status.md). `infy check` passed.");
-        return exit::TOOLCHAIN;
+        return build_c(&l, &prog, rest);
+    }
+    if building {
+        eprintln!("error: `infy build` 中止于阶段 [1]-[5]：诊断里有阻断项（§7.1：任一阶段出现 `E-` 即中止后续阶段）");
+        return code;
     }
     code
+}
+
+/// Stages [7] and [8] of §7.1: lower to HIR, emit C11, write it under `.infy-build/`.
+///
+/// Stage [9] (link into the single-file artifact of §7.4) is **not** implemented, so a successful
+/// code generation still exits `6` (§13.4: toolchain or link failure) with the emitted path printed
+/// — the file is the evidence, not a claim that a build finished.
+fn build_c(l: &Loaded, prog: &sema::Program, rest: &[String]) -> i32 {
+    let triple = match rest.iter().position(|a| a == "--target").and_then(|i| rest.get(i + 1)) {
+        Some(t) => t.clone(),
+        None => host_triple(),
+    };
+    let (triple, target) = match codegen::target_from_triple(&triple) {
+        Some(x) => x,
+        None => {
+            eprintln!(
+                "error: E-0601 · target `{triple}` 不在 §7.2 的内建集里，也没有 TOOLCHAIN.infy.toml 可注册（内建集：{}）",
+                codegen::BUILTIN_TARGETS.join(", ")
+            );
+            return exit::TOOLCHAIN;
+        }
+    };
+    let entry_chain = l
+        .files
+        .values()
+        .find_map(|pf| pf.file_attr("entry_chain"))
+        .and_then(|a| a.positional.first())
+        .and_then(|v| match v {
+            crate::ast::AttrValue::Str(s) => Some(s.clone()),
+            _ => None,
+        });
+    let cfg = hir::HirConfig { target, entry_chain };
+    let hc = hir::lower(prog, &cfg);
+    if !hc.errors.is_empty() {
+        // §7.2: no silent degradation — an item that failed to lay out is a build failure.
+        for e in hc.errors.iter() {
+            eprintln!("error: 阶段 [7] 布局失败：{}（{}）", e.message(), e.spec_code().unwrap_or("§4.8"));
+        }
+        return exit::TOOLCHAIN;
+    }
+    let files: Vec<(FileId, String, ParsedFile)> = l
+        .files
+        .iter()
+        .map(|(f, pf)| (*f, l.file_pkg.get(f).cloned().unwrap_or_default(), pf.clone()))
+        .collect();
+    let cfg = codegen::Config {
+        target_triple: triple.clone(),
+        target,
+        header_include: "infy_rt.h".to_string(),
+        overflow_panic: matches!(l.manifest.profile.overflow, pkg::Overflow::Panic),
+        module: l.manifest.module_path.clone(),
+    };
+    let text = match codegen::emit(prog, &hc, &files, &l.sources, &cfg) {
+        Ok(t) => t,
+        Err(es) => {
+            for e in es.iter() {
+                eprintln!("{}", e.render());
+            }
+            eprintln!(
+                "error: `infy build` 中止于阶段 [8]：codegen 覆盖了 §14 导览子集，上述构造在范围之外（拒绝而不是生成近似代码，见 docs/BACKLOG.md C2）"
+            );
+            return exit::TOOLCHAIN;
+        }
+    };
+    let out = match rest.iter().position(|a| a == "--out").and_then(|i| rest.get(i + 1)) {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let stem = l.manifest.module_path.rsplit('/').next().unwrap_or("crate").to_string();
+            l.root.join(".infy-build").join(&triple).join(format!("{stem}.c"))
+        }
+    };
+    if let Some(dir) = out.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("error: 无法创建 {}: {e}", dir.display());
+            return exit::PERMISSION;
+        }
+    }
+    if let Err(e) = std::fs::write(&out, &text) {
+        eprintln!("error: 无法写 {}: {e}", out.display());
+        return exit::PERMISSION;
+    }
+    let chains = hc.items.iter().filter(|i| matches!(i, hir::HirItem::Chain(_))).count();
+    let nodes = hc.items.iter().filter_map(|i| match i {
+        hir::HirItem::Chain(c) => Some(c.nodes.len()),
+        _ => None,
+    }).sum::<usize>();
+    println!(
+        "codegen ok — {} byte(s) of C11 written to {} (stages [7]-[8]; {chains} chain(s), {nodes} node(s))",
+        text.len(),
+        out.display(),
+    );
+    eprintln!(
+        "notice: 阶段 [9] 链接与 §7.4 产物容器尚未实现（BACKLOG C3），因此 `infy build` 仍以 6 退出。\n\
+         \x20 = note: 编译生成的 C：gcc -std=c11 -Wall -Wextra -I <module>/../..\\runtime -c {}",
+        out.display()
+    );
+    exit::TOOLCHAIN
+}
+
+/// The §7.2 triple of the machine running the compiler.
+fn host_triple() -> String {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        other => other,
+    };
+    match std::env::consts::OS {
+        "windows" => format!("{arch}-pc-windows-gnu"),
+        "macos" => format!("{arch}-apple-darwin"),
+        "linux" => format!("{arch}-unknown-linux-gnu"),
+        other => format!("{arch}-unknown-{other}-gnu"),
+    }
 }
 
 fn handler_empty_sources(root: &Path) -> Sources {

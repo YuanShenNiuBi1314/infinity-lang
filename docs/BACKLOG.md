@@ -179,8 +179,38 @@
       同族未修只登记为 **F9/F10/F11**。
       证据提交：`44c7b54`（上述 354/0、20 项 `hir`、0/51、tour exit 0、`-c` 0 告警、rt 32303/0、两条 IFBC 链 82/82
       全部为该提交上的实测复跑，非引用；远端 `toolchain` 回查 = `14654c9`，推送欠账 **0**）。
-- [ ] C2 `src/codegen.rs`：INFY → C11 发射，覆盖 tour 子集（原语/`str`/`String`/`Vec`/`Option`/`Result`/struct/enum/链/`?`/`match`/`fmt`），检查型算术与边界检查永不关闭（§7.2）。
+- [x] C2 `src/codegen.rs`：INFY → C11 发射，覆盖 tour 子集（原语/`str`/`String`/`Vec`/`Option`/`Result`/struct/enum/链/`?`/`match`/`fmt`），检查型算术与边界检查永不关闭（§7.2）。
       验收：`infy build` 在 `examples/tour` 上生成 `.c` 且 `gcc` 能编译它（可先只验到编译，不要求运行）。
+      实测：`infy build examples/tour` → `check ok — 2 file(s), 0 error(s)` + `codegen ok — 12473 byte(s) of C11 written to
+      examples/tour\.infy-build\x86_64-pc-windows-gnu\ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))`，exit **6**
+      （阶段 [9] 链接未实现，属 C3；不再写"codegen 未实现"）。
+      验收命令 `gcc -std=c11 -Wall -Wextra -I runtime -c <生成的 .c>` → **exit 0，0 error / 0 warning**，产出 5723 字节对象文件。
+      `cargo test --offline --lib` **372 passed / 0 failed**（基线 354，+18 项 `codegen`），`cargo check --offline --lib`
+      0 error / **51 warning**（与基线同数：本轮新增的 4 条已清）、`infy check examples/tour` 仍 exit 0、
+      `(cd examples/tour && infy fmt --check)` 仍 exit 2（F6 未裁决）。
+      **改了冻结头 `runtime/infy_rt.h`**：`infy_chain_register` / `infy_chain_register_table` / `infy_chain_desc` /
+      `infy_chain_count` 四个入口在 `infy_rt.c:1893-1906` 早已定义却从未进头（codegen 是头的甲方），补声明后
+      **四条 C 链全部复跑**：`gcc -c infy_rt.c` 0 告警 exit 0；rt harness **32303 assertions / 0 failures** exit 0（0 告警）；
+      P6 替身链 IFBC **82 / 82** exit 0；P11 生产链 IFBC **82 / 82** exit 0，且与替身链 stdout **逐字节相同**（`diff -q` 无输出）。
+      发射面（每项都有单测指名条款，见 `src/codegen.rs` 的 `mod tests`）：ABI §1 全部表示 + **布局自检**
+      （生成的 C 自带 `sizeof`/`_Alignof`/`offsetof` 负数组断言，尺寸取自 `HirCrate`，所以 gcc 一编译就等于把
+      `Phase` 4/4、`FailWhy` 8/4、`Fail` 12/4、`Job` 12/4、`Result<u32,Fail>` **20**/4、`Pipeline` 帧 4/4 且
+      `node_idx@0` 全部复核一遍）；§8.4 节点表 6 行（8/9/10/11/16/19，节点 3/4 各 1 连携块）；
+      §8.2 `goto` 编译期解析（`done`→5、`+1`→4、`begin`→0）；§4.9/§7.2 检查型算术走 `infy_add_u32` 而非裸 `+`、
+      数组下标走 `R-0004` 检查、`unwrap` 走 `R-0005`；§4.11 `?` = 测 `is_ok` + 搬运 `err` + 取 `ok`；
+      §3.12 `match`（标签判定、或模式析取、载荷按 `a0` 绑定、穷尽性之外的 panic）；§4.7.4 push/pop 与
+      `infy_drop_String`/`infy_drop_Vec_u8_`（元素大小随容器走，§10.13）；§4.13 规则 2 的无后缀字面量取上下文型；
+      §2.8 字面量写成 `UINT32_C/INT64_C/…`；§5.3 调用按**调用方 package 优先**解析（tour 的 `gate` 在两个 package
+      同名，按简单名全局匹配会静默选错，已修并有测试）。
+      规范未定 → 选定实现并记偏差 **D-26**（单 TU）、**D-27**（§8.4"序言"归属歧义 → 节点末尾执行）、
+      **D-28**（`match` 不可达分支发 `R_BAD_BOOL` panic）、**D-29**（含 NUL 的 `str` 字面量拒绝）、
+      **D-30**（`overflow=saturate` 与窄位移没有检查入口 → 拒绝）、**D-31**（owned 值的三种移动形式拒绝）。
+      **明确未做**（不用假成功掩盖）：阶段 [9] 链接与 §7.4 产物容器（C3）、`infy run`（C4）、`#[test]` 执行（C5）、
+      闭包 / `dyn` / `@embed` / A 轨 `extern` 调用 / `event` 调用 / `for`·`defer`·`const_assert` / 128 位算术 /
+      `Vec`·`String` 的构造入口 / 字节串字面量 —— 全部是**指名条款的 CgError**；
+      `fmt!` 在阶段 [2]/[4] 根本没有 lowering 路径（`sema` 对未展开宏发 `E-0402`），所以 C2 的 `fmt` 覆盖
+      被上游阻塞，登记为 **F15**。
+      证据提交：见下一行 RUNLOG 的 cron-08（上述 372/0、0/51、12473 字节、gcc exit 0、四条 C 链数字均为该提交上的实测复跑）。
 - [ ] C3 `src/artifact.rs`：`INFYART2` 段尾 + `.inf meta/ifbc/sum` 段、`build-id`（§7.3 规范化输入 SHA-256）。
       验收：`infy artifact info` 能读回自己刚产出的产物；同一输入两次构建字节相同（`--verify-reproducible`）。
 - [ ] C4 `infy run examples/tour` 真跑出输出；退出码遵循 §13.4。
@@ -263,27 +293,63 @@
       HIR 侧本轮至少不再猜：`hir::hir_ty_from_ast` 遇到非字面量长度返回 `None` → `UnresolvedType`。
       验收：`[u32; 常量表达式]` 要么按 §2.12 求值成功，要么显式 `E-0131`，不得静默取 0；补 `sema` 的成对测试。
 
+- [ ] F12 **owned 值的移动在 stage [8] 被拒绝，根因是运行时清理队列只支持弹栈顶**（C2 轮定位，实现选择见偏差 **D-31**）：
+      `infy_rt.h:115-118` 的清理 API 是 `infy_cleanup_push(fn, &obj, is_defer)` + `infy_cleanup_pop_run()` /
+      `infy_cleanup_pop_noop()`，登记的是**地址**且只能弹**栈顶**。于是这三类合法 INFY 写法无法发射：
+      (a) `let d: String = s;`（换地址）；(b) `take(s)` 按值传形参（ callee 与 caller 各有一份清理项 → 双 `infy_free`）；
+      (c) `return s;`（移动出作用域后仍会跑它的 drop → 悬垂）。
+      现状：codegen 对三者一律报 `CgError`（§4.7.1 / §4.7.4），锁定点 = `codegen::tests::moving_an_owned_binding_is_refused`。
+      验收：给运行时加"按地址取消/搬迁清理项"的入口（如 `infy_cleanup_relocate(void* old, void* new)` 或
+      `infy_cleanup_cancel(fn, obj)`），实现三条移动形式，并把上面那条测试从"必须报错"改成"必须生成 + 成对断言
+      旧地址不再被释放"；改 `infy_rt.h` 后**四条 C 链都要复跑**。
+
+- [ ] F13 **`-128` 这类无后缀负字面量被阶段 [4] 判成 `E-0110`**（C2 轮写测试时确认，未改实现）：
+      `src/sema.rs` 的一元负号只接受 `is_signed() || is_float()` 的 `Ty::Prim`，而 §4.13 规则 2 让无后缀字面量取
+      `Ty::IntLit`（尚未定型），于是 `fn g() -> i32 { -128 }` 报 `E-0110 · 一元负号作用于非数值类型`。
+      §2.8 明写"`-128i8` 例外由常量求值折叠"，说明规范认为这类写法合法；C1 的判别式测试（`A = 3`）也说明
+      "字面量在类型约束之前就被拒"是本仓库反复出现的一类坑。
+      验收：`-<IntLit>` 取上下文类型（或按 §4.13 规则 7 回落 `i32`）后做 §2.8 的范围检查；
+      成对测试 `fn g() -> i32 { -128 }` 通过、`fn g() -> u32 { -1 }` 报 `E-0111`。
+
+- [ ] F14 **构造器模式的绑定没有进入作用域**（C2 轮写测试时确认，未改实现）：
+      `fn g(q: Q) -> u32 { match (q) { Q::X => 0, Q::Y(n) => n } }` 报 `E-0101 · 未声明的标识符 n`，
+      即 §3.12 的绑定形如 `Variant(b)` 在臂体里不可用（同函数里 `Q::X => 0` 正常）。
+      后果：codegen 的绑定发射（`pat_bind`）在真实程序上无法被端到端验证，目前只有构造器**条件**部分被 tour 之外的
+      合成测试覆盖（`codegen::tests::enums_elide_the_union_when_no_variant_carries_a_payload` 因此改用
+      `Q::Y(n) => 1` 的"绑定不使用"形式）。
+      验收：`sema` 在检查臂体前把模式绑定压入局部表，令上例通过；补 `E-1001`（移动后使用）与穷尽性的成对测试。
+
+- [ ] F15 **`fmt!` 没有 lowering 路径**（C2 轮确认，属 C2 验收清单里唯一被上游阻塞的项）：
+      §10.11 的 `fmt!("fetch #{}", j.id)` 在 §14.2 是规范样例，但 `macro_expand` 不认 `fmt!`（它是编译器内建而非
+      `macro_rules!`），`src/sema.rs:1822` 对任何残留 `MacroCall` 发 `E-0402`。因此 `infy check` 就拒绝，
+      codegen 只能在"未展开的宏调用"上报 `CgError`（`codegen::tests::uncovered_constructs_are_refused_by_name` 锁的是后者）。
+      运行时侧的接口是齐的：`infy_rt.h` 的 `InfyFmtSpec`/`InfyFmtArg`/`infy_fmt_run`，§10.11 也规定格式串在编译期解析。
+      验收：阶段 [2] 把 `fmt!` 展开成带 `InfyFmtSpec` 表的构造（或阶段 [4] 直接定型、阶段 [8] 发射 specs 数组 +
+      `infy_fmt_run` 调用），并让 §14.2 的 `describe` 样例（含 `String` 返回）通过 `infy check` + `infy build` + gcc。
+
 ## 2. 当前指针
 
-> **下一轮第一件事：取 C2**（§1 里第一个 `[ ]`：`src/codegen.rs` 的 INFY → C11 发射，覆盖 tour 子集）。
-> C1 轮已把接活需要的地基与取证做齐，直接从这里接：
-> (1) **HIR 是 codegen 唯一的上游接口**。`src/hir.rs` 现在有 `HirCrate`（`items` = `HirStruct`/`HirEnum`/`HirFn`/
->     `HirConst`/`HirChain`，每字段带 `offset`/`layout`；`events` 的下标即 §11 的 `host_event_id`；`env` = `EnvOffsets`
->     11 个偏移；`entry` = §7.4 三优先级的结果；`errors` = 布局失败列表，非空即构建失败）。
->     入口是 `hir::lower(&sema::Program, &HirConfig { target, entry_chain })`。
->     **C2 的缺口 = 语句/表达式层**：函数体仍是 `ast::Block`，`lower()` 不碰体。别在 codegen 里重算布局 ——
->     尺寸/对齐/偏移一律从 `HirCrate` 取；新增表示形态时同步 `docs/internals/runtime-abi.md` §1（C1 轮已把该表的
->     `Result`/`Option` 算术式改成 C 规则，别再往回写）。
-> (2) `infy build` 现在在 `cli.rs` 打 `notice: stages [8] codegen and [9] link are not implemented yet` + exit 6（P4）。
->     C2 的第一步是把 `sema::check_files` 的 `Program` 交给 `hir::lower`，再发射 C11；§7.2 要求
->     **检查型算术与边界检查永不关闭** —— `runtime/infy_rt.h` 已有带 `InfyNodeLoc` 的助手（`infy_add_u32`、
->     `infy_shl_u64`、`infy_vec_index` …），直接调，不要自己写检查。链帧按 ABI §5 的可算规则发射
->     （locals 声明序 + `node_idx` + 尾部补齐；`InfyChainDesc.frame_size/frame_align` 就是 `HirFrame.size/align`）。
-> (3) **不要碰 D4 的两侧布局**（IFBC 操作数个数 + `func_table` 记录 Rust 36 字节/条 vs C 40 字节/条），
->     那两条留给 D2/D4 一起裁；`infy run` 之前不必动。
-> (4) 手法留档：C1 的布局金样 = "Rust 侧断言"与"`gcc` 探针实测"两两对上
->     （重建探针：`gcc -std=c11 -Wall -Wextra -I . target/scratch/c1/probe.c -o target/scratch/c1/probe.exe`）。
->     C2 若引入任何新的 C 侧形状，用同一手法：先探针实测，再写进测试与 ABI 文档。
+> **下一轮第一件事：取 C3**（§1 里第一个 `[ ]`：`src/artifact.rs` 的 `INFYART2` 段尾 + `.inf meta/ifbc/sum` 段、
+> `build-id`（§7.3 规范化输入 SHA-256））。C2 轮留下的接活要点：
+> (1) **`infy build` 现在已经真跑阶段 [7]+[8]**：`cli.rs` 的 `build_c()` 做 `hir::lower` → `codegen::emit` →
+>     写 `.infy-build/<triple>/<module 末段>.c`，支持 `--target`（§7.2 内建集校验，未知 → `E-0601`）与 `--out`；
+>     仍以 exit **6** 结束，因为 [9] 链接没做 —— C3 就是把这段接上：产物 = 宿主镜像 + INFY 段 blob + 64 字节段尾
+>     （`docs/internals/runtime-abi.md` §6 逐字段写了布局，`infy_rt.h` 的 `InfyMetaFixed` 是它的 C 镜像）。
+>     `build-id` 走 `src/sha256.rs`（已有流式接口与 `streaming_million_a` 之类的金样）。
+> (2) **生成 C 的入口是 `main()`**：C2 发的 `main` 调 `infy_chain_register_table` + `infy_run_package_inits(0, 0u)` +
+>     `infy_runtime_start(entry_chain, 0)`。C3 若要 `infy artifact info` 读回自己的产物，注意运行时是用
+>     `infy_art_self`（从文件尾找 `INFYART2` 段尾）取 meta 的，`infy_rt.c:3614` 起那段没有容器时会
+>     打印"using strict defaults"并继续 —— 不要为了绕过它而改运行时。
+> (3) **别动 D4 的两侧布局**（IFBC 操作数个数 + `func_table` 记录 Rust 36 字节/条 vs C 40 字节/条），留给 D2/D4 一起裁。
+> (4) **手法留档（C2 新增）**：改了 `infy_rt.h` 就复跑四条 C 链（命令都在 RUNLOG cron-08 那一行里）；
+>     验证"生成的 C 是否真的对"最省力的办法是**让生成的 C 自己断言布局**
+>     （`sizeof`/`_Alignof`/`offsetof` 的负数组 typedef），gcc 一编译就等于把 HIR 的尺寸复核一遍 —— 本轮就是靠它
+>     把 `Result<u32,Fail>` 的 20 字节钉在产物里。测试里断言"生成的文本必须包含 X 且**不得**包含 Y"
+>     （如"不得出现裸 `(a_1) + (b_2)`"）比只断言包含更能防止假成功。
+> (5) C1/C2 都撞过的同族坑再记一次：**BACKLOG 指针里的旧描述会过期**。本轮 `runtime-abi.md` §1 写的 `InfyVec_T`
+>     与冻结头的无类型 `InfyVec` 不一致，实现按头走并已同步文档；`§5` 的 `node_<name>_<i>(Frame* f)` 也与
+>     `InfyNodeFn = void(*)(void*)` 不符，同样以实现为准更新（见 D-26 附近的文档同步）。
+
 > 输出二进制一律写 `target/scratch/`（写 `/tmp` 会让 `ld` 直接返回 5）；改 `infy_rt.h` 后**四条链**都要复跑
 > （P6 替身 IFBC、P11 生产 IFBC、P9 rt、`-c infy_rt.c`），因为它们共用一个头。
 > C1 轮顺带登记 **F9**（`primary()` 死臂 → `ExprKind::Int` 全树从不产生，凡只匹配它的判据都是死代码，
@@ -305,21 +371,27 @@
 > 所以 B3 轮欠推的 `c63187e`/`95551ea` 与本轮的 `44c7b54`/`14654c9` 全部上去了。
 > 手法仍然适用：`github.com:443` 是**间歇**不通而不是坏了，失败不轰炸、下一轮照协议再推一次即可。
 >
-> 已验证事实（C1 轮全部复跑，非引用）：`cargo test --offline --lib` **354 passed / 0 failed**
-> （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `pkg` 19 · `hir` 20 · `toml` 15 · `borrow` 15 ·
-> `sha256` 12 · `codes` 9 · `base64` 7 · `parser` 8 · `ifbc` 6 · `cli` 5 · `stdlib` 4 · `diag` 2 = 354）；
-> `cargo check --offline --lib` 0 error / 51 warning；`infy check examples/tour` exit 0；
+> 已验证事实（**C2 轮全部复跑，非引用**）：`cargo test --offline --lib` **372 passed / 0 failed**
+> （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `codegen` **18** · `sema` 22 · `pkg` 19 · `hir` 20 ·
+> `toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `base64` 7 · `parser` 8 · `ifbc` 6 · `cli` 5 · `stdlib` 4 ·
+> `diag` 2 = 372）；`cargo check --offline --lib` 0 error / **51 warning**（C2 轮新增的 4 条已清，未让 F2 变大）；
+> `infy check examples/tour` exit 0；`infy build examples/tour` → 生成 12473 字节 C11、exit **6**（[9] 链接未做）；
+> `gcc -std=c11 -Wall -Wextra -I runtime -c <生成的 .c>` → **exit 0，0 error / 0 warning**（5723 字节 .o）；
 > `(cd examples/tour && infy fmt --check)` **exit 2（2 file(s) are not canonical，见 F6）**；
 > **rt harness `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → 0 error / 0 warning，
 > `32303 assertions, 0 failures` exit 0**；
-> `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` → **0 warning**（B3 已勾，三项语义同轮落地）；
+> `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` → **0 warning**（C2 轮改了 `infy_rt.h`，四条链全部复跑）；
 > **IFBC 两条链都绿且 stdout 逐字节相同**：替身链 `gcc … infy_ifbc.c infy_dyn.c test_ifbc.c test_ifbc_stubs.c` →
 > `82 asserts, 82 pass, 0 FAIL` exit 0；**生产链** `gcc … infy_ifbc.c infy_dyn.c infy_rt.c test_ifbc.c` → 同为 82/82、0 告警。
 > A4 修掉的 4 个前端缺陷、B1 修掉的 7 个运行时缺陷、C1 修掉的 1 个判别式静默丢失缺陷都有回归测试；
-> 未修只登记：D-18、D-19/F7、F8（host 嵌套计数跨 panic 不回滚）、F9/F10/F11（C1 轮新登记的同族死代码与静默回退）；
-> D-22 与 `frame_kind` 取值表（D-23）已于 B3 裁决完毕，D-24/D-25 已于 C1 裁决完毕。
+> C2 轮定位并修掉 **2 个自写代码里的真 bug**（参数清理项被写进上一个 item 的缓冲区而丢失；`return` 移动 owned 值
+> 会留下悬垂 → 现改为显式拒绝），并揪出 **3 个上游缺口**（F13 无后缀负字面量、F14 构造器模式绑定不入作用域、
+> F15 `fmt!` 无 lowering 路径）+ **1 个运行时 API 缺口**（F12 清理项不能按地址取消/搬迁）；
+> 未修只登记：D-18、D-19/F7、F8、F9/F10/F11、F12…F15；
+> D-22/D-23（B3）、D-24/D-25（C1）、**D-26…D-31（C2）** 均已裁决并落到实现 + 偏差 + 断言三处。
 > `main` 与本地分叉（另一会话推了 `faa34ad`/`05da606`），**合并主干由人决定**。
 > 优先级最高的已知地雷：**D4**（Rust/C 的 IFBC 操作数个数 + `func_table` 记录布局都不一致，D2 之前必须先裁）、
-> **F9**（`ExprKind::Int` 从不产生 → 只匹配它的判据全是死代码，C2 写 codegen 必然撞上）、
-> **D1**（`src/btrack.rs` 端到端）、**F5/F6**（CLI 目录参数不一致、§14 源码不是格式化不动点）、**F7**、**F8**。
+> **D1**（`src/btrack.rs` 端到端）、**F12**（移动语义没有运行时入口，`String`/`Vec` 的真实程序写不出来）、
+> **F15**（`fmt!` 被阶段 [4] 挡住，§14.2 样例不能 `check`）、**F5/F6**（CLI 目录参数不一致、§14 源码不是格式化不动点）、
+> **F7**、**F8**。F9 已在 C2 落地时按"只匹配 `Lit::Int`、`ExprKind::Int` 分支只作防御"绕过，死臂本身仍未清。
 > **编译 C 侧测试时四个 .c 必须一起给**（少 `infy_dyn.c` 时 `ld` 只返回 `collect2: error: ld returned 5`，不打印任何 undefined reference）。

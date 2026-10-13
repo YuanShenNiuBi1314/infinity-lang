@@ -258,6 +258,14 @@ typedef struct { uint32_t chain_id; uint32_t node_idx; uint32_t focus_id; } Infy
 typedef void (*InfyNodeFn)(void* frame);
 typedef struct { const char* name; uint32_t n_nodes; uint32_t entry_node; uint32_t frame_size; uint32_t frame_align; const InfyNodeFn* nodes; const InfyNodeLoc* locs; const uint32_t* linkage_counts; } InfyChainDesc;
 
+/* Chain registration is how codegen hands the scheduler its chain table: `infy_runtime_start`
+ * takes a chain *id*, which is the index in registration order. The declarations used to be missing
+ * from this header even though `infy_rt.c` defines both (C2, docs/internals/runtime-abi.md §5). */
+void     infy_chain_register(const InfyChainDesc* desc);
+void     infy_chain_register_table(const InfyChainDesc* const* descs, uint32_t n);
+const InfyChainDesc* infy_chain_desc(uint32_t chain_id);
+uint32_t infy_chain_count(void);
+
 void     infy_sched_init(uint32_t threads, uint32_t focus_stack_bytes, uint32_t chain_stack_bytes);
 uint32_t infy_focus_spawn(uint32_t chain_id, uint32_t start_node, const InfyNodeLoc* at); /* R-0802 on wraparound */
 void     infy_focus_pause(uint32_t focus_id);

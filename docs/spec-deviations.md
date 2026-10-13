@@ -240,3 +240,73 @@ C1 轮落 `src/hir.rs` 时撞上三条"规范没写、但 `.infib` 一定能观�
 注意 `sema` 收集判别式时做的是 `v.disc as u64`（u128 → u64 截断），所以**宽于 `u64` 的判别式在到 HIR 之前就已经回绕**，
 HIR 的 `u32` 检查拦不住它 —— 登记为 BACKLOG **F11**。
 若 §12 合规套件将来给出"最小容纳"的正式判据，以规范为准改实现，本条改判。
+
+## D-26 stage [8] 每个 crate 发射**单个** C 翻译单元，不按 package 分文件
+
+§5.10 把增量编译定为"以 package 为粒度"，§7.4 又把 `.inf text` 描述成"INFY 本体 + A 轨目标码按 §7.4 顺序链接"，
+读起来像后端应当每个 package 产一个对象文件。本轮实现选择：**整个 crate 一个 `.c`**，写在
+`<module>/.infy-build/<target-triple>/<module 末段>.c`。
+
+**为什么这样选**：分文件需要为每个 package 产出头文件并把跨 package 的类型引用改成前置声明，
+而 `sema` 的类型表（`Ty::Named` 只带简单名）**无法区分两个 package 里的同名类型**；先把"单一布局权威 +
+单一发射单元"钉死，比先拆文件更稳。§7.2 明写"增量结果是优化，不得改变诊断集合"，而发射文本的划分
+不是可观察语义（产物仍是单文件，§7.4）。
+
+**代价（如实记录）**：`.infy-build` 里目前没有 per-package 对象，因此 §5.10 的缓存 key 与 §7.2 的
+`--target` 交叉编译只做 triple 校验，没做增量。**锁定点** = `codegen::tests::generated_text_is_byte_stable`
+（两次发射逐字节相同）。
+
+## D-27 §8.4 规则 1 的"序言"归属歧义：节点间的声明在**前一个节点末尾**执行
+
+§8.4 规则 1 说 `let`/`var`/纯赋值/`label`"**归属前一个节点，作为其"序言"**"—— 术语"序言"指在前，
+归属却记为前一个节点，两种读法都会让 `goto` 跳过或执行同一条声明二选一。规范没有第三处澄清（全文
+"序言"仅这一处，grep 验证）。
+
+**选定实现**：节点 `k` 的函数体 = `k` 的宿主语句 → `k` 的连携块 → 到 `k+1` 的宿主语句之间的普通声明/赋值
+（§4.10 源码顺序即执行顺序，且 §8.1 说连携块挂在宿主语句之后）；**第一条宿主语句之前**的声明进节点 0 的开头。
+若一条链只有声明、没有任何 `expr_stmt`，后端**报错**而不是丢掉这些声明（§7.1 不许静默降级）。
+
+**锁定点** = `codegen::tests::tour_chain_node_table_rows_are_the_c1_golden_lines`（行 8/9/10/11/16/19、
+节点 3/4 各 1 个连携块）与 `goto_targets_are_resolved_at_compile_time`。
+
+## D-28 `match` 的"不可能落到"分支发射 `infy_panic(R_BAD_BOOL, …)`
+
+§3.12 把穷尽性定为阶段 [4] 的静态性质（不穷尽 → `E-0092`），因此运行期"一条臂都没中"按规范不可能发生；
+但后端若发射空 `else`，带值 `match` 的结果临时量会**未初始化**（§4.9 UB 清单里的未初始化读）。
+规范没有为"无臂命中"分配 `R-` 码（§9.3/§9.7 全表核对）。
+
+**选定实现**：`else { infy_panic(R_BAD_BOOL, "codegen: match 未命中任何臂（…）", loc); }` ——
+`infy_panic` 永不返回，于是每条路径都有定义值；消息明写这是后端与阶段 [4] 不一致的实现 bug，而不是伪装成
+一种语言语义。**锁定点** = `codegen::tests::match_arms_become_tag_tests_with_a_non_returning_fallthrough`。
+
+## D-29 含 U+0000 的 `str` 字面量被**拒绝**，而不是静默截断
+
+`infy_rt.h` 的 `infy_str_of(const char*)` 以 `strlen` 计量（`infy_rt.c:756`），而 §2.9 允许 `str` 值内含
+NUL（只有跨 A 轨边界才是 `R-0003`/UB-007）。若后端照发 `infy_str_of("a\0b")`，长度会算成 1 —— 假成功。
+
+**选定实现**：codegen 遇到含 NUL 的字符串字面量直接报错（消息点名 `infy_str_of` 与 `strlen`），
+等运行时补一个"值+长度"的字面量入口（属 §7.4 `.inf rodata` 字符串池，BACKLOG C3）再放开。
+**锁定点** = `codegen::tests::str_literals_and_comparison_use_the_runtime_helpers`（正常路径）。
+
+## D-30 `overflow = "saturate"` 与窄位宽移位：没有检查入口就**不生成**
+
+§5.2 允许 `[profile] overflow = "saturate"`，§4.4 也说溢出策略可饱和；但 `infy_rt.h` 的饱和入口只有
+`infy_saturating_add_u64/i64` 两个，没有 u8/u16/u32/i8/i16/i32 的饱和版本。同理 §4.12 要求移位量
+≥ 类型宽度 → `R-0007`，而头里只有 `infy_shl_u64`/`infy_shr_u64`/`infy_shr_i64`，对 32 位类型会**漏判**。
+
+**选定实现**：这两种情形报 `CgError` 并指名条款，绝不用"先按 panic 语义发出去"或"用 u64 助手凑"。
+**锁定点** = 见 `docs/BACKLOG.md` F2 之外的覆盖表行；`codegen::tests::integer_addition_is_a_checked_runtime_call`
+锁住"整数运算必须是 `infy_*` 调用"这一半。
+
+## D-31 §4.7.1 的移动（owned 值换地址）在 stage [8] 被**拒绝**
+
+§4.7.4 + ABI §3 的释放是靠 `infy_cleanup_push(fn, &obj, is_defer)` 登记**地址**、在作用域末尾
+`infy_cleanup_pop_run()` 弹**栈顶**实现的（`infy_rt.h:115-118`）。`let d = s;`、把 owned 值按值传给形参、
+`return s;` 三种移动都会让已登记的地址失效：要么留下双弹（同一缓冲两次 `infy_free` = 段错误），
+要么对已经搬走的值执行释放（悬垂）。运行时没有"按地址取消/搬迁清理项"的入口。
+
+**选定实现**：这三种移动形式一律 `CgError`，消息指名 §4.7.1/§4.7.4 与"双层释放/悬垂"，
+并在 `docs/BACKLOG.md` 登记为 **F12**（给运行时加 `infy_cleanup_relocate(old, new)` 或按地址移除的 API）。
+不移动的 owned 值（形参、`let` 绑定到新建值）按声明序 push、作用域末尾 pop，LIFO 即 §4.7.4 的逆序。
+**锁定点** = `codegen::tests::moving_an_owned_binding_is_refused`（三种形式成对）+
+`owned_values_register_a_cleanup_entry_at_their_scope`（正常路径的 push/shim/pop 与元素大小）。

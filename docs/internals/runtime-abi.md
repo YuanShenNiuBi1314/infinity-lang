@@ -28,7 +28,7 @@ reference target; `usize`/`isize` width is taken from the target and recorded in
 | `*const T` / `*mut T` | `T const*` / `T*`, dereference only inside `unsafe` (§4.7.5) | 8/8 |
 | `[T; N]` | `T[N]` | `sizeof(T)*N` |
 | `[T]` | `typedef struct { const T* ptr; uint64_t len; } InfySlice_T;` (fat pointer, §4.1) | 16/8 |
-| `Vec<T>` | `typedef struct { T* ptr; uint64_t len; uint64_t cap; } InfyVec_T;` | 24/8 |
+| `Vec<T>` | `InfyVec` — the frozen header's **untyped** `{ void* ptr; len; cap; }`; the element type is not part of the layout, so `elem_size`/`elem_align` are passed at every call site (`infy_vec_push`, `infy_vec_index`, `infy_vec_drop`) | 24/8 |
 | `Box<T>` | `T*` (heap, freed by the owning scope's cleanup entry) | 8/8 |
 | `Rc<T>` / `Arc<T>` | `typedef struct { T* data; uint64_t* strong; } InfyRc_T;` (`Arc` uses `_Atomic uint64_t*`) | 16/8 |
 | `Option<T>` (scalar/`str`) | `typedef struct { T val; uint8_t some; } InfyOption_T;` | C padding rules (see below) — `Option<u32>` = 8/4, `Option<str>` = 24/8 |
@@ -120,12 +120,17 @@ profile, §4.4), `Option::unwrap` on `None` (`R-0005`), `bool` bit pattern (`R-0
 
 ## 5. Chains, nodes, focuses (§8)
 
-A `chain` compiles to
+A `chain` compiles to (these are the *emitted* names, `src/codegen.rs`; the earlier pseudocode used
+`node_<name>_<i>(Frame*)`, which cannot be stored in an `InfyNodeFn` — the frozen header's
+`typedef void (*InfyNodeFn)(void* frame)`, so the cast to the frame type happens inside the body):
 
 ```
-typedef struct ChainFrame_<name> { InfyLocals locals; uint32_t node_idx; ... } Frame;
-static void node_<name>_<i>(Frame* f);      // one function per §8.4 node
-static const InfyNodeDesc nodes_<name>[];   // file:line:col, linkage_count, host_event_id
+struct infy_s_<symbol>_frame { <locals in declaration order>; uint32_t node_idx; };
+static void <symbol>_node_<i>(void* frame_) { <symbol>_frame* f = ...; f->node_idx = <i>; ... }
+static const InfyNodeFn  <symbol>_nodes[];    // one per §8.4 node
+static const InfyNodeLoc <symbol>_locs[];     // file:line:col, node_idx, linkage_count
+static const uint32_t    <symbol>_linkage[];  // linkage_count, same order
+static const InfyChainDesc <symbol>_desc = { name, n, entry_node, frame_size, frame_align, ... };
 ```
 
 `ChainFrame_<name>` exactly: the chain's `let`/`var` bindings as a record **in declaration order**, then
@@ -135,7 +140,14 @@ inspects the internals — it allocates `InfyChainDesc.frame_size` bytes with `f
 (`runtime/infy_rt.c`, `infy_alloc(d->frame_size, ...)` + `memset`), so these offsets are the whole contract
 between codegen and the scheduler. `InfyLocals` is that prefix, not a separate struct.
 Goldens: `hir::tests::chain_frame_is_locals_then_node_idx`, `hir::tests::abi_table_rows_match_infy_rt_h`
-(`InfyNodeLoc` 24/8 = 0/8/12/16/20, `InfyChainDesc` 48/8 = 0/8/12/16/20/24/32/40, `InfyFocusId3` 12/4).
+(`InfyNodeLoc` 24/8 = 0/8/12/16/20, `InfyChainDesc` 48/8 = 0/8/12/16/20/24/32/40, `InfyFocusId3` 12/4),
+and since C2 the same numbers are asserted **inside the generated C** as
+`typedef char infy_layout_X[(sizeof(X) == N && _Alignof(X) == A) ? 1 : -1];` plus
+`offsetof` rows for every field and for `node_idx` — compiling the emitted file (`coverage.md` P12)
+therefore re-checks stage [7]'s table with `gcc`, instead of only trusting a Rust-side test.
+Chains are handed to the scheduler by `infy_chain_register_table` (declared in `infy_rt.h` as of C2;
+the runtime numbers them in registration order, and `goto`/`start` targets are emitted as those
+compile-time ids).
 
 Node numbering follows §8.4 to the letter: only top-level `expr_stmt`s (including `@embed`) open
 a new node; `let`/`var`/plain assignment/`label` are the *preamble* of the preceding node;
