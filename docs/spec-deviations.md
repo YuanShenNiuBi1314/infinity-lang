@@ -152,3 +152,19 @@ F7 验收 = 逐条判定数值绑定是否必须报、以及局部 `var` 是否�
 调用方无法区分"拿到的是 0 号焦点"和"没拿到"。
 **选择**：`infy_sched_init` 把 `next_focus_id` 置 1，0 永久保留为哨兵（回绕判定仍是 `>= 0xFFFFFFFF`，
 可分配 id 为 `1 … 0xFFFFFFFE`）。锁定点 = `runtime/test_rt.c` 的 §11.4 节流用例（`CK(tf != 0u)`）。
+
+## D-22 `R-0709` 被规范自身双重占用：附录 D 的 IFBC"边界"校验 vs §9.7 的嵌入内存配额 —— **未裁决（OPEN，BACKLOG B3）**
+B2 轮为写指针逐条回查规范时确认这是**规范级自相矛盾**，不是实现错误：
+- §9.7 运行时码表（spec:1502）：`R-0709 = 嵌入单元超出 max_mem_bytes`，与 spec:1267（`@embed(max_mem_bytes=…)` → 独立 arena，超限 `R-0709`）一致；
+- 附录 D 装载校验映射（spec:2441）："任一失败即整体拒绝该模块，错误码经首失败项映射：线性 0x→`R-0704`、高度→`R-0705`、类型→`R-0706`、帧→`R-0707`、host 签名→`R-0708`、**边界→`R-0709`**"；
+- spec:2417 又把"tailcall 帧尺寸不兼容"称为装载期 `R-0709`。
+
+同一个 `0x0709` 因此有三种语义。本仓库现状：`runtime/infy_rt.h:75-76` 把 `R_IFBC_MEMBUDGET` 定义为 `0x0709`、
+`R_IFBC_BOUNDARY` 顺延为 `0x070A`；而 `R_IFBC_MEMBUDGET` 在 `infy_ifbc.c` 里被用在**三处不同语义**上——
+装载期 tailcall 帧尺寸不兼容（`:768`）、`closure.new` 的 `code_idx` 越出 `func_table`（`:777`）、
+执行期 `live_bytes > max_mem_bytes`（`:1475`，这才是 §9.7 的原意），`test_ifbc.c:418` 则把它当作
+"R-0709 tail-call frame size"断言。附录 D.10 对 `R_IFBC_BOUNDARY` 另有指定，与本现状不符。
+**本轮不选择、不改动枚举**（改号会同时动 `infy_rt.h`、`infy_ifbc.c`、`test_ifbc.c` 与 Rust 侧 `src/ifbc.rs` 四处，
+必须与 B3 的 `R-0701`/`R-0713` 缺失、`frame_kind` 层级一并裁决）。裁决时的约束：spec:1508 明文
+`R-0702`/`E-0701` 编号"永久保留、不得赋予新语义"，因此不能靠把冲突项挪到废弃号上来消解。
+追踪项 = BACKLOG B3；裁决前 `docs/coverage.md` 的 §7.8/附录 D 一行保持 🟡，不得声称 IFBC 码表与 §9.7 对齐。

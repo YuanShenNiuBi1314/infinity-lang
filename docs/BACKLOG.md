@@ -91,8 +91,25 @@
       `{:#X}` 前缀 `0X`→`0x`、焦点 id 起点 0→1（0 保留为哨兵）。后三条属"规范未定→选一个确定实现"，已记偏差 **D-20/D-21**。
       一条未修只登记：host 调用的嵌套计数在 panic 跨越边界时不回滚 → 新任务 **F8**。
       证据提交：`b1b7ff8`（rt harness 32303/0、cargo 332/0、check 0/51、tour exit 0、IFBC 79/79 全部为该提交上的实测复跑，非引用）。
-- [ ] B2 `runtime/infy_ifbc.c` + `infy_dyn.c` 与 `infy_rt.c` **真实链接**跑通（此前只对着 stub 链接过）。
-      验收：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/infy_rt.c runtime/test_ifbc.c -o ifbc_tests && ./ifbc_tests`。
+- [x] B2 `runtime/infy_ifbc.c` + `infy_dyn.c` 与 `infy_rt.c` **真实链接**跑通（此前只对着 stub 链接过）。
+      验收：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/infy_rt.c runtime/test_ifbc.c
+      -o target/scratch/ifbc_real.exe && (cd target/scratch && ./ifbc_real.exe)`
+      → **0 error / 0 warning，`IFBC harness: 79 asserts, 79 pass, 0 FAIL`，exit 0**。
+      根因不是工具链：把静默的 `collect2: error: ld returned 5` 用逐对象 `gcc -c` + `nm --defined-only` / `nm -u` 求差，
+      真缺口只有**一个**符号——`test_ifbc.c` 拿 stub 专有的 `infy_stub_live_objs()` 当泄漏探针（116 个未决符号里其余全是
+      CRT/kernel32 正常导入，且四个对象之间**无**同名重定义，§2 之前担心的那一条不成立）。
+      改法：探针走冻结公共 API `infy_mem_stats().live_objs`（`infy_rt.h`；替身与生产都在这个字段里报同一份
+      `infy_alloc`/`infy_free` 余额），18 处调用点等价替换，**断言一条没减、没放宽**。
+      两条防"空跑"证据：一次性探针实测生产计数器是活的（`objs 0 → 1 → 0`、`allocs 0 → 1`，exit 0）；
+      `nm` 显示产物含 **230 个 `T infy_` 生产符号**、stub 专有符号 **0** 个。生产 `infy_string_push` 与替身只在
+      `cp == 0`（生产走 `R-0003` panic）上不同，harness 不触及该路径，所以两侧 stdout **逐字节相同**是真实一致，不是未测。
+      `test_ifbc_stubs.c` 与 P6 替身链**保留**作对照，未退役。
+      回归基线全部复跑未退化：`cargo test --offline --lib` **332 passed / 0 failed**、`cargo check --offline --lib`
+      0 error / 51 warning、`infy check examples/tour` exit 0、`(cd examples/tour && infy fmt --check)` exit 2（F6 未裁决）、
+      rt harness **32303 assertions / 0 failures**、替身链 IFBC **79 asserts / 79 pass**、`gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` 0 warning。
+      文档同步（不留旧声称）：`docs/coverage.md` 的 P11 由"探测失败 exit 1"改为实测 exit 0 并写入 `nm` 确诊手法、
+      §4"被测对象是生产运行时吗"❌→✅；`docs/status.md` 与 `README.md` 里"79 断言链的是替身"的限定已解除。
+      **B2 不改变** §7.8/附录 D 的 🟡：Rust↔C 双侧交叉验证仍被 **D4**（操作数个数不一致）阻塞。
 - [ ] B3 修 `infy_rt.h` 已知瑕疵：`InfyRCode` 缺 `R-0701`/`R-0713`；`R_IFBC_BOUNDARY` 与 D.10/§7.9 的映射冲突（都指 0x0709）；
       `frame_kind` 是模块级而 D.8 需要函数级；`infy_rt.h:212` typedef 前置引用告警。改完在 `docs/spec-deviations.md` 追加条目。
       验收：`gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` 无告警。
@@ -105,6 +122,9 @@
       (1) `InfyRCode` 没有 `0x0701`（§9.7 `R-0701` 嵌入执行超时，注释里在用它）与 `0x0713`（§9.7 非 `repr(C)` 求字段偏移）；
       (2) `R_IFBC_MEMBUDGET = 0x0709` 与 §9.7 的 `R-0709 = 嵌入单元超出 max_mem_bytes` 语义相撞，`R_IFBC_BOUNDARY` 现占 `0x070A`
           而附录 D.10 另有指定——需要先按附录 D/§9.7 定谁让路，再改枚举；
+          **B2 轮回查规范后确认为规范级自相矛盾**（附录 D spec:2441"边界→`R-0709`"与 §9.7 spec:1502 争同一号，
+          且 spec:2417 把 tailcall 帧尺寸也称为装载期 `R-0709`；实现侧 `R_IFBC_MEMBUDGET` 目前背了三处语义），
+          已逐条带行号登记为偏差 **D-22（OPEN）**；
       (3) `frame_kind` 在头文件里根本没有字段（只有 §7.4 meta 里的模块级形态），D.8 要的是函数级。
 
 ### 阶段 C：把 tour 从 check 推到 build/run（P6 单文件承诺的落地）
@@ -174,26 +194,37 @@
 
 ## 2. 当前指针
 
-> **下一轮第一件事：取 B2**（§1 里第一个 `[ ]`：`infy_ifbc.c` + `infy_dyn.c` 与**生产** `infy_rt.c` 真实链接跑通）。
-> 验收：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/infy_rt.c runtime/test_ifbc.c -o target/scratch/ifbc_real.exe && ./target/scratch/ifbc_real.exe`。
-> **B1 轮末尾刚重探过这条命令**：仍然只有 `collect2.exe: error: ld returned 5 exit status`（exit 1，不打印任何 undefined reference），
-> 头文件自洽之后依旧如此，所以不是 `infy_rt.h:212` 那类告警的问题。下一步手法：`gcc -c` 出四个 `.o`，用
-> `nm -u` 逐对象比符号缺口（经验库条目），或直接调 `C:/msys64/ucrt64/bin/ld.exe` 看它到底缺什么；
-> 也要防 `test_ifbc.c` 与 `infy_rt.c` **同名符号重定义**（`test_ifbc_stubs.c` 就是为避开这件事写的替身）。
-> 输出二进制一律写 `target/scratch/`（写 `/tmp` 会让 `ld` 直接返回 5）。
+> **下一轮第一件事：取 B3**（§1 里第一个 `[ ]`：`infy_rt.h` 的三项语义瑕疵；验收命令 `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c`
+> 在 B1 轮就已 0 warning，所以**不要**因为命令绿就勾——三项语义没改完就不勾）。B2 轮已把取证做齐，直接从这里接：
+> (1) `InfyRCode` 缺 `0x0701`（§9.7 spec:1495 `R-0701 = 嵌入执行超时`，spec:1191/2178 均为 `tickloop` 超限、不杀进程）
+>     与 `0x0713`（spec:1627/2438 `field_off` 于非 `repr(C)` → `R-0713`；`test_ifbc.c` 已在用裸 `0x0713`）；
+> (2) **规范级自相矛盾，已确认**：附录 D 的装载校验映射（spec:2441）写"边界→`R-0709`"，而 §9.7 码表
+>     （spec:1502）把 `R-0709` 定义为"嵌入单元超出 `max_mem_bytes`"；现状 `R_IFBC_MEMBUDGET=0x0709`、`R_IFBC_BOUNDARY=0x070A`。
+>     裁决时注意 spec:1508：`R-0702`/`E-0701` 编号**永久保留不得赋新语义**，所以不能靠"挪号"了事；
+>     选一个确定实现并写 `docs/spec-deviations.md`（§9.7 是码表权威，倾向让 IFBC 边界让路，但必须逐条写明依据）；
+> (3) `frame_kind`：**B2 轮查到实现其实已有函数级字段**（`infy_ifbc.c:242` `FDesc.frame_kind`、`:351` 读取、
+>     `:715/:951` 以 `== 1` 判 coroutine、`:767` tailcall 兼容性比较），而 §7.8.1（spec:1232）只定义了**模块级**
+>     `frame_kind:u8 = 0`。真正缺的是 `infy_rt.h` / ABI 文档侧的函数级声明与"1 = coroutine"这个取值来源——
+>     先确认 D.8 的取值表，再决定是补文档还是补头文件字段，别照旧描述直接加字段。
+> 输出二进制一律写 `target/scratch/`（写 `/tmp` 会让 `ld` 直接返回 5）；改 `infy_rt.h` 后**四条链**都要复跑
+> （P6 替身 IFBC、P11 生产 IFBC、P9 rt、`-c infy_rt.c`），因为它们共用一个头。
+>
+> **B2 已完成，手法留档**：静默的 `collect2: error: ld returned 5` 用逐对象 `gcc -c` + `nm --defined-only`/`nm -u` +
+> `comm -23` 一减就露出真缺口（本轮唯一缺口是 harness 私用的 `infy_stub_live_objs`）。`nm -u -P` 在本机只输出单列 `U`，别用它解析。
 >
 > **推送欠账**：只认现算 `git rev-list --count <远端SHA>..HEAD`；远端 SHA 用
 > `gh api repos/YuanShenNiuBi1314/infinity-lang/git/refs/heads/toolchain --jq .object.sha` 回查，`Everything up-to-date` 不算成功。
 >
-> 已验证事实（B1 轮全部复跑，非引用）：`cargo test --offline --lib` **332 passed / 0 failed**
+> 已验证事实（B2 轮全部复跑，非引用）：`cargo test --offline --lib` **332 passed / 0 failed**
 > （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `pkg` 19 · `toml` 15 · `borrow` 15 · `sha256` 12 ·
 > `codes` 9 · `base64` 7 · `parser` 7 · `ifbc` 5 · `cli` 5 · `stdlib` 4 · `diag` 2 = 332）；
 > `cargo check --offline --lib` 0 error / 51 warning；`infy check examples/tour` exit 0；
 > `(cd examples/tour && infy fmt --check)` **exit 2（2 file(s) are not canonical，见 F6）**；
-> **C 侧运行时 harness（B1 轮新增）`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` →
-> 0 error / 0 warning，`32303 assertions, 0 failures` exit 0**；
+> **rt harness `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → 0 error / 0 warning，
+> `32303 assertions, 0 failures` exit 0**；
 > `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` → **0 warning**（B3 的验收命令已过，B3 另外三项语义问题仍开着）；
-> IFBC 侧 `gcc … infy_ifbc.c infy_dyn.c test_ifbc.c test_ifbc_stubs.c` → `79 asserts, 79 pass, 0 FAIL` exit 0、0 告警（链的仍是替身 = B2）。
+> **IFBC 两条链都绿且 stdout 逐字节相同**：替身链 `gcc … infy_ifbc.c infy_dyn.c test_ifbc.c test_ifbc_stubs.c` →
+> `79 asserts, 79 pass, 0 FAIL` exit 0；**生产链** `gcc … infy_ifbc.c infy_dyn.c infy_rt.c test_ifbc.c` → 同为 79/79、0 告警（B2）。
 > A4 修掉的 4 个前端缺陷与 B1 修掉的 7 个运行时缺陷都有回归测试；未修只登记：D-18、D-19/F7、F8（host 嵌套计数跨 panic 不回滚）。
 > `main` 与本地分叉（另一会话推了 `faa34ad`/`05da606`），**合并主干由人决定**。
 > 优先级最高的已知地雷：**D4**（Rust/C 的 IFBC 操作数个数不一致，D2 之前必须先裁）、**D1**（`src/btrack.rs` 端到端）、

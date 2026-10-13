@@ -1,13 +1,17 @@
 /* test_ifbc.c — standalone harness for the IFBC loader/verifier/interpreter/object model.
  *
  * Builds IFBC module images BYTE BY BYTE in memory (see build_img/emit_img) and asserts the
- * behaviour mandated by §7.8.3 / appendix D / UB-019 / UB-020. It is compiled against
- * test_ifbc_stubs.c (a harness-only stand-in for infy_rt.c), NOT the production runtime.
+ * behaviour mandated by §7.8.3 / appendix D / UB-019 / UB-020. It links against either
+ * test_ifbc_stubs.c (harness-only stand-in) or the production infy_rt.c — see the two
+ * Build+run lines below.
  *
- * Build+run:
+ * Build+run (stub runtime):
  *   gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
  *       runtime/test_ifbc.c runtime/test_ifbc_stubs.c -o ifbc_tests
- *   ./ifbc_tests
+ * Build+run (production runtime, B2):
+ *   gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
+ *       runtime/infy_rt.c runtime/test_ifbc.c -o ifbc_real
+ *   ./ifbc_real
  */
 #include "infy_rt.h"
 
@@ -21,8 +25,10 @@
 extern void infy_ifbc_module_free(InfyIfbcModule* m);
 typedef int (*InfyHostThunk)(InfyDyn** args, uint32_t nargs, InfyDyn** ret, const InfyNodeLoc* at);
 void infy_ifbc_bind_host(InfyIfbcModule* m, uint32_t import_idx, InfyHostThunk fn);
-uint64_t infy_stub_live_objs(void);
-uint64_t infy_stub_live_bytes(void);
+
+/* Leak oracle via the frozen public API, so this harness links against BOTH
+ * test_ifbc_stubs.c and production infy_rt.c (see InfyMemStats::live_objs). */
+static uint64_t live_objs(void) { return infy_mem_stats().live_objs; }
 
 /* ===== opcode byte values — MUST match infy_ifbc.c's OPS table ===== */
 enum {
@@ -382,7 +388,7 @@ static int strstr_prefix(const char* hay, size_t n, const char* pre);
 /* ===== (a) valid module loads and executes ===== */
 static void test_valid_add(void) {
     InfyIfbcModule* m = 0;
-    uint64_t base = infy_stub_live_objs();
+    uint64_t base = live_objs();
     int rc = load_scenario(SC_VALID, &m, 0, 0);
     CHECK(rc == 0 && m != 0, "(a) valid module loads");
     if (m) {
@@ -396,7 +402,7 @@ static void test_valid_add(void) {
         infy_dyn_decr(a); infy_dyn_decr(b);
         infy_ifbc_module_free(m);
     }
-    CHECK(infy_stub_live_objs() == base, "(a) no leak after load+invoke+free");
+    CHECK(live_objs() == base, "(a) no leak after load+invoke+free");
 }
 
 /* ===== (b) each of the six validations rejects with the exact code ===== */
@@ -412,12 +418,12 @@ static void test_six_validations(void) {
         { SC_TAILCALL_BAD, R_IFBC_MEMBUDGET, "(b) R-0709 tail-call frame size" },
     };
     for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
-        uint64_t base = infy_stub_live_objs();
+        uint64_t base = live_objs();
         InfyIfbcModule* m = (InfyIfbcModule*)0x1;
         int rc = load_scenario(t[i].s, &m, 0, 0);
         CHECK(rc == t[i].code, t[i].nm);
         CHECK(m == 0, "  rejected module left no handle");
-        CHECK(infy_stub_live_objs() == base, "  failed load frees the image copy (UB-019 no partial state)");
+        CHECK(live_objs() == base, "  failed load frees the image copy (UB-019 no partial state)");
     }
     /* --all-errors reports more than one violation */
     FILE* r = mem_stream();
@@ -446,12 +452,12 @@ static void test_tickloop_timeout(void) {
     int rc = load_scenario(SC_TICKET, &m, 0, 0);
     CHECK(rc == 0 && m != 0, "(f) tickloop module loads (loop is valid bytecode)");
     if (m) {
-        uint64_t base = infy_stub_live_objs();
+        uint64_t base = live_objs();
         InfyDyn* ret = 0;
         int irc = infy_ifbc_invoke(m, 0, 0, 0, &ret, 60000, infy_current_node_loc());
         CHECK(irc == 0x0701, "(f) tickloop budget trips R-0701");
         CHECK(ret == 0, "(f) no value delivered on timeout");
-        CHECK(infy_stub_live_objs() == base, "(f) timeout unwinds frames without touching process/leaking");
+        CHECK(live_objs() == base, "(f) timeout unwinds frames without touching process/leaking");
         infy_ifbc_module_free(m);
     }
 }
@@ -507,7 +513,7 @@ static void test_linemap_warning(void) {
 /* ===== executed paths: closure + call.stat, exception dispatch ===== */
 static void test_exec_paths(void) {
     InfyIfbcModule* m = 0;
-    uint64_t base = infy_stub_live_objs();
+    uint64_t base = live_objs();
     int rc = load_scenario(SC_CLOSURE_OK, &m, 0, 0);
     CHECK(rc == 0 && m != 0, "(x) closure module loads");
     if (m) {
@@ -537,7 +543,7 @@ static void test_exec_paths(void) {
         if (ret) infy_dyn_decr(ret);
         infy_ifbc_module_free(m);
     }
-    CHECK(infy_stub_live_objs() == base, "(x) exec paths leak nothing");
+    CHECK(live_objs() == base, "(x) exec paths leak nothing");
 }
 
 /* ===== (m) object model: list/dict/tuple/str, refcounts reach zero, no leaks ===== */
@@ -554,7 +560,7 @@ extern int      infy_dyn_eq(const InfyDyn*, const InfyDyn*);
 extern InfyDyn* infy_dyn_bytes_new(const uint8_t*, uint64_t);
 
 static void test_object_model(void) {
-    uint64_t base = infy_stub_live_objs();
+    uint64_t base = live_objs();
 
     /* list */
     InfyDyn* l = infy_dyn_list_new();
@@ -626,10 +632,10 @@ static void test_object_model(void) {
 
     /* release everything; refcounts must reach zero with no leak */
     infy_dyn_decr(l); infy_dyn_decr(t); infy_dyn_decr(d); infy_dyn_decr(s1); infy_dyn_decr(s2);
-    CHECK(infy_stub_live_objs() == base, "(m) list/dict/tuple/str all released to zero");
+    CHECK(live_objs() == base, "(m) list/dict/tuple/str all released to zero");
     /* we did not decr the box created inside the is() CHECK; not tracked, so just assert no growth trend */
     /* Now a clean refcount-to-zero check: */
-    uint64_t b2 = infy_stub_live_objs();
+    uint64_t b2 = live_objs();
     InfyDyn* nest = infy_dyn_list_new();
     InfyDyn* sub = infy_dyn_dict_new();
     infy_dyn_dict_set(sub, infy_dyn_str((InfyStr){(const uint8_t*)"x",1}), infy_dyn_int(7));
@@ -638,7 +644,7 @@ static void test_object_model(void) {
     infy_dyn_incr(nest);                    /* rc 2 */
     infy_dyn_decr(nest);                    /* rc 1, nothing freed */
     infy_dyn_decr(nest);                    /* rc 0, frees nest->sub->(str,val), and bytes */
-    CHECK(infy_stub_live_objs() == b2, "(m) nested list->dict refcount reaches 0, no leak");
+    CHECK(live_objs() == b2, "(m) nested list->dict refcount reaches 0, no leak");
 }
 
 /* helper: prefix match (defined before use in file order) */
@@ -655,7 +661,7 @@ static uint64_t lcg(uint64_t* st) { *st = (*st) * 6364136223846793005ull + 14426
  * and never leave a partially-initialised module (the boundary every bounds-check protects). */
 static void test_truncation_sweep(void) {
     Buf img; bu_init(&img); build_img(SC_VALID, &img);
-    uint64_t base = infy_stub_live_objs();
+    uint64_t base = live_objs();
     int clean = 1;
     for (size_t k = 0; k <= img.n; k++) {
         InfyIfbcModule* mod = (InfyIfbcModule*)0xdead;
@@ -669,14 +675,14 @@ static void test_truncation_sweep(void) {
     }
     bu_free(&img);
     CHECK(clean, "(trunc) every prefix of a valid image is safely rejected");
-    CHECK(infy_stub_live_objs() == base, "(trunc) truncation sweep leaks nothing");
+    CHECK(live_objs() == base, "(trunc) truncation sweep leaks nothing");
 }
 
 /* deterministic single-byte mutation sweep: flip one byte at a time in a valid image and ensure
  * load either succeeds or returns a specific validation code, never a crash, never a partial. */
 static void test_byte_mutation_sweep(void) {
     Buf img; bu_init(&img); build_img(SC_VALID, &img);
-    uint64_t base = infy_stub_live_objs();
+    uint64_t base = live_objs();
     int clean = 1;
     for (size_t i = 0; i < img.n; i++) {
         for (int b = 0; b < 8; b++) {
@@ -693,11 +699,11 @@ static void test_byte_mutation_sweep(void) {
     }
     bu_free(&img);
     CHECK(clean, "(mut) single-byte mutations never crash or leave a partial module");
-    CHECK(infy_stub_live_objs() == base, "(mut) mutation sweep leaks nothing");
+    CHECK(live_objs() == base, "(mut) mutation sweep leaks nothing");
 }
 
 static void test_hostile(void) {
-    uint64_t base = infy_stub_live_objs();
+    uint64_t base = live_objs();
     uint64_t st = 0x12345678;
     int survived = 1;
     for (int it = 0; it < 800; it++) {
@@ -723,7 +729,7 @@ static void test_hostile(void) {
         fclose(dev); free(b2);
     }
     CHECK(survived, "(fuzz) arbitrary bytes never corrupt memory / always return a code or handle");
-    CHECK(infy_stub_live_objs() == base, "(fuzz) no leak across hostile loads");
+    CHECK(live_objs() == base, "(fuzz) no leak across hostile loads");
 }
 
 int main(void) {

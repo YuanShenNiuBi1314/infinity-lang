@@ -46,6 +46,9 @@ $ infy build examples/tour
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
       runtime/test_ifbc.c runtime/test_ifbc_stubs.c -o ifbc_tests && ./ifbc_tests
 IFBC harness: 79 asserts, 79 pass, 0 FAIL        # exit 0；B1 轮起 0 编译告警（原 4 条 infy_rt.h 前置引用 = B3 第 4 项，已修）
+$ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
+      runtime/infy_rt.c runtime/test_ifbc.c -o ifbc_real && ./ifbc_real
+IFBC harness: 79 asserts, 79 pass, 0 FAIL        # exit 0，0 error / 0 warning；B2 轮真实链生产 infy_rt.c，stdout 与上一行逐字节相同
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && ./rt_tests
 32303 assertions, 0 failures                     # exit 0，0 error / 0 warning；链的是生产 infy_rt.c（B1 轮收敛）
 $ gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c
@@ -72,7 +75,8 @@ B 轨 lowering(`src/btrack.rs`) 尚未收敛；C 侧 harness(`runtime/test_rt.c`
 `src/codegen.rs`、`src/hir.rs`、`src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs`
 是 1 行占位文件（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
 A 轨绑定、`std.net` TLS、`infy lsp` 未实现。
-79 项 IFBC 断言链的是 `runtime/test_ifbc_stubs.c`（harness 替身），**不是**生产 `infy_rt.c`，所以它不能算运行时已验证（B2）。
+79 项 IFBC 断言**B2 轮起既链 `runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，
+两侧同为 79/79、stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 Rust↔C 双侧交叉验证（D4 阻塞）。
 
 ## A2 本轮修掉的真实缺陷（每条都有回归测试）
 
@@ -99,7 +103,8 @@ A2 轮收敛了 `formatter` 与词法/语法侧的缺口；`lexer` 的 E-0020 �
 `use`/`mod`/`union`/`linkage` 这组"保留但本版文法未用"的字）。**仍未收敛**：
 `src/btrack.rs` 的端到端 lowering（D1）。`runtime/test_rt.c`（B1）已于 B1 轮收敛。已完成的 C 侧里程碑不变：`ifbc-vm`(`runtime/test_ifbc.c`) 79 项断言通过，
 含六项装载校验、逐字节截断/单字节变异/800 轮随机 fuzz；`codes`、`infra`(哈希/TOML) 已交付。
-（A3 轮补充限定：这 79 项链的是 `runtime/test_ifbc_stubs.c` 替身，不是生产 `infy_rt.c`。）
+（A3 轮当时的限定"这 79 项链的是替身不是生产运行时"已于 **B2 轮解除**：同一 harness 现在也链生产
+`runtime/infy_rt.c` 跑通 79/79，见上文 P11。）
 
 新发现（未修，已记入 BACKLOG 阶段 D）：Rust 侧 IFBC 编码与 C 侧虚拟机的**操作数个数**不一致 —
 `push`（Rust 2 个：池索引 + 类型；C 表 `nops=1`）、`box.dyn`（Rust 1；C `nops=0`，附录 D.7 与 `runtime/IFBC.md` 也是 0）、
