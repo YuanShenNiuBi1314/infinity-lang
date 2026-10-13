@@ -178,7 +178,7 @@
       **明确未做**：语句/表达式级 IFIR（函数体仍是 `ast::Block`），`infy build` 也没有接 HIR（仍 exit 6）—— 属 C2 前置。
       同族未修只登记为 **F9/F10/F11**。
       证据提交：`44c7b54`（上述 354/0、20 项 `hir`、0/51、tour exit 0、`-c` 0 告警、rt 32303/0、两条 IFBC 链 82/82
-      全部为该提交上的实测复跑，非引用）。
+      全部为该提交上的实测复跑，非引用；远端 `toolchain` 回查 = `14654c9`，推送欠账 **0**）。
 - [ ] C2 `src/codegen.rs`：INFY → C11 发射，覆盖 tour 子集（原语/`str`/`String`/`Vec`/`Option`/`Result`/struct/enum/链/`?`/`match`/`fmt`），检查型算术与边界检查永不关闭（§7.2）。
       验收：`infy build` 在 `examples/tour` 上生成 `.c` 且 `gcc` 能编译它（可先只验到编译，不要求运行）。
 - [ ] C3 `src/artifact.rs`：`INFYART2` 段尾 + `.inf meta/ifbc/sum` 段、`build-id`（§7.3 规范化输入 SHA-256）。
@@ -298,9 +298,12 @@
 >
 > **推送欠账**：只认现算 `git rev-list --count <远端SHA>..HEAD`；远端 SHA 用
 > `gh api repos/YuanShenNiuBi1314/infinity-lang/git/refs/heads/toolchain --jq .object.sha` 回查，`Everything up-to-date` 不算成功。
-> **推送欠账**：C1 轮开头按协议补推，`git push origin HEAD:toolchain` 两次都是 exit **128**
-> （`Recv failure: Connection was reset`），`api.github.com` 回查成功 → 远端 `toolchain` 仍是 `6fa6dd3`，
-> 当时欠账 **2**（`c63187e` + `95551ea`），加上 C1 轮的提交与记录行后为 4。通道本轮仍未恢复，下一轮继续补推。
+> **推送状态**：只认现算 `git rev-list --count <远端SHA>..HEAD`；远端 SHA 用
+> `gh api repos/YuanShenNiuBi1314/infinity-lang/git/refs/heads/toolchain --jq .object.sha` 回查，`Everything up-to-date` 不算成功。
+> **C1 轮欠账 = 0**：开头两次 `git push origin HEAD:toolchain` 都 exit **128**（`Recv failure: Connection was reset`），
+> 但提交完再推**第一次就 exit 0**（`6fa6dd3..14654c9`），`api.github.com` 回查远端 = 本地 HEAD `14654c9`。
+> 所以 B3 轮欠推的 `c63187e`/`95551ea` 与本轮的 `44c7b54`/`14654c9` 全部上去了。
+> 手法仍然适用：`github.com:443` 是**间歇**不通而不是坏了，失败不轰炸、下一轮照协议再推一次即可。
 >
 > 已验证事实（C1 轮全部复跑，非引用）：`cargo test --offline --lib` **354 passed / 0 failed**
 > （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `sema` 22 · `pkg` 19 · `hir` 20 · `toml` 15 · `borrow` 15 ·
