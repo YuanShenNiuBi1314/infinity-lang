@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 372 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 391 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
 Finished `dev` profile  (51 warnings，全部为 unused/dead code，见 BACKLOG F2)
 $ infy check examples/tour
@@ -44,7 +44,16 @@ check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)   # exit 0
 $ infy build examples/tour
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)
 codegen ok — 12473 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
-notice: 阶段 [9] 链接与 §7.4 产物容器尚未实现（BACKLOG C3），因此 `infy build` 仍以 6 退出。   # exit 6
+artifact ok — 199975 byte(s) 写到 examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe（§7.4：宿主镜像 199173 + 段 blob 738 + 段尾 64，6 段）
+  build-id 4d8250b58122ca2b76132029955e2d2005156dc0a6b021bf5f4ae761e5fd55ba   # exit 0（C3 轮起阶段 [9] 已落地）
+$ infy build examples/tour --verify-reproducible
+verify-reproducible ok — 两个独立构建目录产物字节相同（199975 字节）            # exit 0，§7.3 第 3 项
+$ infy build examples/tour --cc /no/such/cc
+error: E-0602 · … 无法启动 …（§7.6.2：A 轨工具链缺失或未注册，绝不静默跳过链接）  # exit 6
+$ infy artifact info examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe --nodes
+INFY artifact (.inf meta) … n_nodes 6 … entry chain `Pipeline` (kind 0)
+chain_id  node_idx  file                   line  col  linkage  host_event_id  name
+   0         0      cmd/runner/main.infy     8     5      0         -          begin     # exit 0（8/9/10/11/16/19，与 C1 金样一致）
 $ gcc -std=c11 -Wall -Wextra -I runtime -c examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c -o ci.o
 （无输出）                                        # exit 0，0 error / 0 warning；这是 BACKLOG C2 的验收命令（BACKLOG §1 C2）
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
@@ -53,32 +62,36 @@ IFBC harness: 82 asserts, 82 pass, 0 FAIL        # exit 0；B1 轮起 0 编译�
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
       runtime/infy_rt.c runtime/test_ifbc.c -o ifbc_real && ./ifbc_real
 IFBC harness: 82 asserts, 82 pass, 0 FAIL        # exit 0，0 error / 0 warning；B2 轮真实链生产 infy_rt.c，stdout 与上一行逐字节相同
-$ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && ./rt_tests
-32303 assertions, 0 failures                     # exit 0，0 error / 0 warning；链的是生产 infy_rt.c（B1 轮收敛）
+$ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && (cd target/scratch && ./rt_tests)
+32335 assertions, 0 failures                     # exit 0，0 error / 0 warning；链的是生产 infy_rt.c；C3 轮 +32（Rust 写 ↔ C 读的夹具锁 + D-33）
 $ gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c
 （无输出）                                        # exit 0，0 warning（B3 的验收命令；三项语义已于 B3 轮落地，见下文 B3 一节）
 $ (cd examples/tour && infy fmt --check)
 2 file(s) are not canonical                        # exit 2，见下文"导览源码不是格式化不动点"
 ```
 
-372 项按模块（`cargo test --offline --lib -- --list` 分组计数，合计 372）：
-`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `codegen` **18** · `sema` 22 · `pkg` 19 · `hir` 20 ·
-`toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `base64` 7 · `parser` 8 · `ifbc` 6 · `cli` 5 · `stdlib` 4 · `diag` 2。
+391 项按模块（`cargo test --offline --lib -- --list` 分组计数，合计 391）：
+`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `codegen` 18 · `artifact` **18** · `sema` 22 ·
+`pkg` 19 · `hir` 20 · `toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `parser` 8 · `base64` 7 ·
+`ifbc` 6 · `cli` **6** · `stdlib` 4 · `diag` 2。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
   借用检查（`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006`/`E-0121` 正反例）、哈希与 base64 与 TOML 往返、
   `infy` CLI 自身、IFBC Rust 侧编码/解码/反汇编：都有上表的测试。
 - **仍没有一项独立单测**：`btrack.rs`（§7.7 B 轨）。它的证据目前只有"对 `examples/tour` 跑完 §7.1 阶段 [1]–[5] 且 exit 0"这一条端到端。
-  `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成有 18 项独立单测的模块，`hir.rs` 的 20 项锁阶段 [7]。
+  `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成有 18 项独立单测的模块，`hir.rs` 的 20 项锁阶段 [7]，
+  `artifact.rs`（§7.1 阶段 [9] / §7.3 / §7.4）在 C3 轮新建并直接带 18 项单测 + 一份被 C 侧读取器消费的逐字节夹具。
 - 先前记为"§9.2 字节级金样"实际是 1 条规范样例逐字节 + 1 条 caret 行规则（`diag` 2 项）；
   `goto` 的三条 `E-0301` 越界路径与 `E-0121` 在 A4 轮之前无测试（**A4 轮已补**，见下）。
 
 **绿灯的含义要如实限定**：`cargo test --lib` 全绿只说明"已写的模块自洽"，不等于 §12 合规。
-`infy build` **自 C2 轮起真跑阶段 [7]+[8] 并写出可编译的 C11**，但阶段 [9]（链接成 §7.4 单文件产物）未实现，故仍以 exit **6** 结束；
+`infy build` **自 C3 轮起跑完 §7.1 阶段 [1]–[9]**：前端 → HIR → C11 → 用 A 轨 `cc` 链成宿主镜像 →
+追加 §7.4 段容器与 64 字节段尾，`infy artifact info` 读得回自己刚产出的文件（P4/P13/P14），故 exit **0**。
+阶段 [10]（sumdb 校验与运行时自校验比对）仍**未做**，`.inf sum` 只是把 `MODULE.infy.lock` 的 dirhash 清单抄进容器；
 `run`/`test`/`doc`/`lib pack`/`ifbc dump`/`conformance` 仍显式报"未实现"（exit 1）；
-B 轨 lowering(`src/btrack.rs`) 尚未收敛；C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（32303 断言 / 0 失败，直接链生产 `infy_rt.c`）；
-`src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs` 是 1 行占位文件（`src/artifact.rs` **还不存在**，它是 C3 要新建的模块）（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
+B 轨 lowering(`src/btrack.rs`) 尚未收敛；C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（C3 轮复跑 **32335 断言 / 0 失败**，直接链生产 `infy_rt.c`）；
+`src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs` 是 1 行占位文件（`src/artifact.rs` 已于 C3 轮从"不存在"落成 §7.4 容器写入器 + 读取器 + §7.3 build-id，18 项独立单测）（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
 A 轨绑定、`std.net` TLS、`infy lsp` 未实现。
 IFBC 断言（B3 轮 79 → **82**，新增的是 `closure.new` 越出 `func_table` 的拒绝路径）**B2 轮起既链
 `runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，两侧同为 82/82、stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 Rust↔C 双侧交叉验证（D4 阻塞）。
@@ -327,10 +340,48 @@ stdout 逐字节相同）；`cargo test --offline --lib` **333 passed / 0 failed
 `-c infy_rt.c` **0 warning** exit 0、rt harness **32303 assertions / 0 failures** exit 0、
 替身链 IFBC **82/82** exit 0、生产链 IFBC **82/82** exit 0 且与替身链 stdout 逐字节相同。
 
+## C3 · `src/artifact.rs`：§7.4 段容器 + §7.3 build-id + 阶段 [9]（本轮）
+
+`src/artifact.rs` 从零落成 **1176 行**：容器写入器（`.inf meta` 208 字节固定记录 + 字符串池 +
+`ChainTable`/`EventTable`/`NodeTable`/`.inf sum`/入口记录 + 64 字节段尾含 `trailer_crc` 与 build-id 低 4 字节镜像）、
+读取器（逐条对齐 C 侧 `infy_art_parse_trailer`/`parse_meta_record`/`meta_resolve_strings` 的七个拒绝理由）、
+以及 §7.3 的 `build_id`。`cli.rs` 接上阶段 [9]：`link_plan`（`--cc`/`$CC`，默认 `gcc`，缺 → `E-0602`）→
+`cc -std=c11 <opt> -I runtime ci.c infy_rt.c infy_dyn.c -Wl,--no-insert-timestamp -o ci.exe` → 把 blob+段尾追加到镜像尾部；
+`infy artifact info|sections [--nodes]` 换成真解析；`--verify-reproducible` 在两个独立构建目录重跑并比字节。
+
+验收（本轮全部实测，非引用）：`infy build examples/tour` → **exit 0**，`artifact ok — 199975 byte(s)`
+（宿主镜像 199173 + 段 blob 738 + 段尾 64，6 段），`build-id 4d8250b58122ca2b76132029955e2d2005156dc0a6b021bf5f4ae761e5fd55ba`；
+`--verify-reproducible` → `两个独立构建目录产物字节相同（199975 字节）`；
+`infy artifact info …ci.exe --nodes` → **exit 0**，读回 `ifabi 2 / usize_bits 64 / iter_guard_steps 4294967296 / n_nodes 6 / entry chain 'Pipeline'`，
+节点表 6 行 = 行 8/9/10/11/16/19（`gate`/`retry_once` 各 1 个连携块）—— **与 C1 轮的 §8.4 金样逐格相同**；
+`infy artifact info README.md`（非产物）→ `E-0605` + **exit 7**；`--cc /no/such/cc` → `E-0602` + **exit 6**。
+交叉验证：一次性探针把**真实 tour 产物**交给 C 侧生产读取器 `infy_art_read_file` →
+`rc=0 blob_len=738`，`infy_art_dump_meta` 的每个字段与 Rust 侧一致（含同一串 build-id）。
+
+**Rust 写 ↔ C 读 的常驻锁点**：`runtime/fixtures/artifact_rust_writer.bin`（730 字节）是写入器的逐字节固定输出，
+`runtime/test_rt.c` 用生产读取器读回它并断言同一组字段（+27 项），`artifact::tests::c_reader_fixture_is_exactly_what_the_writer_produces`
+锁住"写入器不再改变夹具"（只有 `INFY_REGENERATE_FIXTURE=1` 才重写）。rt harness 复跑 **32335 assertions / 0 failures**。
+
+规范未定 → 选定实现并记偏差 **D-32**（五张表的记录布局、`opt_level`/`lto` 值表、profile 名反推、
+入口描述与 `ResourceKeys` 借用 `export` 区与推导规则、`artifact info` 借 `E-0605`/exit 7）。
+**另发现并裁掉一条规范级缺陷 D-33**：§7.4/ABI §6 的"段尾缺失/重复即非产物"若按字面**整文件**扫魔数，
+会因为 `.inf rt` 静态链接进镜像、而 `infy_rt.c` 自身带 `"INFYART2"` 字面量而**否掉每一个真产物**
+（本轮第一次真接阶段 [9] 就撞上：`host image already contains the INFYART2 magic`）。
+两侧同规则收窄到追加区 `[blob_off, EOF)`，写入器另拒绝 blob 自带魔数；顺带修掉 `infy_art_parse_trailer`
+里 `if (t) {…}` 之后无条件 `t->hdr_ver` 的 NULL 解引用。
+`docs/internals/runtime-abi.md` §6/§7 的布局草图原本写 `blob_off u64` 等 —— 两侧实现从来是 `u32` 对，
+已按实现改正文档并把段尾逐字段表、blob 布局、`--no-insert-timestamp` 的必要性写进去。
+
+**明确未做**（不用假成功掩盖）：阶段 [10] 的 sumdb 校验段与运行时自校验比对（`.inf sum` 只是 `lock.dirh` 的抄写，
+tour 无依赖 → 实例上是 0 条）；`ResourceKeys`/`EnvOffsets` 区写空集（前端不收集 `std.chain.lock` 键名）；
+`.inf ifbc` 恒为空（D1）；A 轨 `#[link]` 目标码与 §7.2 的 LTO 编排、`infyl` 独立链接器驱动；
+`infy artifact dump --nodes`/`diff` 的其余形态；C 侧 `infy_art_dump_meta` 那行 `meta off=0 len=0` 是**写死的显示值**
+（不是容器内容错，是打印错），本轮未改，登记在 RUNLOG 下一步。
+
 ## 仍未实现
 
-产物段写入与链接（阶段 [9]/[10]，§7.4 的单文件容器）→ 因此 `build` 在**已能发射并编译 C11** 之后仍以 exit 6 结束（C2 轮落地阶段 [8]），
-`run`/`test`/`doc`/`lib pack`/`ifbc dump`/`conformance`/`lsp`（exit 1）目前明确返回"未实现"而不是假成功；
+`run`/`test`/`doc`/`lib pack`/`ifbc dump`/`conformance`/`lsp`（exit 1）目前明确返回"未实现"而不是假成功
+（`infy build` 自 C3 轮起 exit **0**：阶段 [1]–[9] 全通，产物容器可被 `infy artifact info` 与 C 侧运行时读回）；
 A 轨绑定生成（`src/atrack.rs`）、§11 `HostApi`（`src/host.rs`）、§12 合规用例集（`src/conformance.rs`）、
 `infy doc`（`src/doc.rs`）同样未实现 —— 这四个文件当前是 1 行占位。
 HIR（`src/hir.rs`）于 C1 轮落成**声明层**；**语句/表达式级 IFIR 仍没有独立表示**（C2 是 AST→C 直接发射），

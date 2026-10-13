@@ -188,15 +188,31 @@ emits `W-0800` from a static lock-set graph built by the front end.
 ## 6. Artifact container (`.inf` segments, §7.4)
 
 `infy build` produces one executable file: the host image (PE/ELF/Mach-O) followed by the INFY
-segment blob and a fixed 64-byte trailer:
+segment blob and a fixed 64-byte trailer. The authoritative field table is
+`INFY_META_OFF_*` / `InfyArtTrailer` in `runtime/infy_rt_internal.h`; the writer is
+`src/artifact.rs`, the reader is `infy_art_parse_trailer` + `parse_meta_record` +
+`meta_resolve_strings` in `runtime/infy_rt.c`, and the two are cross-locked by
+`runtime/fixtures/artifact_rust_writer.bin` (Rust writes it, the C harness reads it):
 
 ```
-magic "INFYART2" | hdr_ver u16 | ifabi u16 | seg_count u16 | flags u16
-blob_off u64 | blob_len u64
-meta_off u64 | meta_len u64 | ifbc_off u64 | ifbc_len u64
-sum_off  u64 | sum_len  u64 | rodata_off u64 | rodata_len u64
-build_id [u8;32] | trailer_crc u32 | pad
+0  magic "INFYART2" | 8  hdr_ver u16 | ifabi u16 | 12 seg_count u16 | flags u16
+16 blob_off u32 | 20 blob_len u32
+24 meta_off u32 | 28 meta_len u32 | 32 ifbc_off | 36 ifbc_len
+40 sum_off  | 44 sum_len          | 48 rodata_off | 52 rodata_len   (all u32, blob-relative)
+56 trailer_crc u32 = CRC-32/IEEE over trailer[0..56)
+60 build_id_low u32   (the full 32-byte id lives in `.inf meta` @176, hex string in the pool)
 ```
+
+Offsets and lengths are **`u32`**, not `u64` — the earlier sketch in this document said `u64` and
+was never what either side implemented (D-32 fixes the doc to the code, not the other way round).
+
+Inside the blob the layout is
+`meta(208) | string-pool pairs | chains | events | nodes | ifbc | sum | export | resource keys | rodata`,
+with the pool as `(u32 blob_off, u32 len)` pairs and every table row fixed-width
+(node 32 B, chain 20 B, event 12 B, sum 12 B, resource key 4 B) — see D-32 for the row fields and
+for the two items that have no slot in the frozen record (the entry description lives as
+`(u32 kind, u32 name pool index)` at the head of the `export` region; `ResourceKeys` starts right
+after it, derived rather than stored).
 
 Mapping of §7.4's six segments onto the file:
 
@@ -211,10 +227,13 @@ Mapping of §7.4's six segments onto the file:
 
 The runtime finds its own path (`/proc/self/exe`, `GetModuleFileNameW`, `_NSGetExecutablePath`),
 seeks the trailer from the end, and validates `trailer_crc`; a missing/duplicate trailer means the
-file is not an INFY artifact. `infy run` on a `.infib` is refused with `E-0551` before anything
-executes. Appending a trailing blob is legal for the PE, ELF and Mach-O loaders; this is the same
-"archive-after-executable" trick used by self-extracting installers, and `--verify-reproducible`
-(§7.3) rebuilds into a second directory and compares bytes.
+file is not an INFY artifact. **Duplicate is counted over the appended area `[blob_off, EOF)` only,
+not over the whole file** — the embedded runtime keeps the `"INFYART2"` literal as a string constant,
+so a whole-file count would reject every real artifact (D-33). `infy run` on a `.infib` is refused
+with `E-0551` before anything executes. Appending a trailing blob is legal for
+the PE, ELF and Mach-O loaders; this is the same "archive-after-executable" trick used by
+self-extracting installers, and `--verify-reproducible` (§7.3) rebuilds into a second directory and
+compares bytes.
 
 ## 7. Build identity (§7.3)
 
@@ -224,6 +243,14 @@ profile name, toolchain version strings (including the B-track interpreter versi
 changing Python changes the build-id), `IFABI`, and the compiler version. No timestamps, no
 absolute paths, no usernames. Any hash-table iteration or symbol-suffix randomisation in the
 compiler must be seeded from the `build_id`, never from system entropy.
+
+Implementation notes (`src/artifact.rs::build_id`, called from `cli.rs::compute_build_id`): every
+field enters as `u32` length prefix + bytes, and the toolchain-count enters before the toolchain
+strings, so no two input sets can be re-segmented into the same byte stream. The profile *name* is
+derived back from the opt level (`-O0 → debug`, `-Oz → release-small`, else `release`) because the
+manifest stores profile fields, not the selected section name (D-32). The A-track link is always
+issued with `-Wl,--no-insert-timestamp`: GNU ld otherwise stamps the PE COFF header, and a stamped
+image can never satisfy §7.3 item 2 (measured: two links of the same source differ at byte 137).
 
 ## 8. Host interface (§11)
 

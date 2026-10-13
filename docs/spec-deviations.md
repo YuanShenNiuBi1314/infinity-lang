@@ -310,3 +310,65 @@ NUL（只有跨 A 轨边界才是 `R-0003`/UB-007）。若后端照发 `infy_str
 不移动的 owned 值（形参、`let` 绑定到新建值）按声明序 push、作用域末尾 pop，LIFO 即 §4.7.4 的逆序。
 **锁定点** = `codegen::tests::moving_an_owned_binding_is_refused`（三种形式成对）+
 `owned_values_register_a_cleanup_entry_at_their_scope`（正常路径的 push/shim/pop 与元素大小）。
+
+## D-32 §7.4 的 `.inf meta` 只有 208 字节固定记录，规范点名的五张表没有槽位/没有字节表
+
+§7.4 与 `docs/internals/runtime-abi.md` §6 要求 `.inf meta` 携带
+`EventTable`/`ChainTable`/`NodeTable`/`ResourceKeys`/`EnvOffsets` + 入口描述 + 依赖闭包，但：
+
+* 冻结头 `runtime/infy_rt_internal.h` 的 `INFY_META_OFF_*` 只给了 208 字节记录的字段表，**没有**
+  这些表的**记录布局**（§8.4 第 5 条只列了字段名 `chain_id, node_idx, file:line:col, linkage_count,
+  host_event_id?`）；
+* `ResourceKeys` 与入口描述**没有偏移槽位**；
+* `opt_level`/`lto`/`fast_math` 是无值表的裸整数；
+* §7.2 的 profile 只有字段（`opt_level`/`lto`/…），清单里不保存"选中的段名"，而 ABI §7 要求
+  profile 名进 `build-id` 输入集。
+
+**选定实现**（全部落进 `src/artifact.rs`，两侧读者共用）：
+
+| 项 | 字节表（小端，blob 相对偏移） |
+| --- | --- |
+| blob 布局 | `meta(208) \| 字符串池 pair 表 \| chains \| events \| nodes \| ifbc \| sum \| export \| resource_keys \| rodata` |
+| 字符串池 | `(u32 blob_off, u32 len)` × n；intern 顺序 = 固定字段序（target, build-id, platform, lang, toolchain, 入口名, chain…, event…, node…, sum…, 资源键…），去重走 `BTreeMap` 而非 `HashMap`（§7.3 禁止系统熵） |
+| `NodeTable` | 32 字节/行 = `chain_id, node_idx, name_pool, file_pool, line, col, linkage_count, host_event_id`；`host_event_id` 缺省写 `0xFFFFFFFF` |
+| `ChainTable` | 20 字节/行 = `name_pool, package_pool, node_count, frame_bytes, reserved=0`（`chain_id` = 行号） |
+| `EventTable` | 12 字节/行 = `name_pool, arity, reserved=0`（`host_event_id` = 行号，同 §11） |
+| `.inf sum` | 12 字节/行 = `package_pool, version_pool, dirhash_pool`（§5.8 的依赖 dirhash 清单） |
+| `ResourceKeys` | 4 字节/键 = `key_pool`；**偏移由规则推出** = `export.off + export.len`（无槽位） |
+| 入口描述 | 写在 `export` 区首记录 = `(u32 kind, u32 name_pool)`，`kind` 0 = `entry_chain`、1 = `fn main`（§7.4 优先级表的两个来源；§7.4 的"全无 → `E-0600`"在阶段 [7] 已由 `hir` 报出） |
+| `opt_level` | §7.2 书写序 `0/1/2/3/z` → `0..4` |
+| `lto` | §7.2 书写序 `off/thin/fat` → `0/1/2` |
+| profile 名 | 由 opt 层反推：`-O0 → debug`、`-Oz → release-small`、其余 → `release`（§7.2 的三档定义就是这两参数的组合，所以反推是单射的） |
+| `infy artifact info` 读非产物/损坏容器 | 借 `E-0605`（06xx = 构建/链接/工具链/可复现，§9.7 没有"容器损坏"专号），exit **7**（§13.4 校验和不一致） |
+
+**锁定点** = `artifact::tests::meta_offsets_and_sizes_match_the_frozen_header`（逐条把
+`INFY_META_OFF_*` 与 `INFY_ART_TRAILER_SIZE`/`INFY_ART_HDR_VER`/两个魔数对回**头文件文本**）、
+`written_container_reads_back_every_field`、`node_table_rows_survive_the_round_trip`、
+`entry_description_round_trips`（含"入口占 8 字节后资源键表不串位"）、
+`cli::tests::artifact_cmd_indexes_positionals_and_refuses_non_artifacts`（`E-0605`/7 与非产物路径）。
+跨语言侧：`runtime/fixtures/artifact_rust_writer.bin` 是 Rust 写入器的逐字节固定输出，
+`runtime/test_rt.c` 用生产读取器 `infy_art_read_file` 读回同一组字段 —— Rust 写 ↔ C 读。
+
+## D-33 §7.4 的"重复段尾"检查若按整文件扫描会否掉**每一个**真产物（规范级缺陷）
+
+`docs/internals/runtime-abi.md` §6 写"运行时从文件尾找 `INFYART2` 段尾并校验 `trailer_crc`；
+**缺失/重复即表示该文件不是 INFY 产物**"。C 侧原实现（`infy_rt.c` 的 `infy_art_parse_trailer`）
+照字面把整文件扫一遍数魔数出现次数。
+
+问题在于 P6 的单文件承诺：`.inf rt` 是**静态链接进镜像**的（§7.4），而 `infy_rt.c` 自己就带
+`INFY_ART_MAGIC "INFYART2"` 这个字符串常量（正是这条比较用的字面量）。于是任何用本运行时链出来的
+宿主镜像天然含有一份魔数 → 整文件计数 ≥ 2 → **runtime 拒绝自己的产物**、`infy artifact info` 也拒绝
+自家 `infy build` 的输出。C3 轮第一次把 `infy build` 真接到阶段 [9] 时立刻撞上：
+`error: 阶段 [9] 失败：host image already contains the INFYART2 magic`。
+
+**选定实现**：重复性检查的范围收窄到**追加区** `[blob_off, file_len)`，段尾自身占 1 次，因此
+"blob 里出现第 2 次魔数"仍然被拒（正是 §7.4 想拦的"被追加了两次"），而镜像里的那份字面量不再误伤。
+两侧同规则：C 侧 `infy_art_parse_trailer` 与 Rust 侧 `artifact::parse_trailer` 都是
+"先验 blob 范围 → 再从 `blob_off` 起数"；写入器另加一条自检：blob 自身含魔数直接拒
+（`Bad::BlobCarriesMagic`），避免产出自己读不回的文件。
+顺带修掉同一函数的一处 NULL 解引用：原先 `if (t) { …填字段… }` 之后无条件 `t->hdr_ver` 参与校验。
+
+**锁定点** = `artifact::tests::duplicate_trailer_scan_is_scoped_to_the_appended_area`（镜像含魔数 →
+读回成功；段尾再附一次 → `DuplicateMagic`；节点名叫 `INFYART2` → 写入端 `BlobCarriesMagic`）+
+`runtime/test_rt.c` 的 `build_artifact(..., mode=2)` 那条（宿主镜像含魔数的容器 `infy_art_read_file`
+返回 0，且 `n_nodes`/`opt_level` 仍对）。

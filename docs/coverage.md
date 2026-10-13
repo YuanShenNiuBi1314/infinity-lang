@@ -6,22 +6,28 @@
 四个模块的占位注释也指向这里（`src/hir.rs` 于 C1 轮从占位落成声明层 IR、`src/codegen.rs` 于 C2 轮落成
 阶段 [8] 的 C11 发射，证据分别是 §3 的 stage [7] 与 stage [8] 两行）。
 
-## 1. 证据命令（2026-10-13 B1 轮起逐轮复跑，主树非隔离副本；P11 于 B2 轮改判，全部 10 条于 B3 轮复跑）
+## 1. 证据命令（2026-10-13 B1 轮起逐轮复跑，主树非隔离副本；P11 于 B2 轮改判，P1/P2/P4/P9/P10/P11/P12 于 C3 轮逐条复跑）
 
 | # | 命令 | 输出里的数字 | exit |
 | --- | --- | --- | --- |
-| P1 | `cargo test --offline --lib` | `372 passed; 0 failed; 0 ignored`（C2 轮 +18 `codegen`） | 0 |
+| P1 | `cargo test --offline --lib` | `391 passed; 0 failed; 0 ignored`（C3 轮 +18 `artifact` +1 `cli`；基线 372） | 0 |
 | P2 | `cargo check --offline --lib` | 0 error、`51 warnings`（全部 unused/dead code，BACKLOG F2） | 0 |
 | P3 | `infy check examples/tour` | `check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)` | 0 |
-| P4 | `infy build examples/tour` | 先打 P3 那行，再打 `codegen ok — 12473 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))` + `notice: 阶段 [9] 链接…尚未实现` | 6 |
-| P12 | `gcc -std=c11 -Wall -Wextra -I runtime -c examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c -o ci.o` | **0 error / 0 warning**（无输出），产出 .o；这就是 BACKLOG C2 的验收命令。生成的 C 自带 `sizeof`/`_Alignof`/`offsetof` 断言，所以这条命令同时复核了阶段 [7] 的布局表 | 0 |
+| P4 | `infy build examples/tour` | 先打 P3 那行，再打 `codegen ok — 12473 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))`，再打 `artifact ok — 199975 byte(s) 写到 …\ci.exe（§7.4：宿主镜像 199173 + 段 blob 738 + 段尾 64，6 段）` + `build-id 4d8250b5…55ba`。**C3 轮起阶段 [9] 已落地，不再有"尚未实现"的 notice** | 0 |
+| P13 | `infy build examples/tour --verify-reproducible` | `verify-reproducible ok — 两个独立构建目录产物字节相同（199975 字节）`（§7.3 第 3 项；不一致时打 `E-0603 · 首个差异在偏移 N（…段名…）` 并 exit 7） | 0 |
+| P14 | `infy artifact info examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe --nodes` | `.inf meta` 全字段读回：`ifabi 2 / opt_level 2 / usize_bits 64 / iter_guard_steps 4294967296 / target x86_64-pc-windows-gnu / source_toolchain gcc 16.2.0 / n_nodes 6 / entry chain 'Pipeline'`，节点表 6 行 = `cmd/runner/main.infy` 的 8/9/10/11/16/19（gate 与 retry_once 各 1 个连携块，锚点 begin=0·done=5，与 C1 金样一致） | 0 |
+| P15 | `infy build examples/tour --cc /no/such/cc` | `error: E-0602 · … 无法启动 …（§7.6.2：A 轨工具链缺失或未注册，绝不静默跳过链接）`——缺编译器是**报错**不是"跳过链接后假装成功" | 6 |
+| P12 | `gcc -std=c11 -Wall -Wextra -I runtime -c examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c -o ci.o` | **0 error / 0 warning**（无输出），产出 5723 字节 .o；这就是 BACKLOG C2 的验收命令。生成的 C 自带 `sizeof`/`_Alignof`/`offsetof` 断言，所以这条命令同时复核了阶段 [7] 的布局表 | 0 |
 | P5 | `infy run` / `test` / `doc` / `ifbc` / `conformance` / `lsp` / `lib` | `notice: infy <cmd> is not implemented in this build` | 1 |
 | P6 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/test_ifbc.c runtime/test_ifbc_stubs.c -o ifbc_tests && ./ifbc_tests` | `IFBC harness: 82 asserts, 82 pass, 0 FAIL`；**0 编译告警**（B1 轮给 `InfyString` 补了结构标签，原先 4 条 `infy_rt.h:212` 前置引用告警随之消失 = B3 的第 4 项；79 → 82 是 B3 轮为 D-22 裁决新增的一行 `closure.new` 拒绝断言，3 项） | 0 |
-| P9 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && ./rt_tests` | `32303 assertions, 0 failures`，0 error / 0 warning；诊断渲染单独再跑一次为 `rt_render.log` 逐字节比对。**链的是生产 `runtime/infy_rt.c`**，不是替身 | 0 |
+| P9 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && ./rt_tests` | `32335 assertions, 0 failures`，0 error / 0 warning；诊断渲染单独再跑一次为 `rt_render.log` 逐字节比对。**链的是生产 `runtime/infy_rt.c`**，不是替身。C3 轮 +32（基线 32303）：D-33 的 `mode=2`"宿主镜像自带 `INFYART2` 字面量仍须可读"5 项，
+加用生产读取器 `infy_art_read_file` 读回 **Rust 写入器**逐字节夹具
+`runtime/fixtures/artifact_rust_writer.bin` 的 27 项字段/池断言 = Rust 写 ↔ C 读的常驻锁点。
+**跑之前必须 `cd target/scratch`**（夹具按 `../../runtime/fixtures/…` 取，换目录跑会红而不是空跑） | 0 |
 | P10 | `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` | 0 warning。**B3 已勾**：这条命令 B1 轮就绿，B3 轮真正落地的是另外三项语义——`InfyRCode` 补 `R_EMBED_TIMEOUT=0x0701`/`R_FIELD_OFF_REPR=0x0713`、删除规范里不存在的 `R_IFBC_BOUNDARY=0x070A` 并按 D-22 把装载期"边界"改报 `R-0707`、`frame_kind` 两级取值表进冻结头（`INFY_FRAME_STACK`/`INFY_FRAME_COROUTINE`） | 0 |
 | P11 | `gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/infy_rt.c runtime/test_ifbc.c -o ifbc_real && ./ifbc_real` | **B2 轮：真实链接跑通**。0 error / **0 warning**，`IFBC harness: 82 asserts, 82 pass, 0 FAIL`，exit 0，且 stdout 与 P6（替身链）**逐字节相同**。链接失败的根因不是工具链：`test_ifbc.c` 用 stub 专有的 `infy_stub_live_objs()` 当泄漏探针，改走公共 API `infy_mem_stats().live_objs`（`runtime/infy_rt.h`）后两侧皆可链接 | 0 |
 | P7 | `(cd examples/tour && infy fmt --check)` | `2 file(s) are not canonical` — §14 的导览源码不是本格式化器的不动点（见 §5） | 2 |
-| P8 | `infy artifact info <任意非产物文件>` | `error[E-0605]: ... 找不到 INFYART2 段尾` | 7 |
+| P8 | `infy artifact info README.md`（任意非产物文件） | `error[E-0605]: README.md 不是可读的 INFY 产物：no INFYART2 trailer at end of file (not an INFY artifact)`；损坏的 crc / 重复段尾 / 越界区段 / `INFYMETA` 魔数不符各有一条同族消息与单测 | 7 |
 
 P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `collect2: error: ld returned 5`，
 不打印任何 undefined reference，看起来像工具链坏了。P11 同理（把 `test_ifbc_stubs.c` 换成 `infy_rt.c`）。
@@ -62,7 +68,7 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 | --- | --- | --- | --- |
 | §2 词法 | `src/lexer.rs` | ✅ | 79 项（P1） |
 | §3 语法 | `src/parser.rs` | 🟡 | 8 项 + P3 全量解析；（C1 轮补的第 8 项锁住 §4.1 枚举判别式，见偏差 D-24 —— 它此前被静默丢弃）没有"EBNF 全产生式是否都落到 AST"的审计，**"全产生式"这句在 README 里已降级** |
-| §7.1 [7] IFIR（**声明层**） | `src/hir.rs` | 🟡 | C1 轮 **20 项**：§1 表示表逐行（`sizeof`/`_Alignof`/`offsetof` 由 `gcc` 实测对回）、§4.6/§10 `EnvOffsets` 11 个偏移 + 72/8、§5 链帧与 `InfyNodeLoc`/`InfyChainDesc`/`InfyFocusId3` 行、§8.4 节点表、§2 符号 mangle、§4.8 `offset_of` 只对 `repr(C)`、§4.15 `E-0175`、D-24/D-25。**缺口**：语句/表达式层没落（C2 的前置），`infy build` 也未接 HIR（仍 P4 exit 6），所以这 20 项锁的是表示与判据而非端到端 |
+| §7.1 [7] IFIR（**声明层**） | `src/hir.rs` | 🟡 | C1 轮 **20 项**：§1 表示表逐行（`sizeof`/`_Alignof`/`offsetof` 由 `gcc` 实测对回）、§4.6/§10 `EnvOffsets` 11 个偏移 + 72/8、§5 链帧与 `InfyNodeLoc`/`InfyChainDesc`/`InfyFocusId3` 行、§8.4 节点表、§2 符号 mangle、§4.8 `offset_of` 只对 `repr(C)`、§4.15 `E-0175`、D-24/D-25。**缺口**：语句/表达式层没落（C2 的 `codegen` 直接从 AST 发射），这 20 项锁的是表示与判据而非端到端；C3 轮起 `.inf meta` 的 `ChainTable`/`NodeTable` 就是从这张表写出去的（P14 读回的对上一致） |
 | §4 类型检查 | `src/sema.rs` | 🟡 | A4 轮补 **22 项**（内建构造、未声明名、字面量取型/后缀/范围、无隐式转换含 `type_compatible` 逐臂、`E-0120`、`env` 封闭集与 `E-0140`、`goto`/`start`）。缺口：`?` 展开、生命周期 elision、穷尽性 `E-0070/0071/0072`、const-eval、`unsafe` 六禁令仍只有 P3 |
 | §4.7 借用检查 | `src/borrow.rs` | ✅ | 15 项：`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006` 正反例 + `E-0121` 4 项（A4 轮补）。`E-0121` 的判据低估数值绑定，见偏差 D-19 / BACKLOG F7 |
 | §5 包/依赖 | `src/pkg.rs` | 🟡 | A4 轮补 **19 项**（清单逐段与默认值、`E-0506`/`E-0507`/`W-0500`、§5.3 解析顺序、`^` 区间、MVS 最小选择与冲突、dirhash 顺序无关与路径绑定、lock 往返/排序/`E-0200`）。缺口：`discover()`（目录发现、R3/R4 规则）无测试，依赖 P3 的两 package 布局 |
@@ -77,12 +83,14 @@ P6 必须**四个 .c 一起编**：漏掉 `infy_dyn.c` 时 `ld` 只返回 `colle
 | §9.5 格式化 | `fmt.rs` | ✅ | 39 项 |
 | §1.3 领域中立 | `stdlib.rs` | ✅ | 4 项（NFKCCaseFold 全角/大小写绕过） |
 | §10 `std` 签名表 | `stdlib.rs` | 🟡 | 表本身 4 项；消费者 `infy doc`（`doc.rs` 占位）未实现。codegen 侧自 C2 轮起**有映射**，但只覆盖 `infy_rt.h` 里有入口的部分：`Vec`/`String` 的 `push`/`len`/`as_str`、`Option`/`Result` 的 `unwrap` 族、`std.fmt` 的 `infy_fmt_run`（但 `fmt!` 宏本身没有 lowering 路径 → F15），其余 std 调用一律显式拒绝 |
-| §7.3/§7.4 产物容器 | `cli.rs:758` `artifact_cmd` | 🟡 | 只识别 64 字节 `INFYART2` 段尾；`.inf meta`/`rodata 索引`/`ifbc`/`sum` 段的写入器与解析器都不存在（BACKLOG C3，P8） |
+| §7.3 可复现构建 / build-id | `artifact.rs::build_id` + `cli.rs::compute_build_id`/`--verify-reproducible` | 🟡 | **18 项 `artifact` 单测**里的 4 条专锁 build-id：`build_id_is_deterministic`、`every_build_id_input_class_moves_the_digest`（§7.3 第 1 项列的九类输入**逐个单独**改动都必须让摘要变化，防"某一类其实没进哈希"）、`build_id_binds_order_and_field_boundaries`（§5.4 顺序 + 长度前缀边界）、`writer_output_is_byte_identical_for_the_same_content`。端到端 = P13（两个独立构建目录 199975 字节逐字节相同）。记 🟡 的理由：① 第 4 项"A 轨工具链输出的逐字节重放校验（`[6b]` 记录版本/命令行/输入哈希）"未做；② 时间戳中和只覆盖了 GNU ld 的 `--no-insert-timestamp`，别的链接器等价物未测；③ §12 的外部合规用例仍为 0 |
+| §7.4 产物容器 | `artifact.rs`（写 + 读）+ `cli.rs::stage9` | 🟡 | C3 轮落成：**18 项 `artifact` 单测** + P14（`infy artifact info` 读回自家产物，节点表 6 行对回 C1 金样）+ P9 的 Rust 写 ↔ C 读常驻夹具 + 一次性探针（生产 `infy_art_read_file` 读真实 tour 产物：`rc=0 blob_len=738`，meta 与 Rust 侧逐字段一致）。记 🟡 的理由：① `.inf text`/`.inf rt` 靠"宿主镜像 = gcc 直接链出的可执行文件"，尚未做 §7.2 的 LTO/多目标文件编排；② `.inf ifbc` 恒为空（D1 未做）；③ `ResourceKeys`/`EnvOffsets` 区写的是空集（前端不收集 `std.chain.lock` 键名）；④ 规范级缺陷 D-33（重复段尾扫描范围）已裁，但要等项目所有者认可 |
 | §7.8/附录 D IFBC | `src/ifbc.rs` + `runtime/infy_ifbc.c` | 🟡 | Rust 侧 6 项、C 侧 82 断言各自通过；**码表已与 §9.7 对齐**（D-22 于 B3 轮裁决、D-23 钉死 `frame_kind` 两级取值），但两侧对同一镜像的读法仍不一致（BACKLOG D4：操作数个数不一致 + `func_table` 记录布局 Rust 36 / C 40 字节），双侧反汇编目前必然错位，故不能记 ✅ |
 | §7.7 B 轨 | `btrack.rs` | 🟡 | 4476 行、0 测试，端到端未收敛（D1） |
 | §7.6/§7.7 A 轨绑定 | `atrack.rs` | ⬜ | 占位（D3） |
 | §7.1 阶段 [8] / §7.2 检查永不关 | `codegen.rs` | 🟡 | C2 轮落成：**18 项独立单测** + P12（gcc 编译生成的 C，0 告警）。记 🟡 而不是 ✅ 的理由：① §12 外部用例仍为 0；② tour 之外的构造多数是**显式拒绝**（闭包、`dyn`、`@embed`、A 轨调用、`for`/`defer`、128 位、窄位移、`saturate`、移动 owned 值）；③ 没有独立的语句/表达式级 IR，阶段 [7] 与 [8] 之间不可优化；④ 单 TU 发射（偏差 D-26），§5.10 的按 package 增量未做 |
-| §7.1 阶段 [9]/[10] 链接与段写入 | **无 `artifact.rs`** | ⬜ | `src/artifact.rs` 还不存在（C3 新建）；因此 P4 的 exit 6 是"链接未实现"，不再谎称"codegen 未实现" |
+| §7.1 阶段 [9] 链接成单文件产物 | `cli.rs::stage9`（`cc` 驱动）+ `artifact.rs::write` | 🟡 | C3 轮落地：`infy build examples/tour` 真产出 199975 字节的 §7.4 容器并 **exit 0**（P4），`--cc` 缺失/不可启动 → `E-0602`/exit 6（P15，不假装成功）。记 🟡 的理由：A 轨只走"把生成的 C 与 `infy_rt.c`/`infy_dyn.c` 一起交给 cc"这一条最简直路径，§7.6 的 `#[link]` 目标码、§7.2 的 LTO、`infyl` 独立链接器驱动都没有；`.infib` 依赖的链接（§13.2）也没有 |
+| §7.1 阶段 [10] 签名/校验段写入与 lock 比对 | `.inf sum` 由 `lock.dirh` 生成（`cli.rs::stage9`） | ⬜ | 只做了"把依赖 dirhash 清单写进容器"这一半（tour 无依赖 → 0 条，实例上是空集）；§5.8 的 **sumdb 记录/inclusion proof 与运行时自校验比对**没有，`infy artifact verify` 一类命令也不存在。BACKLOG 未单列该项，记在这里以免被 [9] 的绿误读成"产物校验已通" |
 | §11 `HostApi`/三步握手 | `host.rs` | ⬜ | **占位**。（`EnvSnapshot` 的偏移表已由 C1 轮在 `hir.rs::env_table` 落成并有金样，握手本身仍未实现）（本轮之前的 README 把它写成 ✅，是文档错误，非实现事实） |
 | §12 合规套件 | `conformance.rs` | ⬜ | 0 个外部用例；规范要求 2300（§12.1 1244 + §12.2 256 + §12.5 800），**通过率目前不可测**（E1/E2/E3） |
 | §13.4 CLI | `cli.rs` | ✅ | 5 项 + P3/P4/P5/P7/P8 的 exit 码逐条对上 |

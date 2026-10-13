@@ -24,6 +24,7 @@
 //! supply-chain model is applied to user code, so the toolchain itself must be auditable without a
 //! lockfile.
 
+pub mod artifact;
 pub mod ast;
 pub mod atrack;
 pub mod base64;

@@ -1308,10 +1308,16 @@ static void put_str(uint8_t* blob, uint32_t* pool_at, uint32_t* pool_len, uint32
     (*npairs)++;
 }
 
-/* exe bytes + blob + 64-byte trailer, exactly the §7.4/abi §6 container shape */
-static void build_artifact(const char* path, int break_crc) {
+/* exe bytes + blob + 64-byte trailer, exactly the §7.4/abi §6 container shape.
+ * mode: 0 = well-formed · 1 = corrupted trailer_crc · 2 = host image that itself contains the
+ * INFYART2 literal (what every real artifact looks like, because the embedded runtime keeps that
+ * string constant — see docs/spec-deviations.md D-33). */
+static void build_artifact(const char* path, int mode) {
     static const char fake_exe[] = "MZxfake-host-image-PE-or-ELF";
-    uint32_t exe_len = (uint32_t)strlen(fake_exe);
+    static const char fake_exe_magic[] = "MZxfake-host-image-PE-with-INFYART2-literal";
+    const char* image = mode == 2 ? fake_exe_magic : fake_exe;
+    int break_crc = mode == 1;
+    uint32_t exe_len = (uint32_t)strlen(image);
 
     /* blob layout: meta(200) | strings pair table | rodata bytes */
     uint32_t meta_len = INFY_META_FIXED_BYTES;
@@ -1395,7 +1401,7 @@ static void build_artifact(const char* path, int break_crc) {
     infy_art_wr_u32(trailer + 56, infy_art_crc32(trailer, 56));
 
     FILE* f = fopen(path, "wb");
-    fwrite(fake_exe, 1, exe_len, f);
+    fwrite(image, 1, exe_len, f);
     fwrite(blob, 1, blob_len, f);
     if (break_crc) trailer[56] ^= 0xFF;          /* a single flipped bit must be rejected */
     fwrite(trailer, 1, 64, f);
@@ -1478,6 +1484,58 @@ static void test_artifact(void) {
         free(img);
         CK_EQ(infy_art_read_file("rt_artifact_dup.bin", &m, &b2, &l2), -1);
     }
+    /* D-33: every real artifact's host image contains the INFYART2 literal (the embedded runtime
+     * compares against it), so the duplicate-trailer count must be scoped to the appended area.
+     * An image-carried magic therefore reads fine; an appended second trailer does not. */
+    build_artifact("rt_artifact_imgmagic.bin", 2);
+    uint8_t* b3 = 0; uint64_t l3 = 0;
+    CK_EQ(infy_art_read_file("rt_artifact_imgmagic.bin", &m, &b3, &l3), 0);
+    CK(b3 != 0);
+    CK_EQ(m.n_nodes, 11u);
+    CK_EQ(m.opt_level, 2u);
+    free(b3);
+
+    /* C3 交叉验证锁点：这份容器由 Rust 侧 src/artifact.rs 的写入器逐字节固定生成
+     * （runtime/fixtures/artifact_rust_writer.bin），这里用生产读取器把它读回来。
+     * Rust 写 ↔ C 读：任何一侧改冻结布局，两边至少有一条断言会变红。
+     * 路径按仓库配方从 target/scratch 运行（../.. 即仓库根）；换目录跑就要带对的路径，
+     * 读不到文件时 infy_art_read_file 返回 -1，下面的断言会直接失败——不会静默空跑。 */
+    {
+        static const char want_id[] =
+            "abababababababababababababababababababababababababababababababab";
+        InfyMetaFixed fm; uint8_t* fb = 0; uint64_t fl = 0;
+        CK_EQ(infy_art_read_file("../../runtime/fixtures/artifact_rust_writer.bin", &fm, &fb, &fl), 0);
+        CK(fb != 0);
+        CK(fl > 0u);
+        CK_EQ(fm.ifabi, (uint32_t)INFY_IFABI);
+        CK_EQ(fm.opt_level, 2u);
+        CK_EQ(fm.overflow_policy, (uint8_t)INFY_OV_PANIC);
+        CK_EQ(fm.panic_radius, (uint8_t)INFY_RADIUS_FOCUS);
+        CK_EQ(fm.usize_bits, 64u);
+        CK_EQ(fm.iter_guard_steps, 0x100000000ull);
+        CK_EQ(fm.n_chains, 1u);
+        CK_EQ(fm.n_events, 0u);
+        CK_EQ(fm.n_nodes, 2u);
+        CK_EQ(fm.n_ifbc_modules, 0u);
+        CK_EQ(fm.n_resource_keys, 1u);
+        CK_EQ(fm.target_triple.len, 21u);
+        CK(memcmp(fm.target_triple.ptr, "x86_64-pc-windows-gnu", 21) == 0);
+        CK_EQ(fm.platform.len, 7u);
+        CK(memcmp(fm.platform.ptr, "windows", 7) == 0);
+        CK_EQ(fm.lang_version.len, 3u);
+        CK(memcmp(fm.lang_version.ptr, "2.0", 3) == 0);
+        CK_EQ(fm.source_toolchain.len, 10u);
+        CK(memcmp(fm.source_toolchain.ptr, "gcc 14.2.0", 10) == 0);
+        CK_EQ(fm.build_id.len, 64u);                    /* §7.3 build-id 以十六进制串入池 */
+        CK(fm.build_id.len == sizeof want_id - 1);
+        CK(memcmp(fm.build_id.ptr, want_id, 64) == 0);
+        /* 池索引 0 必须是 target：Rust 写入器按固定字段序 intern，C 侧读者共用同一张表 */
+        InfyStr f0 = infy_art_string(&fm, fb, 0);
+        CK_EQ(f0.len, 21u);
+        CK(memcmp(f0.ptr, "x86_64-pc-windows-gnu", 21) == 0);
+        free(fb);
+    }
+
     /* this harness binary is not an INFY artifact, so infy_art_self() fails cleanly */
     CK_EQ(infy_art_self(&m, &b2, &l2), -1);
 }

@@ -5,10 +5,10 @@
 //! 7 checksum / reproducibility mismatch.
 //!
 //! What this build actually does end to end: the front end — stages [1]–[5] of §7.1 — over a whole
-//! module, stages [7]–[8] (`hir` lowering + C11 codegen) behind `infy build`, plus `init`, `fmt`,
-//! `expand`, `mod tidy`, `toolchain probe|list`, `artifact info`. Stage [9] (link into the §7.4
-//! single-file artifact) is not implemented, so `build`/`run`/`test`/`doc`/`ifbc …`/`lib pack`
-//! report that honestly instead of pretending to succeed; see `docs/status.md`.
+//! module, stages [7]–[9] (`hir` lowering + C11 codegen + link + the §7.4 container) behind
+//! `infy build`, plus `init`, `fmt`, `expand`, `mod tidy`, `toolchain probe|list` and
+//! `artifact info|sections`. `infy run`/`test`/`doc`/`ifbc …`/`lib pack` still report that the
+//! stage behind them is open work rather than pretending to succeed (see `docs/status.md`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use crate::ast::{ItemKind, ParsedFile};
 use crate::diag::{Diagnostic, Handler, LintConfig, Phase};
 use crate::span::Position;
 use crate::span::{FileId, Sources};
-use crate::{borrow, codegen, derive, hir, lexer, macro_expand, parser, pkg, sema};
+use crate::{artifact, borrow, codegen, derive, hir, lexer, macro_expand, parser, pkg, sema};
 
 /// §13.4 exit codes.
 pub mod exit {
@@ -55,7 +55,7 @@ pub fn run(args: &[String]) -> i32 {
         "mod" => mod_cmd(&positional),
         "toolchain" => toolchain_cmd(&positional),
         "target" => target_cmd(&positional),
-        "artifact" => artifact_cmd(&positional),
+        "artifact" => artifact_cmd(&positional, &rest),
         "clean" => clean_cmd(flag("--cache")),
         "run" | "test" | "bench" | "doc" | "lib" | "ifbc" | "ingest" | "conformance" | "lsp" | "pack" | "unpack" | "install" | "sumdb" | "database" => {
             eprintln!(
@@ -83,14 +83,14 @@ fn usage() -> String {
     for (name, note) in [
         ("init <module-path>", "scaffold a module + MODULE.infy.toml (§5.2)"),
         ("check [--strict] [--diag-json f] [--deadlock]", "stages [1]-[5], emits no code, needs no cc (§9.4)"),
-        ("build [--target T] [-O0..-O3|-Oz] [--reproducible]", "stages [1]-[9] — codegen not implemented yet"),
-        ("run [mod]", "build to a temp dir and execute — not implemented yet"),
+        ("build [--target T] [--cc P] [--reproducible] [--verify-reproducible]", "stages [1]-[9]: codegen, link, §7.4 container"),
+        ("run [mod]", "executes the §7.4 artifact — not wired up yet"),
         ("fmt [-w] [--check]", "official formatting, byte-unique (§9.5)"),
         ("expand [--macro name] [--stage all|macro|derive]", "auditable macro/derive output (§6.8)"),
         ("mod tidy|why|verify|upgrade|vendor", "dependency resolution, MVS (§5.7)"),
         ("toolchain probe|list|add|remove", "A-track compilers + B-track bytecode toolchains (§7.6.2)"),
         ("target list|add <triple>", "target triples (§7.2)"),
-        ("artifact info|sections <file>", ".inf meta and segment layout (§7.4)"),
+        ("artifact info|sections <file> [--nodes]", ".inf meta and segment layout (§7.4)"),
         ("lib pack|verify|dump|diff", ".infib containers (§13.2) — not implemented yet"),
         ("ifbc dump|verify", "IFBC segment inspection (§7.8.4) — not implemented yet"),
         ("test / bench / doc / conformance / ingest / sumdb / lsp", "not implemented yet"),
@@ -439,11 +439,12 @@ fn check(positional: &[String], rest: &[String], building: bool) -> i32 {
     code
 }
 
-/// Stages [7] and [8] of §7.1: lower to HIR, emit C11, write it under `.infy-build/`.
+/// Stages [7], [8] and [9] of §7.1: lower to HIR, emit C11, write it under `.infy-build/`, then
+/// link it against the runtime with the A-track `cc` and append the §7.4 segment container.
 ///
-/// Stage [9] (link into the single-file artifact of §7.4) is **not** implemented, so a successful
-/// code generation still exits `6` (§13.4: toolchain or link failure) with the emitted path printed
-/// — the file is the evidence, not a claim that a build finished.
+/// `--cc`/`$CC` select the compiler (default `gcc`); a missing one is `E-0602` (§7.6.2), not a
+/// silent skip. `--verify-reproducible` re-runs stage [9] in two independent build directories and
+/// compares bytes (§7.3 item 3, mismatch → `E-0603`/exit 7).
 fn build_c(l: &Loaded, prog: &sema::Program, rest: &[String]) -> i32 {
     let triple = match rest.iter().position(|a| a == "--target").and_then(|i| rest.get(i + 1)) {
         Some(t) => t.clone(),
@@ -528,12 +529,334 @@ fn build_c(l: &Loaded, prog: &sema::Program, rest: &[String]) -> i32 {
         text.len(),
         out.display(),
     );
-    eprintln!(
-        "notice: 阶段 [9] 链接与 §7.4 产物容器尚未实现（BACKLOG C3），因此 `infy build` 仍以 6 退出。\n\
-         \x20 = note: 编译生成的 C：gcc -std=c11 -Wall -Wextra -I <module>/../..\\runtime -c {}",
-        out.display()
+    let work = out.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+    let stem = l.manifest.module_path.rsplit('/').next().unwrap_or("crate").to_string();
+    let unreproducible = rest.contains(&"--allow-toolchain-drift".to_string());
+    let plan = match link_plan(rest, &l.manifest.profile) {
+        Ok(p) => p,
+        Err(m) => {
+            eprintln!("error: E-0602 · {m}（§7.6.2：A 轨工具链缺失或未注册，绝不静默跳过链接）");
+            return exit::TOOLCHAIN;
+        }
+    };
+    let bid = compute_build_id(l, &plan, &triple);
+    let bytes = match stage9(l, &hc, &out, &plan, target, &triple, &stem, &work, bid, unreproducible) {
+        Ok(b) => b,
+        Err(m) => {
+            eprintln!("error: 阶段 [9] 失败：{m}");
+            return exit::TOOLCHAIN;
+        }
+    };
+    let art_path = work.join(host_file_name(&stem, &triple));
+    if let Err(e) = std::fs::write(&art_path, &bytes) {
+        eprintln!("error: 无法写产物 {}: {e}", art_path.display());
+        return exit::PERMISSION;
+    }
+    let a = match artifact::read(&bytes, crate::VERSION.ifabi) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: 阶段 [9] 写出的容器读不回自己（{e}）—— 这是实现 bug，不是输入问题");
+            return exit::TOOLCHAIN;
+        }
+    };
+    let tr = a.trailer;
+    println!(
+        "artifact ok — {} byte(s) 写到 {}（§7.4：宿主镜像 {} + 段 blob {} + 段尾 {}，{} 段）",
+        bytes.len(),
+        art_path.display(),
+        tr.blob_off,
+        tr.blob_len,
+        artifact::TRAILER_SIZE,
+        tr.seg_count
     );
-    exit::TOOLCHAIN
+    println!("  build-id {}", a.meta.build_id);
+    println!(
+        "  = note: 容器已按冻结布局读回（.inf meta {} 字节 | 节点表 {} 行 | .inf sum {} 条依赖 dirhash | 入口 {}）",
+        artifact::META_FIXED_BYTES,
+        a.meta.n_nodes,
+        a.meta.sum.len / artifact::SUM_REC_BYTES as u32,
+        match a.entry() {
+            Some((artifact::ENTRY_MAIN, name)) => format!("fn main `{name}`"),
+            Some((_, name)) => format!("chain `{name}`"),
+            None => "-".to_string(),
+        }
+    );
+    println!(
+        "  = note: .inf ifbc 为空（{} 个 B 轨模块）—— 字节码摄取 = D1 未做；\
+               .inf rt 来自 {} 的 infy_rt.c + infy_dyn.c",
+        a.meta.n_ifbc_modules,
+        plan.runtime_dir.display()
+    );
+    if rest.contains(&"--verify-reproducible".to_string()) {
+        let a = stage9(l, &hc, &out, &plan, target, &triple, &stem, &work.join("verify-a"), bid, unreproducible);
+        let b = stage9(l, &hc, &out, &plan, target, &triple, &stem, &work.join("verify-b"), bid, unreproducible);
+        let (a, b) = match (a, b) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => {
+                eprintln!("error: 阶段 [9] 复核失败：{e}");
+                return exit::TOOLCHAIN;
+            }
+        };
+        if a == b {
+            println!("verify-reproducible ok — 两个独立构建目录产物字节相同（{} 字节）", a.len());
+        } else {
+            let off = a.iter().zip(b.iter()).position(|(x, y)| x != y).unwrap_or(0);
+            eprintln!(
+                "error: E-0603 · 可复现构建不一致：首个差异在偏移 {off}（{}）§7.3",
+                artifact::describe_offset(&a, off)
+            );
+            return exit::CHECKSUM;
+        }
+    }
+    exit::OK
+}
+
+/// §7.1 stage [9] inputs: the A-track `cc`, its version string (a §7.3 build-id input), the
+/// runtime sources that make up `.inf rt`, and the module's optimization flag (§7.2).
+struct LinkPlan {
+    cc: String,
+    cc_version: String,
+    runtime_dir: PathBuf,
+    opt: &'static str,
+}
+
+fn flag_value(rest: &[String], name: &str) -> Option<String> {
+    rest.iter().position(|a| a == name).and_then(|i| rest.get(i + 1)).cloned()
+}
+
+fn link_plan(rest: &[String], prof: &pkg::Profile) -> Result<LinkPlan, String> {
+    let cc = flag_value(rest, "--cc")
+        .or_else(|| std::env::var("CC").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "gcc".to_string());
+    let probe = std::process::Command::new(&cc).arg("-dumpversion").output();
+    let probe = match probe {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            return Err(format!("`{cc} -dumpversion` 退出码 {:?}{err}", o.status.code()));
+        }
+        Err(e) => return Err(format!("`{cc}` 无法启动：{e}")),
+    };
+    let v = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+    if v.is_empty() {
+        return Err(format!("`{cc} -dumpversion` 没有打印版本字符串（§7.6.2 版本核对需要它）"));
+    }
+    let cc_version = format!("{cc} {v}");
+    let runtime_dir = match flag_value(rest, "--runtime") {
+        Some(d) => PathBuf::from(d),
+        None => {
+            let mut found = None;
+            let mut cur = std::env::current_dir().ok();
+            while let Some(dir) = cur {
+                let cand = dir.join("runtime");
+                if cand.join("infy_rt.h").is_file() {
+                    found = Some(cand);
+                    break;
+                }
+                cur = dir.parent().map(|p| p.to_path_buf());
+            }
+            found.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime"))
+        }
+    };
+    for f in ["infy_rt.h", "infy_rt.c", "infy_dyn.c"] {
+        if !runtime_dir.join(f).is_file() {
+            return Err(format!("{} 里没有 {f}（§7.4 `.inf rt` 的来源）", runtime_dir.display()));
+        }
+    }
+    Ok(LinkPlan { cc, cc_version, runtime_dir, opt: prof.opt_level.flag() })
+}
+
+/// §13.4 / ABI §6: the host image keeps its platform's executable suffix.
+fn host_file_name(stem: &str, triple: &str) -> String {
+    if triple.contains("windows") {
+        format!("{stem}.exe")
+    } else {
+        stem.to_string()
+    }
+}
+
+/// §5.4/§5.8: one dirhash per package, packages in path order (§7.3 names the dirhash set as a
+/// build-id input, so the order itself is part of the identity).
+fn package_dirhashes(l: &Loaded) -> Vec<String> {
+    let mut by_pkg: BTreeMap<String, Vec<(String, Vec<u8>)>> = BTreeMap::new();
+    for id in l.files.keys().copied() {
+        let Some(sf) = l.sources.get(id) else { continue };
+        let pkg = l.file_pkg.get(&id).cloned().unwrap_or_default();
+        by_pkg.entry(pkg).or_default().push((sf.display_path.clone(), sf.text.clone().into_bytes()));
+    }
+    by_pkg.values_mut().map(|files| pkg::dirhash(files)).collect()
+}
+
+/// §7.2: the manifest records profile *fields*, not the selected section name, so the name goes
+/// back out of the opt level (D-32).
+fn profile_name(p: &pkg::Profile) -> &'static str {
+    match p.opt_level {
+        pkg::OptLevel::O0 => "debug",
+        pkg::OptLevel::Oz => "release-small",
+        _ => "release",
+    }
+}
+
+/// §7.3 item 1: the build-id over the normalised inputs. Paths and timestamps are not in the set.
+fn compute_build_id(l: &Loaded, plan: &LinkPlan, triple: &str) -> [u8; 32] {
+    let dirh = package_dirhashes(l);
+    let lock = std::fs::read_to_string(l.root.join(pkg::LOCK_NAME)).unwrap_or_default();
+    let manifest = std::fs::read_to_string(l.root.join(pkg::MANIFEST_NAME)).unwrap_or_default();
+    let mut tools = vec![plan.cc_version.clone()];
+    for (k, v) in &l.manifest.b_track {
+        tools.push(format!("{k} {v}"));
+    }
+    let compiler = format!("{} {}", crate::VERSION.name, crate::VERSION.version);
+    artifact::build_id(&artifact::BuildInputs {
+        dirhashes: &dirh,
+        lock: &lock,
+        manifest: &manifest,
+        target: triple,
+        opt_level: plan.opt,
+        profile: profile_name(&l.manifest.profile),
+        toolchains: &tools,
+        ifabi: crate::VERSION.ifabi,
+        compiler: &compiler,
+    })
+}
+
+/// §7.1 stage [9]: link the emitted C against the runtime sources with the A-track `cc`, then
+/// append the §7.4 blob + trailer to the image in place. Returns the whole container's bytes.
+fn stage9(
+    l: &Loaded,
+    hc: &hir::HirCrate,
+    gen_c: &Path,
+    plan: &LinkPlan,
+    target: hir::Target,
+    triple: &str,
+    stem: &str,
+    work: &Path,
+    build_id: [u8; 32],
+    unreproducible: bool,
+) -> Result<Vec<u8>, String> {
+    if let Err(e) = std::fs::create_dir_all(work) {
+        return Err(format!("无法创建构建目录 {}: {e}", work.display()));
+    }
+    let exe = work.join(host_file_name(stem, triple));
+    let mut cmd = std::process::Command::new(&plan.cc);
+    cmd.arg("-std=c11")
+        .arg(plan.opt)
+        .arg("-I")
+        .arg(&plan.runtime_dir)
+        .arg(gen_c)
+        .arg(plan.runtime_dir.join("infy_rt.c"))
+        .arg(plan.runtime_dir.join("infy_dyn.c"))
+        // §7.3 forbids timestamps in the identity; GNU ld writes one into the COFF header unless
+        // told not to, and a stamped image can never be byte-reproducible.
+        .arg("-Wl,--no-insert-timestamp")
+        .arg("-o")
+        .arg(&exe);
+    let out = cmd
+        .output()
+        .map_err(|e| format!("`{} …` 无法启动：{e}", plan.cc))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "`{} -std=c11 {} -I {} …` 退出码 {:?}：\n{}",
+            plan.cc,
+            plan.opt,
+            plan.runtime_dir.display(),
+            out.status.code(),
+            err.trim()
+        ));
+    }
+    let image = std::fs::read(&exe).map_err(|e| format!("无法读回 {}: {e}", exe.display()))?;
+
+    let mut chains: Vec<artifact::ChainRec> = Vec::new();
+    let mut nodes: Vec<artifact::NodeRec> = Vec::new();
+    let mut chain_id = 0u32;
+    for it in &hc.items {
+        let hir::HirItem::Chain(c) = it else { continue };
+        chains.push(artifact::ChainRec {
+            name: c.name.clone(),
+            package: c.package.clone(),
+            node_count: c.nodes.len() as u32,
+            frame_bytes: c.frame.size as u32,
+        });
+        for n in &c.nodes {
+            nodes.push(artifact::NodeRec {
+                chain_id,
+                node_idx: n.idx,
+                name: n
+                    .anchor
+                    .clone()
+                    .or_else(|| n.host_event.clone())
+                    .unwrap_or_else(|| format!("{}#{}", c.name, n.idx)),
+                file: l.sources.get(n.file).map(|s| s.display_path.clone()).unwrap_or_default(),
+                line: n.line,
+                col: n.col,
+                linkage_count: n.linkage_count,
+                host_event_id: n.event_id,
+            });
+        }
+        chain_id += 1;
+    }
+    // §11 EventTable: the row index *is* the host event id, so rows cannot be filtered out.
+    let events: Vec<artifact::EventRec> = hc
+        .events
+        .iter()
+        .map(|i| match hc.items.get(*i) {
+            Some(hir::HirItem::Fn(f)) => artifact::EventRec {
+                name: f.name.clone(),
+                arity: (f.params.len() + usize::from(f.self_ty.is_some())) as u32,
+            },
+            _ => artifact::EventRec { name: String::new(), arity: 0 },
+        })
+        .collect();
+    let entry = match hc.entry {
+        Some(hir::HirEntry::Chain(i)) => hc.items.get(i).map(|it| (artifact::ENTRY_CHAIN, it.name().to_string())),
+        Some(hir::HirEntry::Main(i)) => hc.items.get(i).map(|it| (artifact::ENTRY_MAIN, it.name().to_string())),
+        None => None,
+    };
+    let lock = pkg::Lock::parse(&std::fs::read_to_string(l.root.join(pkg::LOCK_NAME)).unwrap_or_default());
+    let sums = lock
+        .dirh
+        .iter()
+        .map(|(m, v, d)| artifact::SumRec { package: m.clone(), version: v.clone(), dirhash: d.clone() })
+        .collect();
+    let p = &l.manifest.profile;
+    let content = artifact::Content {
+        host_image: &image,
+        ifabi: crate::VERSION.ifabi,
+        opt_level: artifact::opt_level_index(p.opt_level),
+        overflow: if matches!(p.overflow, pkg::Overflow::Saturate) {
+            artifact::OV_SATURATE
+        } else {
+            artifact::OV_PANIC
+        },
+        panic_radius: match p.panic_radius {
+            pkg::PanicRadius::Focus => artifact::RADIUS_FOCUS,
+            pkg::PanicRadius::Chain => artifact::RADIUS_CHAIN,
+            pkg::PanicRadius::Process => artifact::RADIUS_PROCESS,
+        },
+        usize_bits: (target.pointer_width * 8) as u8,
+        fast_math: p.fast_math,
+        lto: artifact::lto_index(p.lto),
+        stack_bytes: p.stack_bytes as u32,
+        focus_stack_bytes: p.focus_stack_bytes as u32,
+        focus_quota: p.focus_quota,
+        iter_guard_steps: p.iter_guard_steps,
+        target_triple: triple,
+        build_id,
+        platform: std::env::consts::OS,
+        lang_version: crate::VERSION.lang,
+        source_toolchain: &plan.cc_version,
+        unreproducible,
+        ifbc: &[],
+        n_ifbc_modules: 0,
+        chains,
+        events,
+        nodes,
+        sums,
+        resource_keys: Vec::new(),
+        entry,
+    };
+    artifact::write(&content).map_err(|e| e.to_string())
 }
 
 /// The §7.2 triple of the machine running the compiler.
@@ -871,11 +1194,21 @@ fn target_cmd(positional: &[String]) -> i32 {
     }
 }
 
-fn artifact_cmd(positional: &[String]) -> i32 {
+/// §13.4 `infy artifact info|sections <artifact>`: read the §7.4 container back. §9.7's 06xx table
+/// has no dedicated code for "this file is not an INFY artifact", so the container refusals borrow
+/// `E-0605` (ABI/布局不一致) and exit 7 (§13.4 校验和不一致) — recorded as D-32.
+fn artifact_cmd(positional: &[String], rest: &[String]) -> i32 {
+    // `positional` already excludes the `artifact` word itself (§13.4 dispatch), so [0] is the
+    // subcommand and [1] the file.
+    let sub = positional.first().map(|s| s.as_str()).unwrap_or("info");
+    if !matches!(sub, "info" | "sections") {
+        eprintln!("error: infy artifact 子命令不认识 `{sub}`（可用：info | sections）");
+        return exit::GENERIC;
+    }
     let path = match positional.get(1) {
         Some(p) => PathBuf::from(p),
         None => {
-            eprintln!("error: infy artifact info|sections <file>（§13.4）");
+            eprintln!("error: infy artifact info|sections <file> [--nodes]（§13.4）");
             return exit::GENERIC;
         }
     };
@@ -886,16 +1219,28 @@ fn artifact_cmd(positional: &[String]) -> i32 {
             return exit::GENERIC;
         }
     };
-    // §7.4 / docs/internals/runtime-abi.md §6: the trailer is a fixed 64-byte record ending the
-    // file, with magic INFYART2.
-    let magic = b"INFYART2";
-    if bytes.len() < magic.len() + 64 || &bytes[bytes.len() - magic.len()..] != magic {
-        eprintln!("error[E-0605]: {} 不是 INFY 产物（找不到 INFYART2 段尾）", path.display());
-        eprintln!("  = note: 本构建尚未实现 infy build，因此没有可检视的产物（docs/status.md）");
-        return exit::CHECKSUM;
+    let a = match artifact::read(&bytes, crate::VERSION.ifabi) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error[E-0605]: {} 不是可读的 INFY 产物：{e}", path.display());
+            return exit::CHECKSUM;
+        }
+    };
+    match sub {
+        "info" => {
+            print!("{}", artifact::dump_info(&a));
+            if rest.contains(&"--nodes".to_string()) {
+                print!("{}", artifact::dump_nodes(&a));
+            }
+        }
+        "sections" => {
+            print!("{}", artifact::dump_sections(&a));
+            println!("string pool ({} 项)", a.pool.len());
+        }
+        _ => unreachable!("the two accepted subcommands are checked above"),
     }
-    println!("{}: INFYART2 trailer found ({} bytes of trailing segments)", path.display(), magic.len() + 64);
-    println!("  = note: .inf meta 解析需要 codegen 落地后才能输出完整段表");
+    println!("  = note: 校验通过项：INFYART2 段尾魔数/追加区唯一性、trailer_crc、hdr_ver={}、ifabi={}、区段范围、INFYMETA 记录",
+        artifact::HDR_VER, crate::VERSION.ifabi);
     exit::OK
 }
 
@@ -953,6 +1298,32 @@ mod tests {
         assert!(internal_visible("a/b/internal/c", "a/b/d"));
         assert!(!internal_visible("a/b/internal/c", "a/x"));
         assert!(internal_visible("a/b", "a/x"));
+    }
+
+    /// §13.4 的位置参数索引（F5 那一族的现场）：`infy artifact info <f>` 里 positional = ["info","f"]，
+    /// 不是 ["artifact","info","f"]。缺文件 / 未知子命令 / 非产物三条都要各有其退出码。
+    #[test]
+    fn artifact_cmd_indexes_positionals_and_refuses_non_artifacts() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("scratch")
+            .join("cli-artifact");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let junk = dir.join("junk.bin");
+        std::fs::write(&junk, vec![0u8; 256]).expect("junk");
+        let j = junk.to_string_lossy().to_string();
+        assert_eq!(artifact_cmd(&["info".to_string(), j.clone()], &[]), exit::CHECKSUM, "非产物 = E-0605/7");
+        assert_eq!(artifact_cmd(&["sections".to_string(), j.clone()], &[]), exit::CHECKSUM);
+        assert_eq!(artifact_cmd(&["info".to_string()], &[]), exit::GENERIC, "缺文件参数不该被当成路径");
+        assert_eq!(artifact_cmd(&["bogus".to_string(), j.clone()], &[]), exit::GENERIC);
+        assert_eq!(artifact_cmd(&[], &[]), exit::GENERIC);
+        let missing = dir.join("does-not-exist.bin");
+        assert_eq!(
+            artifact_cmd(&["info".to_string(), missing.to_string_lossy().to_string()], &[]),
+            exit::GENERIC,
+            "读不到文件是通用失败，不是校验失败"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

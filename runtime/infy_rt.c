@@ -2913,39 +2913,45 @@ int infy_art_parse_trailer(const uint8_t* file, uint64_t len, InfyArtTrailer* t,
                     *e_ifabi = "artifact IFABI differs from the runtime's IFABI (§11.3 step 1)",
                     *e_ver = "unsupported artifact header version",
                     *e_range = "trailer region offsets lie outside the file (§7.4)";
-    uint64_t magic_count = 0;
     if (t) memset(t, 0, sizeof *t);
     if (len < INFY_ART_TRAILER_SIZE) { *why = e_short; return -1; }
     const uint8_t* tr = file + (len - INFY_ART_TRAILER_SIZE);
     if (memcmp(tr, INFY_ART_MAGIC, 8) != 0) { *why = e_magic; return -1; }
-    /* a second copy of the magic anywhere in the file means the blob was appended twice */
-    for (uint64_t i = 0; i + 8 <= len; i++) if (memcmp(file + i, INFY_ART_MAGIC, 8) == 0) magic_count++;
+    InfyArtTrailer v;
+    memset(&v, 0, sizeof v);
+    v.blob_off = infy_art_rd_u32(tr + 16);  v.blob_len = infy_art_rd_u32(tr + 20);
+    /* The blob range must be trustworthy before the duplicate-trailer scan can bound itself. */
+    uint64_t blob_end = (uint64_t)v.blob_off + v.blob_len;
+    if (blob_end > len - INFY_ART_TRAILER_SIZE) { *why = e_range; return -1; }
+    /* §7.4: a second copy of the magic means the container was appended twice. The scan covers the
+     * appended area only, NOT the whole file: the embedded runtime keeps "INFYART2" as a string
+     * constant (this very function compares against it), so a whole-file count finds that copy in
+     * every real artifact and rejects it (docs/spec-deviations.md D-33). */
+    uint64_t magic_count = 0;
+    for (uint64_t i = v.blob_off; i + 8 <= len; i++)
+        if (memcmp(file + i, INFY_ART_MAGIC, 8) == 0) magic_count++;
     if (magic_count > 1) { *why = e_dup; return -1; }
     uint32_t crc = infy_art_rd_u32(tr + 56);
     if (infy_art_crc32(tr, 56) != crc) { *why = e_crc; return -1; }
-    if (t) {
-        t->hdr_ver = (uint16_t)infy_art_rd_u32(tr + 8);
-        t->ifabi = (uint16_t)((infy_art_rd_u32(tr + 8) >> 16) & 0xFFFFu);
-        t->seg_count = (uint16_t)(infy_art_rd_u32(tr + 12) & 0xFFFFu);
-        t->flags = (uint16_t)((infy_art_rd_u32(tr + 12) >> 16) & 0xFFFFu);
-        t->blob_off = infy_art_rd_u32(tr + 16);  t->blob_len = infy_art_rd_u32(tr + 20);
-        t->meta_off = infy_art_rd_u32(tr + 24);  t->meta_len = infy_art_rd_u32(tr + 28);
-        t->ifbc_off = infy_art_rd_u32(tr + 32);  t->ifbc_len = infy_art_rd_u32(tr + 36);
-        t->sum_off = infy_art_rd_u32(tr + 40);   t->sum_len = infy_art_rd_u32(tr + 44);
-        t->rodata_off = infy_art_rd_u32(tr + 48); t->rodata_len = infy_art_rd_u32(tr + 52);
-        t->trailer_crc = crc;
-        t->build_id_low = infy_art_rd_u32(tr + 60);
-    }
-    if (t->hdr_ver != INFY_ART_HDR_VER) { *why = e_ver; return -1; }
-    if (t->ifabi != INFY_IFABI) { *why = e_ifabi; return -1; }
-    uint64_t blob_end = (uint64_t)t->blob_off + t->blob_len;
-    if (blob_end > len - INFY_ART_TRAILER_SIZE) { *why = e_range; return -1; }
+    v.hdr_ver = (uint16_t)infy_art_rd_u32(tr + 8);
+    v.ifabi = (uint16_t)((infy_art_rd_u32(tr + 8) >> 16) & 0xFFFFu);
+    v.seg_count = (uint16_t)(infy_art_rd_u32(tr + 12) & 0xFFFFu);
+    v.flags = (uint16_t)((infy_art_rd_u32(tr + 12) >> 16) & 0xFFFFu);
+    v.meta_off = infy_art_rd_u32(tr + 24);   v.meta_len = infy_art_rd_u32(tr + 28);
+    v.ifbc_off = infy_art_rd_u32(tr + 32);   v.ifbc_len = infy_art_rd_u32(tr + 36);
+    v.sum_off = infy_art_rd_u32(tr + 40);    v.sum_len = infy_art_rd_u32(tr + 44);
+    v.rodata_off = infy_art_rd_u32(tr + 48); v.rodata_len = infy_art_rd_u32(tr + 52);
+    v.trailer_crc = crc;
+    v.build_id_low = infy_art_rd_u32(tr + 60);
+    if (v.hdr_ver != INFY_ART_HDR_VER) { *why = e_ver; return -1; }
+    if (v.ifabi != INFY_IFABI) { *why = e_ifabi; return -1; }
     struct { uint32_t off, ln; } regions[4] = {
-        { t->meta_off, t->meta_len }, { t->ifbc_off, t->ifbc_len },
-        { t->sum_off, t->sum_len }, { t->rodata_off, t->rodata_len }
+        { v.meta_off, v.meta_len }, { v.ifbc_off, v.ifbc_len },
+        { v.sum_off, v.sum_len }, { v.rodata_off, v.rodata_len }
     };
     for (int i = 0; i < 4; i++)
-        if ((uint64_t)regions[i].off + regions[i].ln > t->blob_len) { *why = e_range; return -1; }
+        if ((uint64_t)regions[i].off + regions[i].ln > v.blob_len) { *why = e_range; return -1; }
+    if (t) *t = v;
     return 0;
 }
 

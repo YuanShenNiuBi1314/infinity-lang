@@ -213,8 +213,42 @@
       证据提交：**`2b0fcdb`**（`feat(C2)`）—— 上述 372/0、0/51、12473 字节 C11、gcc exit 0（0 error / 0 warning）、
       四条 C 链（32303/0、82/82 两条、`-c infy_rt.c` 0 告警）全部为该提交上的实测复跑，非引用；RUNLOG 的 cron-08 行是同轮的审计行。
       **该提交尚未推上去**：本轮三次推送全败（三种失败形态），见 §2 推送状态与 cron-08-push 行。
-- [ ] C3 `src/artifact.rs`：`INFYART2` 段尾 + `.inf meta/ifbc/sum` 段、`build-id`（§7.3 规范化输入 SHA-256）。
+- [x] C3 `src/artifact.rs`：`INFYART2` 段尾 + `.inf meta/ifbc/sum` 段、`build-id`（§7.3 规范化输入 SHA-256）。
       验收：`infy artifact info` 能读回自己刚产出的产物；同一输入两次构建字节相同（`--verify-reproducible`）。
+      **两条都实测通过**：`infy build examples/tour` → `artifact ok — 199975 byte(s)`（宿主镜像 199173 + 段 blob 738 + 段尾 64，6 段）、
+      `build-id 4d8250b58122ca2b76132029955e2d2005156dc0a6b021bf5f4ae761e5fd55ba`、exit **0**（不再是 6）；
+      `infy artifact info …ci.exe --nodes` → exit **0**，`.inf meta` 逐字段读回，节点表 6 行 = 行 8/9/10/11/16/19
+      （`gate`/`retry_once` 各 1 连携块，锚点 begin=0·done=5）—— **与 C1 轮的 §8.4 金样逐格相同**；
+      `infy build examples/tour --verify-reproducible` → `两个独立构建目录产物字节相同（199975 字节）`，exit **0**。
+      落地面：`src/artifact.rs`（新建，1176 行）写入器 + 读取器 + `build_id`；`cli.rs` 的 `link_plan`/`stage9`/
+      `compute_build_id`/`package_dirhashes`，`--cc`/`$CC`（缺 → `E-0602` + exit 6，实测 `--cc /no/such/cc`），
+      `--runtime`，非产物 → `E-0605` + exit **7**（实测 `infy artifact info README.md`）。
+      容器布局**逐字节镜像 C 侧**（`infy_art_parse_trailer`/`parse_meta_record`/`meta_resolve_strings`），并有
+      `artifact::tests::meta_offsets_and_sizes_match_the_frozen_header` 把 `INFY_META_OFF_*`/段尾大小/两个魔数
+      对回 `runtime/infy_rt_internal.h` 与 `infy_rt.h` 的**文本**（改头不改这里 = 测试变红）。
+      `cargo test --offline --lib` **391 passed / 0 failed**（基线 372，+18 `artifact` +1 `cli`），
+      `cargo check --offline --lib` 0 error / **51 warning**（未新增），`infy check examples/tour` exit 0，
+      `gcc -std=c11 -Wall -Wextra -I runtime -c 生成的 ci.c` exit 0（0/0，5723 字节 .o），
+      `(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决，未变）。
+      **Rust 写 ↔ C 读 的常驻锁点**：`runtime/fixtures/artifact_rust_writer.bin`（730 字节，写入器逐字节固定输出，
+      只有 `INFY_REGENERATE_FIXTURE=1` 才重写）由 `runtime/test_rt.c` 用**生产**读取器 `infy_art_read_file` 读回并断言
+      同一组字段（+27 项）；一次性探针另把**真实 tour 产物**交给同一读取器 → `rc=0 blob_len=738`，
+      `infy_art_dump_meta` 每字段与 Rust 侧一致。四条 C 链全复跑：`-c infy_rt.c` **0 warning** exit 0；
+      rt harness **32335 assertions / 0 failures**（基线 32303，+32）exit 0；P6 替身链 IFBC **82/82**；
+      P11 生产链 IFBC **82/82**，与替身链 stdout 逐字节相同（`cmp` 无输出）。
+      规范未定 → 选定实现：偏差 **D-32**（五张表的记录布局、`opt_level`/`lto` 值表、profile 名反推、入口描述与
+      `ResourceKeys` 借用 `export` 区/推导规则、`artifact info` 借 `E-0605`/exit 7）。
+      **发现并裁掉一条规范级缺陷 D-33**：§7.4/ABI §6 的"段尾缺失/重复即非产物"若按字面整文件扫魔数，会因为
+      `.inf rt` 静态链进镜像、而 `infy_rt.c` 自身带 `"INFYART2"` 字面量，**否掉每一个真产物** —— 本轮第一次真接
+      阶段 [9] 就撞上（`host image already contains the INFYART2 magic`）。两侧同规则收窄到追加区 `[blob_off, EOF)`，
+      写入器另拒绝 blob 自带魔数；顺带修掉 `infy_art_parse_trailer` 的 `if (t) {…}` 后无条件 `t->hdr_ver` NULL 解引用。
+      `docs/internals/runtime-abi.md` §6/§7 的草图（`blob_off u64` 等）与实现不符，已按实现改正并补全逐字段表。
+      **明确未做**（不用假成功掩盖）：阶段 [10] 的 sumdb 校验/运行时自校验比对（`.inf sum` 只抄 `lock.dirh`，
+      tour 无依赖 = 0 条）；`ResourceKeys`/`EnvOffsets` 区写空集（前端不收集 `std.chain.lock` 键名）；
+      `.inf ifbc` 恒空（D1）；A 轨 `#[link]` 目标码、§7.2 LTO 编排、`infyl` 独立链接器驱动；
+      C 侧 `infy_art_dump_meta` 里 `meta off=0 len=0` 是**写死的显示值**（打印错，不是容器错）—— 本轮未改，见 §2。
+      证据提交：**待本轮提交号**（上述 391/0、0/51、199975 字节、exit 0、738 blob、32335/0、82/82 两条、
+      `--no-insert-timestamp` 后的两次构建逐字节相同，全部为该提交上的实测复跑，非引用）。
 - [ ] C4 `infy run examples/tour` 真跑出输出；退出码遵循 §13.4。
       验收：`infy run` 的 stdout 与 RUNLOG 里记录的期望一致（把期望字符串写进测试）。
 - [ ] C5 `infy test`：编 `#[test]` 函数 + 执行 + 退出码（§5.9/§13.4）。
@@ -329,28 +363,57 @@
       验收：阶段 [2] 把 `fmt!` 展开成带 `InfyFmtSpec` 表的构造（或阶段 [4] 直接定型、阶段 [8] 发射 specs 数组 +
       `infy_fmt_run` 调用），并让 §14.2 的 `describe` 样例（含 `String` 返回）通过 `infy check` + `infy build` + gcc。
 
+- [ ] F16 **阶段 [10]（产物签名/校验段写入 → dirhash + lock 比对，§5.8/§7.1）未做**（C3 轮落地 [9] 时确认）：
+      `artifact.rs` 只把 `MODULE.infy.lock` 的 `dirh` 三元组抄进 `.inf sum`（12 字节/行 = `package_pool, version_pool, dirhash_pool`），
+      **没有任何一侧拿它去比对**，`infy_rt.c` 读 meta 后也不校验 sum 区。tour 无依赖 → 该路径在现有一切实例上是**空集**，
+      所以 [9] 的绿不代表 [10] 通。
+      验收：`infy artifact verify <产物>`（或 `artifact info` 的一档 `--check-sum`）逐条把 `.inf sum` 与 lock/sumdb 比对，
+      不一致 → 用已有的 §5.8 族码（`E-0580`/`E-0583`）并 exit 7；`.inf sum` 为空时明确打"0 条依赖，无可校验"，不假装通过。
+
+- [ ] F17 **容器里的 `ResourceKeys` 与 `EnvOffsets` 是空集**（C3 轮确认）：冻结的 208 字节 `.inf meta` 没有 `EnvOffsets` 槽位，
+      `ResourceKeys` 连名字都没被前端收集（`std.chain.lock("db")` 的键名在 `sema`/`hir` 里没有出口），
+      所以 `artifact::Content.resource_keys` 恒为 `Vec::new()`，`EnvOffsets` 只能让运行时走默认值。
+      而 `src/hir.rs` 其实**已经算出** §4.6/§10 的 11 个偏移并有金样（`hir::tests`），只是没写进产物。
+      验收：`EnvTable` 写进 blob（新区或 meta 尾部扩展，须与 C 侧同时改并记偏差），`infy artifact info` 打印 11 个偏移；
+      `std.chain.lock` 键名收集进 `ResourceKeys`，并由 `infy_rt.c` 用于锁键校验。
+
+- [ ] F18 **C 侧 `infy_art_dump_meta` 的 `meta` 段行写死 `off=0 len=0`**（C3 轮读真实产物时发现，`infy_rt.c:3119`）：
+      真实容器里 meta 是 `off=0 len=208`。这是**打印错误**不是容器错误（Rust 侧 `artifact::dump_sections` 打的是真 208），
+      但两份工具的输出因此不可比对。
+      验收：改成打真实的 `INFY_META_FIXED_BYTES`，并让 `infy artifact sections` 与 C 侧 dump 在同一夹具上逐行可比。
+
 ## 2. 当前指针
 
-> **下一轮第一件事：取 C3**（§1 里第一个 `[ ]`：`src/artifact.rs` 的 `INFYART2` 段尾 + `.inf meta/ifbc/sum` 段、
-> `build-id`（§7.3 规范化输入 SHA-256））。C2 轮留下的接活要点：
-> (1) **`infy build` 现在已经真跑阶段 [7]+[8]**：`cli.rs` 的 `build_c()` 做 `hir::lower` → `codegen::emit` →
->     写 `.infy-build/<triple>/<module 末段>.c`，支持 `--target`（§7.2 内建集校验，未知 → `E-0601`）与 `--out`；
->     仍以 exit **6** 结束，因为 [9] 链接没做 —— C3 就是把这段接上：产物 = 宿主镜像 + INFY 段 blob + 64 字节段尾
->     （`docs/internals/runtime-abi.md` §6 逐字段写了布局，`infy_rt.h` 的 `InfyMetaFixed` 是它的 C 镜像）。
->     `build-id` 走 `src/sha256.rs`（已有流式接口与 `streaming_million_a` 之类的金样）。
-> (2) **生成 C 的入口是 `main()`**：C2 发的 `main` 调 `infy_chain_register_table` + `infy_run_package_inits(0, 0u)` +
->     `infy_runtime_start(entry_chain, 0)`。C3 若要 `infy artifact info` 读回自己的产物，注意运行时是用
->     `infy_art_self`（从文件尾找 `INFYART2` 段尾）取 meta 的，`infy_rt.c:3614` 起那段没有容器时会
->     打印"using strict defaults"并继续 —— 不要为了绕过它而改运行时。
-> (3) **别动 D4 的两侧布局**（IFBC 操作数个数 + `func_table` 记录 Rust 36 字节/条 vs C 40 字节/条），留给 D2/D4 一起裁。
-> (4) **手法留档（C2 新增）**：改了 `infy_rt.h` 就复跑四条 C 链（命令都在 RUNLOG cron-08 那一行里）；
->     验证"生成的 C 是否真的对"最省力的办法是**让生成的 C 自己断言布局**
->     （`sizeof`/`_Alignof`/`offsetof` 的负数组 typedef），gcc 一编译就等于把 HIR 的尺寸复核一遍 —— 本轮就是靠它
->     把 `Result<u32,Fail>` 的 20 字节钉在产物里。测试里断言"生成的文本必须包含 X 且**不得**包含 Y"
->     （如"不得出现裸 `(a_1) + (b_2)`"）比只断言包含更能防止假成功。
-> (5) C1/C2 都撞过的同族坑再记一次：**BACKLOG 指针里的旧描述会过期**。本轮 `runtime-abi.md` §1 写的 `InfyVec_T`
->     与冻结头的无类型 `InfyVec` 不一致，实现按头走并已同步文档；`§5` 的 `node_<name>_<i>(Frame* f)` 也与
->     `InfyNodeFn = void(*)(void*)` 不符，同样以实现为准更新（见 D-26 附近的文档同步）。
+> **下一轮第一件事：取 C4**（§1 里第一个 `[ ]`：`infy run examples/tour` 真跑出输出，退出码遵循 §13.4；
+> 验收要求"把期望字符串写进测试"）。C3 轮留下的接活要点：
+> (1) **阶段 [9] 已落地**：`cli.rs::stage9()` = `link_plan()`（`--cc`/`$CC`，默认 `gcc`；缺 → `E-0602`/exit 6，
+>     实测 `--cc /no/such/cc`）→ `cc -std=c11 <opt> -I <runtime> ci.c infy_rt.c infy_dyn.c
+>     -Wl,--no-insert-timestamp -o ci.exe` → `artifact::write`（blob + 64 字节段尾追加在镜像尾）。
+>     产物 = `.infy-build/<triple>/<module 末段>.exe`；`infy build examples/tour` 现在 **exit 0**
+>     （199975 字节，blob 738，build-id `4d8250b5…55ba`）。C4 就"跑这个 exe、把 stdout 对回期望串"，别再另起一套链接。
+> (2) **`-Wl,--no-insert-timestamp` 不能去掉**：GNU ld 会在 PE COFF 头偏移 **136** 写时间戳，
+>     同一程序两次链接在第 **137** 字节就不同（本轮实测），§7.3 的可复现承诺依赖它。
+>     `--verify-reproducible` 走"两个独立构建目录 + 逐字节比较"，不一致 → `E-0603`/exit 7，
+>     `artifact::describe_offset` 会报首个差异落在哪一段（宿主镜像 / meta / 池 / 节点表 / …）。
+> (3) **运行时现在认自己的容器**：`infy_art_self` 找到段尾后 `infy_set_profile_from_meta`（`infy_rt.c:3621`）
+>     会用 `.inf meta` 的 overflow/radius/usize/stack/quota/iter_guard 覆盖默认值 —— C4 一跑就同时验到
+>     "策略来自产物"这条链；原先那句 `runtime: no INFY artifact container … strict defaults` 对我们的产物不再出现。
+>     C2 发的 `main()` 依次调 `infy_chain_register_table` → `infy_run_package_inits(0, 0u)` → `infy_runtime_start(entry_chain, 0)`。
+> (4) **D-33 是未经批准的裁决**：重复段尾的扫描范围（整文件 → 追加区 `[blob_off, EOF)`）两侧同时改了；
+>     所有者若不认，回退点 = `infy_rt.c::infy_art_parse_trailer` + `artifact.rs::parse_trailer`，
+>     锁定点 = `runtime/test_rt.c` 的 `build_artifact(..., mode=2)` 与
+>     `artifact::tests::duplicate_trailer_scan_is_scoped_to_the_appended_area`。
+> (5) **别动 D4 的两侧布局**（IFBC 操作数个数 + `func_table` 记录 Rust 36 字节/条 vs C 40 字节/条），留给 D2/D4 一起裁；
+>     `.inf ifbc` 现在恒为空（D1 未做），C4/C5 用不到它。
+> (6) **手法留档（C3 新增）**：改了 `infy_rt.c`（不只是 `.h`）也要复跑四条 C 链 —— `-c infy_rt.c`（0 告警）、
+>     rt harness（**必须 `cd target/scratch` 再跑**，夹具按 `../../runtime/fixtures/…` 取；换目录会红不会空跑）、
+>     替身链 IFBC 82/82、生产链 IFBC 82/82 + `cmp` 两份 stdout。
+>     跨语言一致性的常驻手段 = **逐字节夹具**：写入器产出 `runtime/fixtures/artifact_rust_writer.bin` 提交进仓库，
+>     C 侧生产读取器读它（`test_rt.c` 27 项），Rust 侧断言"重新生成的字节 == 夹具"（只有 `INFY_REGENERATE_FIXTURE=1` 才重写）。
+>     谁改布局都会红，不需要有人记得重跑探针 —— 比 C1/C2 的"一次性 gcc 探针"强。
+> (7) C1/C2/C3 三轮都撞过的同族坑再记一次：**BACKLOG 指针与 ABI 文档的旧描述会过期**。本轮是 `runtime-abi.md` §6
+>     写 `blob_off u64`、`build_id [u8;32]` 在段尾里，而冻结头与两侧实现一直是 `u32` 对、32 字节 id 在
+>     `.inf meta`@176（段尾@60 只镜像低 4 字节）—— 已按实现改正文档并补逐字段表/blob 布局（D-32/D-33）。
 
 > 输出二进制一律写 `target/scratch/`（写 `/tmp` 会让 `ld` 直接返回 5）；改 `infy_rt.h` 后**四条链**都要复跑
 > （P6 替身 IFBC、P11 生产 IFBC、P9 rt、`-c infy_rt.c`），因为它们共用一个头。
