@@ -708,3 +708,61 @@ D-38 (b)–(i) 与 D-40 把"哪侧改什么"钉死了，但没有（也无法）
 顺带纠正 D-40 选择 5 的一处算术：它写"上限取装载器的 `OPS_MAX * 16 = 48`"，而 C 侧那个表达式实际是
 **64**（`OPS_MAX = 4`）。本轮把 C 侧改成显式的 `#define MAX_SWITCH_CASES 48u`，两侧这才同为 48
 （锁点 = `test_ifbc.c` 的 `SC_SWITCH_HUGE`：49 个 case 的镜像 C 侧报 R-0704，Rust 侧发射期就拒）。
+
+## D-42 D4 实现段 (3)（双侧交叉验证）：两侧第一次用同一份文本比对，当场抓到三处分叉；同时把"现在还不可比的校验结论"逐条登记
+
+**为什么需要这一条**：D4(1)/(2) 各自把两侧对齐到 D-38/D-40/D-41 裁定的形状，两侧的单测都是绿的，
+但**没有任何一条命令把同一份字节交给两个 dumper 比过一次**。本轮加的就是这个：两侧各实现一份
+"只含双方都保留的字段、逐位十进制"的规范化文本，写进仓库同一份文件，谁漂谁红。
+语法表见 `runtime/IFBC.md` §6.1，两侧入口的分工见 `docs/internals/ifbc-encoding-rust.md` §6。
+
+**锁点**（`.bin` 由 Rust 写入器生成，只有 `INFY_REGENERATE_FIXTURE=1` 重写；`.can.txt`/`.ver.txt`
+由 **C 侧**渲染，只有 `INFY_REGENERATE_CANONICAL=1` 重写；Rust 侧 `ifbc::tests::canonical_render_equals_the_c_loader_render`
+断言自己读同一份字节的文本 == C 侧那份）：
+
+| 夹具 | 字节 | 钉住的东西 |
+| --- | --- | --- |
+| `runtime/fixtures/ifbc_rust_writer.bin` + `.can.txt` | 1031 | D4(2) 那份能被执行的镜像，两侧文本相同；且两侧**阻塞性**校验结论都为空 |
+| `runtime/fixtures/ifbc_all_ops.bin` + `.can.txt` | 2083 | 附录 D 的**全部** opcode（含 17 条间隙指令、`switch` 的内联 case 表、类型操作数越界时的 `?` 后缀）逐条文本相同 |
+| `runtime/fixtures/ifbc_verify_matrix.bin` + `.ver.txt` | 1890 | 每函数一个缺陷、两侧都在同一 `(code, func, off)` 报出来的 10 条：`R-0704 ×2 / R-0705 / R-0706 ×3 / R-0707 ×2 / R-0710 / R-0713` |
+
+**第一次跑就抓到的三处分叉**（前两条改 C 侧，第三条改本侧；都是"规范是唯一权威"的机械执行）：
+
+1. **`coro.resume` / `coro.throw` 的操作数个数**：C 的 `OPS` 表写 0，本侧 `Op::arity()` 写 1。
+   D.8 明写 `0xc4 coro.resume h` / `0xc5 coro.throw h` ⇒ 那个 `h` 在线上，**C 侧改为 1**。
+   严重性不是排版：指令宽度是 `1 + 4*nops`，C 侧会把 resume 之后的 4 字节操作数当指令流读，
+   于是一条协程指令让后面**所有**指令错位（本轮 `ifbc_all_ops.bin` 的 `I` 行立刻分成两截）。
+   执行语义不变：被 resume 的值仍从操作数栈取，`h` 是执行不读的注解，与 D-38 (e) 给 `ldw`
+   的类型注解同一个处理；装载期与反汇编都按 1 操作数。
+2. **D.9 的助记符名**：C 侧与两份文档写 `size_of.idx` / `align_of.idx` / `field_off.idx`，
+   规范那行是 `0xe1 size_of idx` `0xe2 align_of idx` `0xe3 field_off idx` —— `.idx` 是**操作数**
+   而不是名字的一部分；只有 `typeof.idx` 是一个名字（`0xe0 typeof.idx`）。本侧代码本来就是
+   `size_of`/`align_of`/`field_off`/`typeof.idx`，**改 C 侧与文档**。（本侧的镜像文档
+   `docs/internals/ifbc-encoding-rust.md` 的表格此前抄的是 C 的错名，一并改正。）
+3. **本侧 `verify_func` 的重复报告**：操作数合法性与 D.3/D.7 邻接检查写在"抽象执行"走查里，
+   而那条走查把**直线后继**也 `work.push(next)` 回工作栈，于是同一条指令被走 2–3 次、
+   同一个 `(code, off)` 报 2–3 次（矩阵里 `div` 缺守卫那条报了 3 次；C 侧按边界各查一次只报 1 次）。
+   修法两处：① 操作数/邻接检查搬出走查，按 `instrs` 每指令一次（顺带与本侧原先"只检查可达指令"
+   相比更接近 C 侧——不可达指令的非法操作数现在也报）；② 走查不再把直线后继压回工作栈
+   （高度仍记入 `height`，分支/跳转目标仍由 `push_block` 压）。
+   这**不是**线格式问题，但同样是"两侧对同一镜像的结论不同"，所以放在这里而不是 RUNLOG 就完。
+
+**现在还不可比的校验结论（F26 要的那份具体清单；讲"两侧校验等价"之前必须逐条消掉）**：
+
+* (a) `call.virt` / `call.embed` / `invoke.dynamic`：本侧装载期直接判 `R-0705`（被调元数不可静态
+  确定，校验项 2 无法完成），C 侧会校验并执行（`sim_delta` 的 `SP_CALL_HOST` / `SP_INVOKE_DYN`，
+  `call.virt` 记 δ=0）⇒ 同一镜像本侧拒绝、C 侧接受。
+* (b) `coro.resume` / `coro.throw` / `throw.inf` 的栈效果：本侧 `(0,0)`，C 的 `sim_delta` 是 `-1`
+  系列；同一份高度分析两侧结论可以不同。
+* (c) **操作数越界的层级不同**：本侧 `decode` 把"引用不存在的行"当**容器**错误
+  （`IfbcDecodeErr`，`validate_refs`），C 侧 `parse_sections` 通过、由 `check_type` 报 `R-0706`。
+  后果是这类镜像根本进不了"两侧都能读"的集合，所以矩阵里没有它（不是漏测，是集合不相交）。
+* (d) 本侧 §7.8.3 第 4 项额外要求"函数最后一条指令必须是 `ret`/`ret.multi`/`throw.inf`"
+  （否则 `R-0707`），C 侧没有这条判据。
+* (e) `W-0705`（第 6 项，非阻塞）：本侧逐指令报，C 侧每函数报一次 —— 报告粒度不同，
+  所以规范化文本只渲染**阻塞性**结论。
+
+因此 D4(3) 的声称边界是：**反汇编逐指令相等（覆盖附录 D 全部 opcode）** + **矩阵里那 6 个 R-码类
+的 `(code, func, off)` 逐条相等**；(a)–(e) 之内仍不许讲"两侧装载期校验等价"，`docs/coverage.md`
+的"被测对象是生产运行时吗"一行按此写。消掉 (a)(b) 需要本侧的能力表扩容（§7.7.2），登记在
+BACKLOG **F26**；(c)(d) 属"本侧更严"，若要合并需与 C 侧同批改并在这一条下追加裁定。

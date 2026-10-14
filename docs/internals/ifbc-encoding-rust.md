@@ -50,8 +50,10 @@ n_types × {
 
 `payload_a/b` 收 Rust 侧原有的容器元素信息（D-38：C 忽略它们，不是新语义）。
 `size`/`align` 由生产者填：**自动置的标量行写 0**，因为没有任何规范位置给出
-`sizeof(InfyDyn)` 之类的数，编一个上去比留空更糟；要用 `size_of.idx`/`align_of.idx`/`field_off`
+`sizeof(InfyDyn)` 之类的数，编一个上去比留空更糟；要用 `size_of`/`align_of`/`field_off`
 的生产者必须自己填真布局（`src/hir.rs` 的布局引擎那份，由 `gcc` 探针校准）。
+（D.9 那三行的 `.idx` 是**操作数**不是助记符的一部分：规范写 `0xe1 size_of idx`，
+`typeof.idx` 才是一个名字。C 侧此前把助记符打成 `size_of.idx`，见偏差 D-42。）
 
 ## 1.3 kind 空间 = IFABI 标量码（D-38 (a)）
 
@@ -241,8 +243,8 @@ string_pool:     u32 n_strings; n_strings × { u32 len; len × byte }   # 不要
 | 0xC4 | `coro.resume` | 1 | imm | (0, 0)（与 C 的 `sim_delta = -1` 不同，见 §4） |
 | 0xC5 | `coro.throw` | 1 | imm | (0, 0)（同上） |
 | 0xE0 | `typeof.idx T` | 1 | ty | (0, 1) |
-| 0xE1 | `size_of.idx T` | 1 | ty | (0, 1) |
-| 0xE2 | `align_of.idx T` | 1 | ty | (0, 1) |
+| 0xE1 | `size_of T` | 1 | ty | (0, 1) |
+| 0xE2 | `align_of T` | 1 | ty | (0, 1) |
 | 0xE3 | `field_off idx,fld` | 2 | ty, imm | (0, 1)；非 `repr(C)` → `R-0713`，字段越界 → `R-0706` |
 
 未列出的字节没有条目：装载期是未知 opcode。
@@ -277,7 +279,30 @@ string_pool:     u32 n_strings; n_strings × { u32 len; len × byte }   # 不要
   登记为 BACKLOG **F25**（本轮不改语义，只在 D-38 补充裁定里点名）。
 * `ResourceKeys`/`EnvOffsets` 之类是产物容器的事（F17），不在本文件。
 * 间隙指令（`ldg/stg/import*/seq.*/inst.*/map.insert/*concat/new.tuple/new.set/dyn.truthy/dyn.identity`）
-  在 C 侧还没有实现，是 D4 余项 (2) 的内容。
+  已由 D4 余项 (2) 在 C 侧落地：11 条可执行，6 条装载通过而执行显式 `R-0710`
+  （对象模型缺属性表/迭代器/集合载体 = BACKLOG **F27**，实现选择记在偏差 **D-41**）。
+
+## 6. 双侧共用的规范化文本（D4(3)，偏差 D-42）
+
+人类可读的 `infy_ifbc_dump` / `IfbcModule::disassemble` 两边行格式本就不同，所以 D4(3) 不是去统一
+它们，而是**各加一份只含两侧都保留的字段、逐位十进制的机器可比文本**，并让两份文本成为仓库里
+提交的同一份文件：
+
+| 本侧入口 | C 侧对应 | 内容 |
+| --- | --- | --- |
+| `ifbc::dump_canonical(bytes)` / `IfbcModule::dump_canonical()` | `infy_ifbc_dump_canonical(image, len, FILE*)` | `H/T/P/F/I/L/X/S` 行（行语法见 `runtime/IFBC.md` §6.1） |
+| `ifbc::verify_canonical(m, hosts)` | `infy_ifbc_verify_canonical(image, len, FILE*)` | 排序后的 `V R-<code> f=<func> off=<off>`，只列**阻塞性**结论 |
+
+方向分工：`.bin` 是**本侧写入器**的输出（`INFY_REGENERATE_FIXTURE=1` 才重写），
+`.can.txt`/`.ver.txt` 是**C 侧渲染**的结果（`INFY_REGENERATE_CANONICAL=1` 才重写），
+本侧的 `ifbc::tests::canonical_render_equals_the_c_loader_render` 断言"我读同一份字节得到的文本 ==
+C 侧那份"。于是改线格式、改任一侧的表形态、改助记符、改操作数个数 → 至少一侧红，
+两侧都不可能悄悄定义答案。
+
+W-0705 不进比较：§7.8.3 第 6 项在本侧逐指令报、在 C 侧每函数报一次，是**报告粒度**不同而不是结论
+不同；这一条连同"哪些校验结论现在还不可比"一起写在偏差 **D-42**。
+锁点镜像 = `ifbc::tests::canonical_cross_check_images_are_the_writers_output`
+与 `runtime/test_ifbc.c::test_canonical_cross_check`。
 
 ## 5. 确定性（§7.3）
 

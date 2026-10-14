@@ -1063,6 +1063,111 @@ static void test_rust_writer_fixture(void) {
     CHECK(live_objs() == base, "(xlang) loading, running and dumping the Rust image leaks nothing");
 }
 
+/* ===== D4(3): one image, two readers, ONE text =====
+ * The `.bin` fixtures are the Rust writer's own bytes (D4(2) pinned `ifbc_rust_writer.bin`; this
+ * round adds `ifbc_all_ops.bin`, which covers every opcode appendix D defines including the 17 gap
+ * ops and `switch`'s inline case table, and `ifbc_verify_matrix.bin`, one function per load-time
+ * check both verifiers implement). The `.can.txt` and `.ver.txt` files under `runtime/fixtures/` are
+ * what *this* side rendered from them; `src/ifbc.rs`'s `dump_canonical` / `verify_canonical` assert
+ * against the same files, so the two readers are held to one text and neither side defines it alone.
+ * `INFY_REGENERATE_CANONICAL=1` rewrites the texts from this side — the only way a deliberate
+ * rendering change moves the goalposts, and it has to be said out loud. Run from target/scratch,
+ * like `test_rt.c`: the fixture paths are module-relative. */
+extern void infy_ifbc_dump_canonical(const uint8_t* image, uint64_t len, FILE* out);
+extern void infy_ifbc_verify_canonical(const uint8_t* image, uint64_t len, FILE* out);
+
+static char* read_whole(const char* path, long* n) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    char* b = (char*)malloc((size_t)sz + 1);
+    size_t rd = fread(b, 1, (size_t)sz, f);
+    fclose(f);
+    if (rd != (size_t)sz) { free(b); return 0; }
+    b[sz] = 0; *n = sz; return b;
+}
+
+/* Point at the first line that moved, so the next round has a lead instead of a blob. */
+static void report_first_diff(const char* label, const char* want, long wn, const char* got, long gn) {
+    long line = 1, a = 0, b = 0;
+    while (a < wn && b < gn && want[a] == got[b]) { if (want[a] == '\n') line++; a++; b++; }
+    long ws = a, gs = b;
+    while (a < wn && want[a] != '\n') a++;
+    while (b < gn && got[b] != '\n') b++;
+    fprintf(stderr, "%s: 首个分歧在第 %ld 行\n  夹具: %.*s\n  本侧: %.*s\n",
+            label, line, (int)(a - ws), want + ws, (int)(b - gs), got + gs);
+}
+
+static void canonical_case(const char* label, const char* bin, const char* txt, int verify_mode) {
+    uint64_t base = live_objs();
+    char pbin[256], ptxt[256];
+    snprintf(pbin, sizeof pbin, "../../runtime/fixtures/%s", bin);
+    snprintf(ptxt, sizeof ptxt, "../../runtime/fixtures/%s", txt);
+    long n = 0;
+    char* img = read_whole(pbin, &n);
+    CHECK(img != 0, label);
+    if (!img) return;
+    FILE* d = mem_stream();
+    if (verify_mode) infy_ifbc_verify_canonical((const uint8_t*)img, (uint64_t)n, d);
+    else infy_ifbc_dump_canonical((const uint8_t*)img, (uint64_t)n, d);
+    long dn = 0; char* got = slurp(d, &dn); fclose(d);
+    CHECK(dn > 0 && strncmp(got, "E parse", 7) != 0, "  (canon) this side reads the Rust image");
+    if (getenv("INFY_REGENERATE_CANONICAL")) {
+        FILE* w = fopen(ptxt, "wb");
+        CHECK(w != 0 && fwrite(got, 1, (size_t)dn, w) == (size_t)dn && fclose(w) == 0,
+              "  (canon) explicit regeneration wrote the text");
+        free(got); free(img);
+        CHECK(live_objs() == base, "  (canon) rendering leaks nothing");
+        return;
+    }
+    long tn = 0; char* want = read_whole(ptxt, &tn);
+    CHECK(want != 0, "  (canon) the committed text is in the repo (INFY_REGENERATE_CANONICAL=1 writes it)");
+    if (want) {
+        if (!(tn == dn && memcmp(want, got, (size_t)dn) == 0)) report_first_diff(txt, want, tn, got, dn);
+        CHECK(tn == dn && memcmp(want, got, (size_t)dn) == 0,
+              "  (canon) this side's text == the text the fixture carries");
+        free(want);
+    }
+    free(got); free(img);
+    CHECK(live_objs() == base, "  (canon) rendering leaks nothing");
+}
+
+static void test_canonical_cross_check(void) {
+    canonical_case("(canon) the D4(2) writer fixture disassembles identically",
+                   "ifbc_rust_writer.bin", "ifbc_rust_writer.can.txt", 0);
+    canonical_case("(canon) every appendix-D opcode disassembles identically",
+                   "ifbc_all_ops.bin", "ifbc_all_ops.can.txt", 0);
+    canonical_case("(canon) the load-time verdicts agree per (code, func, off)",
+                   "ifbc_verify_matrix.bin", "ifbc_verify_matrix.ver.txt", 1);
+
+    /* the clean image: this side finds nothing blocking either, which is what makes the empty
+     * `.ver.txt` above a statement rather than an absence. */
+    long n = 0;
+    char* img = read_whole("../../runtime/fixtures/ifbc_rust_writer.bin", &n);
+    CHECK(img != 0, "(canon) the writer fixture is present");
+    if (img) {
+        FILE* v = mem_stream();
+        infy_ifbc_verify_canonical((const uint8_t*)img, (uint64_t)n, v);
+        long vn = 0; char* vt = slurp(v, &vn); fclose(v);
+        CHECK(vn == 0, "(canon) the Rust writer's module passes all six validations here too");
+        free(vt); free(img);
+    }
+
+    /* and the all-ops image really does hold every opcode this table knows */
+    char* ops = read_whole("../../runtime/fixtures/ifbc_all_ops.bin", &n);
+    CHECK(ops != 0, "(canon) the all-ops fixture is present");
+    if (ops) {
+        FILE* d = mem_stream();
+        infy_ifbc_dump_canonical((const uint8_t*)ops, (uint64_t)n, d);
+        long dn = 0; char* dt = slurp(d, &dn); fclose(d);
+        CHECK(count_prefix_lines(dt, "I ") > 80, "(canon) one I-line per opcode, gap ops included");
+        CHECK(strstr(dt, "new.set") && strstr(dt, "seq.iter") && strstr(dt, "inst.get"),
+              "(canon) the D-41 gap ops are in the shared text");
+        CHECK(strstr(dt, "sub.?") != 0, "(canon) a type operand naming no row prints `?` on both sides");
+        free(dt); free(ops);
+    }
+}
+
 int main(void) {
     test_valid_add();
     test_six_validations();
@@ -1081,6 +1186,7 @@ int main(void) {
     test_merged_rejections();
     test_dump_merged_format();
     test_rust_writer_fixture();
+    test_canonical_cross_check();
     test_object_model();
     test_truncation_sweep();
     test_byte_mutation_sweep();

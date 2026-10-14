@@ -58,7 +58,7 @@ n_types × {
    nfields × { u32 name_str, u32 off, u32 ty }   # ty indexes type_table
 }
 ```
-`type_id` = the 0-based index of the record. `size_of.idx` / `align_of.idx` / `typeof.idx` /
+`type_id` = the 0-based index of the record. `size_of` / `align_of` / `typeof.idx` /
 `is.dyn` / `cast.dyn` / every D.3 family operand is a `type_id` and is bounds-checked against
 `n_types` (R-0706); `is.dyn`/`cast.dyn` additionally need a row whose **kind** has a dyn-visible tag
 (R-0710) — the kind is no longer numerically equal to an `InfyDynTag` (D-38 renumbered it), so the
@@ -66,7 +66,7 @@ loader maps it through `kind_to_dyn_tag`. A `kind` above 32 is a structural fail
 is what `src/ifbc.rs::decode_types` does too. Producers seed rows `0..17` as the scalar kinds so
 **type index == scalar code** there (`seed_scalar_rows` in Rust, `N_SCALAR_ROWS` in the harness); the
 seeded rows carry `size = align = 0` by design (D-40 choice 1), so a producer that wants
-`size_of.idx` to mean something fills them itself.
+`size_of` to mean something fills them itself.
 
 ### 1.3 import_table
 ```
@@ -285,12 +285,12 @@ ranges; these byte values are fixed here and shared by verifier / interpreter / 
 | 0xC1 | `yield` | 0 | | **coroutine‑only, else R‑0707** |
 | 0xC2 | `yield.from` | 0 | | coroutine‑only |
 | 0xC3 | `frame.exit` | 0 | | coroutine end (terminator) |
-| 0xC4 | `coro.resume` | 0 | | pop arg,pop DY_CORO; run to first yield; push value |
-| 0xC5 | `coro.throw` | 0 | | pop DY_CORO; push value |
+| 0xC4 | `coro.resume h` | 1 | | pop arg,pop DY_CORO; run to first yield; push value — `h` is on the wire because D.8 writes it, and the executor does not read it (the coroutine comes off the operand stack), like `ldw`'s annotation under D-38 (e) |
+| 0xC5 | `coro.throw h` | 1 | | pop DY_CORO; push value; same `h` note |
 | 0xE0 | `typeof.idx T` | 1 | `T<n_types` | push type id |
-| 0xE1 | `size_of.idx T` | 1 | `T<n_types` | push `types[T].size` |
-| 0xE2 | `align_of.idx T` | 1 | `T<n_types` | push `types[T].align` |
-| 0xE3 | `field_off.idx T,field` | 2 | `T<n_types`, `field<nfields`, **T must be repr(C) else R‑0713** | push field byte offset |
+| 0xE1 | `size_of T` | 1 | `T<n_types` | push `types[T].size` |
+| 0xE2 | `align_of T` | 1 | `T<n_types` | push `types[T].align` |
+| 0xE3 | `field_off T,field` | 2 | `T<n_types`, `field<nfields`, **T must be repr(C) else R‑0713** | push field byte offset |
 
 Any byte with no entry above is an unknown opcode ⇒ **R‑0706** (and the module is rejected).
 `switch` byte length = `1 + 4 + 4*n`; the `n` case targets sit inside the enclosing function's
@@ -389,10 +389,51 @@ exception_table:[0xSTART,0xEND) -> 0x<handler> depth=… kind=…
 string_pool:   [i] len=… bytes=<hex bytes>
 ```
 The mnemonic+suffix rule is the one `src/ifbc.rs::Instr::render` uses, so the two disassemblers name
-an instruction the same way even though the surrounding text differs — D4(3) has to reconcile the
-*line* format, not the naming.
+an instruction the same way even though the surrounding text differs.
 If the container fails to parse, the dump prints `IFBC: parse failed (R-XXXX)` and stops (and does
 not crash on any prefix of a truncated image).
+
+### 6.1 `infy_ifbc_dump_canonical` / `infy_ifbc_verify_canonical` — the cross-language text (D4(3))
+
+The human-readable dump above is *not* comparable across languages, so D4(3) adds a second, narrower
+renderer on each side and holds both to one committed text. Grammar (positional, decimal, one line
+per row / instruction / mark / pool entry — nothing resolved except a D.3 family's kind suffix, which
+both sides take from `type_table`, printing `?` when the operand names no row):
+
+```
+H <ifbc_version> <ifabi> <lang_tag> <frame_kind> <func_count> <n_types> <n_imports>
+  <n_lines> <n_excs> <n_strings> <code_len> <max_mem_bytes>
+T <i> <kind> <name> <flags> <size> <align> <nfields>
+P <i> <kind> <flags> <name> <ret_sig> <nparams> <sig_hash> <param codes…>
+F <i> <name> <code_off> <code_len> <locals> <max_stack> <nargs> <ret_arity> <ret_sig>
+  <frame_kind> <flags> <sig_str> <sig_hash>
+I <func> <off> <opcode> <mnemonic> <arity> <operands…> <switch case targets…>
+L <i> <code_off> <line>
+X <i> <start> <end> <handler> <depth> <kind>
+S <i> <len> <hex bytes>
+```
+
+`verify_canonical` renders the §7.8.3 conclusions as sorted `V R-<code> f=<func> off=<off>` lines —
+blocking findings only, because item 6's `W-0705` fires per instruction in `src/ifbc.rs` and once per
+function here (a reporting-granularity difference, not a verdict difference; D-42).
+
+Fixtures, both directions (`INFY_REGENERATE_FIXTURE=1` rewrites the Rust writer's `.bin`,
+`INFY_REGENERATE_CANONICAL=1` rewrites the texts **from the C side**, and `src/ifbc.rs`'s tests assert
+against the same files):
+
+| fixture | what it pins |
+| --- | --- |
+| `ifbc_rust_writer.bin` + `.can.txt` | the D4(2) image: same text, and its verify list is empty on both sides |
+| `ifbc_all_ops.bin` + `.can.txt` | every appendix-D opcode, the 17 gap ops and `switch`'s inline table — one `I` line each, so an operand-count drift mis-scans and fails |
+| `ifbc_verify_matrix.bin` + `.ver.txt` | one function per load-time check both sides implement (R-0704/05/06/07/10/13) |
+
+This is what caught two divergences the first time it ran (`coro.resume`/`coro.throw` operand count,
+D.9 mnemonic names) — see D-42.
+
+Both renderers end every line with `\n` and both tests compare **raw bytes**, so the committed texts
+must never be eol-translated: `.gitattributes` pins `runtime/fixtures/*.bin` to `binary` and the two
+text suffixes to `-text`. Without it a `core.autocrlf=true` checkout rewrites them to CRLF and the
+cross-language lock fails red on a machine that changed nothing.
 
 ## 7. Deviations, header gaps, capability limits
 
@@ -400,7 +441,17 @@ not crash on any prefix of a truncated image).
   (`R_FIELD_OFF_REPR`) — closed in the B3 round, which is also when the raw‑integer `#define`s this
   file used before were removed. Still open: the header declares no module‑unload entry point and no
   host‑thunk bind entry point, so this impl keeps `infy_ifbc_module_free` / `infy_ifbc_bind_host` as
-  group‑(b) private entry points (declared in `infy_rt_internal.h`).
+  private entry points — they are exported from `infy_ifbc.c` and declared as `extern` prototypes in
+  `test_ifbc.c`, **not** in `infy_rt.h` *or* `infy_rt_internal.h` (this sentence used to claim the
+  latter; `grep ifbc runtime/infy_rt_internal.h` says otherwise). The two D4(3) canonical renderers
+  (`infy_ifbc_dump_canonical`, `infy_ifbc_verify_canonical`, §6.1) join that group for the same
+  reason: their consumer is the cross-language harness, not codegen.
+* **D‑42 (D4(3)'s cross-language text).** `coro.resume`/`coro.throw` now carry **1** operand each
+  (D.8 writes `h`); the row said 0, so this side mis-sized every instruction after a resume by four
+  bytes. `size_of`/`align_of`/`field_off` are printed by their appendix‑D names (the `.idx` suffix
+  this table and this file used to write is D.9's *operand*, not part of the mnemonic;
+  `typeof.idx` is a name). Both fixes were found by rendering one image on both sides, and D‑42
+  also records which verifier conclusions are *not* comparable yet — see `docs/spec-deviations.md`.
 * **`R‑0709` overload — adjudicated (deviation **D‑22**)**: D.10 maps the load‑time "boundary" row
   (tail‑call frame size, `closure.new` outside `func_table`) to R‑0709 while §9.7 and §7.9 reserve
   that number for "`@embed` exceeds `max_mem_bytes`". §9.7 is the code table, so the boundary

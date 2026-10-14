@@ -1,0 +1,5 @@
+# 跨语言逐字节夹具：两侧渲染器都输出 "\n" 结尾的行并按原始字节比较（runtime/IFBC.md 6.1）。
+# 这台机器 core.autocrlf=true，检出时会把 LF 改写成 CRLF，双侧锁点会因此假红 —— 显式禁止转换。
+runtime/fixtures/*.bin     binary
+runtime/fixtures/*.can.txt -text
+runtime/fixtures/*.ver.txt -text

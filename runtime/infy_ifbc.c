@@ -263,13 +263,23 @@ static const OpInfo OPS[256] = {
     [OP_YIELD]      = { "yield",       0,  0, SP_NONE },
     [OP_YIELD_FROM] = { "yield.from",  0,  0, SP_NONE },
     [OP_FRAME_EXIT] = { "frame.exit",  0,  0, SP_TERMINATOR },
-    [OP_CORO_RESUME]={ "coro.resume", 0, -1, SP_NONE },
-    [OP_CORO_THROW] = { "coro.throw",  0, -1, SP_NONE },
+    /* D.8 spells these two as `coro.resume h` / `coro.throw h`, so the handle is on the wire:
+     * 1 operand each. The row used to say 0, which made this side mis-scan every instruction after
+     * a resume by four bytes — `infy_ifbc_dump_canonical` vs `src/ifbc.rs::dump_canonical` on one
+     * image is what caught it (deviation D-42; the value resumed *with* still comes off the operand
+     * stack, and `h` is an annotation the executor does not read, exactly like `ldw`'s type
+     * operand under D-38 (e)). */
+    [OP_CORO_RESUME]={ "coro.resume", 1, -1, SP_NONE },
+    [OP_CORO_THROW] = { "coro.throw",  1, -1, SP_NONE },
 
     [OP_TYPEOF]     = { "typeof.idx",  1, +1, SP_NONE },
-    [OP_SIZE_OF]    = { "size_of.idx", 1, +1, SP_NONE },
-    [OP_ALIGN_OF]   = { "align_of.idx",1, +1, SP_NONE },
-    [OP_FIELD_OFF]  = { "field_off.idx",2,+1, SP_NONE }        /* ty, field */
+    /* D.9's own names, as `src/ifbc.rs::Op::base` prints them and as appendix D spells them
+     * (`0xe1 size_of idx` — the `idx` is the operand, not part of the mnemonic). These three rows
+     * used to carry a `.idx` suffix here, which made the two sides print different text for the
+     * same byte; D4(3)'s canonical cross-check is what caught it. */
+    [OP_SIZE_OF]    = { "size_of",     1, +1, SP_NONE },
+    [OP_ALIGN_OF]   = { "align_of",    1, +1, SP_NONE },
+    [OP_FIELD_OFF]  = { "field_off",   2, +1, SP_NONE }        /* ty, field */
 };
 
 /* instruction length in bytes (code-relative). Returns 0 for an unknown opcode so the linear
@@ -967,6 +977,34 @@ static void write_findings(FILE* report, const Findings* rep) {
 }
 
 /* =========================================================================== load */
+/* §7.8.3's six validations, per function in func_table order. Extracted from `infy_ifbc_load` so
+ * the D4(3) cross-check (`infy_ifbc_verify_canonical`) can collect the same findings the load path
+ * decides on, without re-implementing any of them. Returns the rejecting code (0 = accepted);
+ * `all_errors` keeps the loop going over every function, exactly as before. */
+static uint16_t validate_module(struct InfyIfbcModule* m, uint8_t all_errors, Findings* rep) {
+    uint16_t reject = 0;
+    for (uint32_t fi = 0; fi < m->func_count && !reject; fi++) {
+        uint32_t* b = 0; uint32_t nb = 0; Findings local = {0};
+        if (check_linearity(m, fi, &b, &nb, &local)) {
+            goto collect; /* boundaries absent when nonlinearity fails; still validate the rest */
+        }
+        check_type(m, fi, b, nb, &local);
+        check_height(m, fi, b, nb, &local);
+        check_frame(m, fi, b, nb, &local);
+        check_host(m, fi, b, nb, &local);
+        check_boundary(m, fi, b, nb, &local);
+        check_linemap(m, fi, b, nb, &local);
+    collect:
+        free(b);
+        /* merge: append preserving warn level, and possibly decide reject */
+        for (uint32_t i = 0; i < local.n; i++) findings_push(rep, local.v[i].code, local.v[i].func_idx, local.v[i].off, local.v[i].warn, local.v[i].msg);
+        free(local.v);
+        uint16_t e = first_error_code(rep);
+        if (e && !all_errors) reject = e;    /* first-failure rejects the whole module */
+    }
+    return all_errors ? first_error_code(rep) : reject;
+}
+
 int infy_ifbc_load(const uint8_t* image, uint64_t len, InfyIfbcModule** out, uint8_t all_errors, FILE* report) {
     if (out) *out = 0;
     if (!image || len < HDR_BYTES) return R_IFBC_INVALID;
@@ -989,26 +1027,7 @@ int infy_ifbc_load(const uint8_t* image, uint64_t len, InfyIfbcModule** out, uin
 
     /* §7.8.3 / D.10: per function in func_table order, wholly before any execution. */
     Findings rep = {0};
-    uint16_t reject = 0;
-    for (uint32_t fi = 0; fi < m->func_count && !reject; fi++) {
-        uint32_t* b = 0; uint32_t nb = 0; Findings local = {0};
-        if (check_linearity(m, fi, &b, &nb, &local)) {
-            goto collect; /* boundaries absent when nonlinearity fails; still validate the rest */
-        }
-        check_type(m, fi, b, nb, &local);
-        check_height(m, fi, b, nb, &local);
-        check_frame(m, fi, b, nb, &local);
-        check_host(m, fi, b, nb, &local);
-        check_boundary(m, fi, b, nb, &local);
-        check_linemap(m, fi, b, nb, &local);
-    collect:
-        free(b);
-        /* merge: append preserving warn level, and possibly decide reject */
-        for (uint32_t i = 0; i < local.n; i++) findings_push(&rep, local.v[i].code, local.v[i].func_idx, local.v[i].off, local.v[i].warn, local.v[i].msg);
-        free(local.v);
-        uint16_t e = first_error_code(&rep);
-        if (e && !all_errors) reject = e;    /* first-failure rejects the whole module */
-    }
+    uint16_t reject = validate_module(m, all_errors, &rep);
 
     if (all_errors && report) write_findings(report, &rep);
     else if (!all_errors && report) { /* default mode: emit only the first blocking finding */
@@ -1019,7 +1038,6 @@ int infy_ifbc_load(const uint8_t* image, uint64_t len, InfyIfbcModule** out, uin
         }
     }
 
-    reject = all_errors ? first_error_code(&rep) : reject;
     free(rep.v);
 
     if (reject) { module_free_internals(m); free(m); return (int)reject; }
@@ -1948,4 +1966,127 @@ void infy_ifbc_dump(const uint8_t* image, uint64_t len, FILE* out) {
 
 bail:
     free(m.funcs); free(m.types); free(m.imports); free(m.lines); free(m.excs); free(m.strings);
+}
+
+/* =========================================================================== D4(3) canonical render
+ * The machine-comparable text of one container: the same line grammar `src/ifbc.rs::dump_canonical`
+ * produces from the same bytes, so "both readers understand a module identically" is a diff of two
+ * committed texts under `runtime/fixtures/` (the `.can.txt` and `.ver.txt` files) instead of a
+ * sentence in a document. Deviation D-42 records the grammar and the bounds of the claim.
+ *      H <ifbc_version> <ifabi> <lang_tag> <frame_kind> <func_count> <n_types> <n_imports>
+ *        <n_lines> <n_excs> <n_strings> <code_len> <max_mem_bytes>
+ *      T <i> <kind> <name> <flags> <size> <align> <nfields>
+ *      P <i> <kind> <flags> <name> <ret_sig> <nparams> <sig_hash> <param sigs…>
+ *      F <i> <name> <code_off> <code_len> <locals> <max_stack> <nargs> <ret_arity> <ret_sig>
+ *        <frame_kind> <flags> <sig_str> <sig_hash>
+ *      I <func> <off> <opcode> <mnemonic> <arity> <operands…> <switch case targets…>
+ *      L <i> <code_off> <line>          X <i> <start> <end> <handler> <depth> <kind>
+ *      S <i> <len> <hex bytes>
+ * Positional and decimal everywhere; the only table lookup is a D.3 family's kind suffix, which both
+ * sides take from `type_table` (and print as `?` when the operand names no row). Nothing here
+ * touches the human-readable `infy_ifbc_dump` output above. Both entries are outside the frozen
+ * header, like `infy_ifbc_module_free` / `infy_ifbc_bind_host` (`runtime/IFBC.md` §7). */
+static void canonical_lines(const struct InfyIfbcModule* m, FILE* out) {
+    fprintf(out, "H %u %u %u %u %u %u %u %u %u %u %u %llu\n",
+            (unsigned)m->ifbc_version, (unsigned)m->ifabi, (unsigned)m->lang_tag, m->frame_kind,
+            m->func_count, m->n_types, m->n_imports, m->n_lines, m->n_excs, m->n_strings,
+            m->code_len, (unsigned long long)m->max_mem_bytes);
+    for (uint32_t i = 0; i < m->n_types; i++)
+        fprintf(out, "T %u %u %u %u %u %u %u\n", i, m->types[i].kind, m->types[i].name_str,
+                m->types[i].flags, m->types[i].size, m->types[i].align, m->types[i].nfields);
+    for (uint32_t i = 0; i < m->n_imports; i++) {
+        const PImport* im = &m->imports[i];
+        fprintf(out, "P %u %u %u %u %u %u %u", i, im->kind, im->flags, im->name_str,
+                im->ret_sig, im->nparams, im->sig_hash);
+        for (uint32_t k = 0; k < im->nparams; k++) fprintf(out, " %u", im->psigs[k]);
+        fprintf(out, "\n");
+    }
+    for (uint32_t i = 0; i < m->func_count; i++) {
+        const struct InfyIfbcFunc* f = &m->funcs[i];
+        fprintf(out, "F %u %u %u %u %u %u %u %u %u %u %u %u %u\n", i, f->name_str, f->code_off,
+                f->code_len, f->locals, f->max_stack, f->nargs, f->ret_arity, f->ret_sig,
+                f->frame_kind, f->flags, f->sig_str, f->sig_hash);
+    }
+    for (uint32_t i = 0; i < m->func_count; i++) {
+        const struct InfyIfbcFunc* f = &m->funcs[i];
+        uint32_t pc = f->code_off, hi = f->code_off + f->code_len;
+        while (pc < hi) {
+            uint8_t op = m->code[pc];
+            const OpInfo* inf = &OPS[op];
+            uint32_t sz = insn_len(m->code, m->code_len, pc);
+            uint32_t o[OPS_MAX]; insn_operands(m, pc, op, o);
+            if (!inf->name || sz == 0) { fprintf(out, "E %u %u\n", i, pc); return; }
+            char mn[40];
+            if (is_family_byte(op))
+                snprintf(mn, sizeof mn, "%s.%s", inf->name,
+                         o[0] < m->n_types ? kind_name(m->types[o[0]].kind) : "?");
+            else snprintf(mn, sizeof mn, "%s", inf->name);
+            fprintf(out, "I %u %u %u %s %u", i, pc, (unsigned)op, mn, (unsigned)inf->nops);
+            for (uint8_t k = 0; k < inf->nops; k++) fprintf(out, " %u", o[k]);
+            if (inf->special == SP_SWITCH) {
+                uint32_t n = o[0]; if (n > MAX_SWITCH_CASES) n = 0;
+                for (uint32_t k = 0; k < n && pc + 5 + 4 * k + 4 <= m->code_len; k++)
+                    fprintf(out, " %u", be32(m->code + pc + 5 + 4 * k));
+            }
+            fprintf(out, "\n");
+            pc += sz;
+        }
+    }
+    for (uint32_t i = 0; i < m->n_lines; i++)
+        fprintf(out, "L %u %u %u\n", i, m->lines[i].off, m->lines[i].line);
+    for (uint32_t i = 0; i < m->n_excs; i++)
+        fprintf(out, "X %u %u %u %u %u %u\n", i, m->excs[i].start, m->excs[i].end,
+                m->excs[i].handler, m->excs[i].depth, m->excs[i].kind);
+    for (uint32_t i = 0; i < m->n_strings; i++) {
+        fprintf(out, "S %u %u ", i, m->strings[i].n);
+        for (uint32_t k = 0; k < m->strings[i].n; k++) fprintf(out, "%02x", m->strings[i].p[k]);
+        fprintf(out, "\n");
+    }
+}
+
+void infy_ifbc_dump_canonical(const uint8_t* image, uint64_t len, FILE* out) {
+    if (!out) return;
+    struct InfyIfbcModule m; memset(&m, 0, sizeof m);
+    if (!image || len < HDR_BYTES) { fprintf(out, "E parse %u\n", (unsigned)R_IFBC_INVALID); return; }
+    int rc = parse_sections(image, len, &m);
+    if (rc) { fprintf(out, "E parse %u\n", (unsigned)rc); return; }
+    canonical_lines(&m, out);
+    fflush(out);
+    module_free_internals(&m);
+}
+
+/* (code, func, off) of one blocking finding, sorted so the two sides' *sets* compare as text.
+ * W-level notices are left out on purpose: §7.8.3 item 6 fires per instruction on the Rust side
+ * and once per function here, which is a reporting-granularity difference, not a verdict
+ * difference (D-42). */
+typedef struct { uint16_t code; uint32_t func_idx, off; } VRow;
+static int vrow_cmp(const void* a, const void* b) {
+    const VRow* x = (const VRow*)a; const VRow* y = (const VRow*)b;
+    if (x->code != y->code) return x->code < y->code ? -1 : 1;
+    if (x->func_idx != y->func_idx) return x->func_idx < y->func_idx ? -1 : 1;
+    if (x->off != y->off) return x->off < y->off ? -1 : 1;
+    return 0;
+}
+
+void infy_ifbc_verify_canonical(const uint8_t* image, uint64_t len, FILE* out) {
+    if (!out) return;
+    struct InfyIfbcModule m; memset(&m, 0, sizeof m);
+    if (!image || len < HDR_BYTES) { fprintf(out, "E parse %u\n", (unsigned)R_IFBC_INVALID); return; }
+    int rc = parse_sections(image, len, &m);
+    if (rc) { fprintf(out, "E parse %u\n", (unsigned)rc); return; }
+    Findings rep = {0};
+    validate_module(&m, 1, &rep);
+    VRow* rows = rep.n ? (VRow*)malloc(rep.n * sizeof(VRow)) : 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < rep.n; i++) {
+        if (rep.v[i].warn || !rows) continue;
+        rows[n].code = rep.v[i].code; rows[n].func_idx = rep.v[i].func_idx; rows[n].off = rep.v[i].off;
+        n++;
+    }
+    qsort(rows, n, sizeof(VRow), vrow_cmp);
+    for (uint32_t i = 0; i < n; i++)
+        fprintf(out, "V R-%04X f=%u off=%u\n", (unsigned)rows[i].code, rows[i].func_idx, rows[i].off);
+    fflush(out);
+    free(rows); free(rep.v);
+    module_free_internals(&m);
 }

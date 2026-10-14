@@ -2938,6 +2938,103 @@ impl IfbcModule {
         o
     }
 
+    /// See [`dump_canonical`]: the canonical text of a module this side assembled or decoded.
+    /// Fails only where the instruction stream is not linearly decodable, which is the same reason
+    /// `infy_ifbc.c`'s canonical dumper stops walking — an image either side refuses has no shared
+    /// text to compare, and that is reported rather than rendered as a partial match.
+    pub fn dump_canonical(&self) -> Result<String, IfbcDecodeErr> {
+        let mut o = String::new();
+        o.push_str(&format!(
+            "H {} {} {} {} {} {} {} {} {} {} {} {}\n",
+            self.ifbc_version,
+            self.ifabi,
+            self.lang.tag,
+            self.frame_kind,
+            self.funcs.len(),
+            self.types.len(),
+            self.imports.len(),
+            self.lines.len(),
+            self.exceptions.len(),
+            self.strings.len(),
+            self.code.len(),
+            self.max_mem_bytes
+        ));
+        for (i, t) in self.types.iter().enumerate() {
+            o.push_str(&format!(
+                "T {} {} {} {} {} {} {}\n",
+                i,
+                t.kind,
+                t.name,
+                t.flags,
+                t.size,
+                t.align,
+                t.fields.len()
+            ));
+        }
+        for (i, e) in self.imports.iter().enumerate() {
+            o.push_str(&format!(
+                "P {} {} {} {} {} {} {}",
+                i,
+                e.kind as u32,
+                e.flags as u32,
+                e.name,
+                e.ret_sig as u32,
+                e.params.len(),
+                e.sig_hash
+            ));
+            for p in &e.params {
+                o.push_str(&format!(" {p}"));
+            }
+            o.push('\n');
+        }
+        for (i, f) in self.funcs.iter().enumerate() {
+            o.push_str(&format!(
+                "F {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
+                i,
+                f.name,
+                f.code_off,
+                f.code_len,
+                f.locals,
+                f.max_stack,
+                f.nargs,
+                f.ret_arity,
+                f.ret_sig,
+                f.frame_kind,
+                f.flags,
+                f.sig_str,
+                f.sig_hash
+            ));
+        }
+        for i in 0..self.funcs.len() {
+            for (off, ins) in instructions_of(self, i)? {
+                o.push_str(&canonical_insn(i, off, &ins, self));
+                o.push('\n');
+            }
+        }
+        for (i, l) in self.lines.iter().enumerate() {
+            o.push_str(&format!("L {} {} {}\n", i, l.code_off, l.line));
+        }
+        for (i, e) in self.exceptions.iter().enumerate() {
+            o.push_str(&format!(
+                "X {} {} {} {} {} {}\n",
+                i,
+                e.start,
+                e.end,
+                e.handler,
+                e.depth,
+                e.kind.as_u16()
+            ));
+        }
+        for (i, s) in self.strings.entries().iter().enumerate() {
+            o.push_str(&format!("S {} {} ", i, s.len()));
+            for b in s.as_bytes() {
+                o.push_str(&format!("{b:02x}"));
+            }
+            o.push('\n');
+        }
+        Ok(o)
+    }
+
     /// `line_map` as pairs, for the disassembler and for the line round-trip tests.
     pub fn line_per_code_off(&self) -> Vec<(u32, u32)> {
         self.lines.iter().map(|l| (l.code_off, l.line)).collect()
@@ -2964,6 +3061,58 @@ impl IfbcModule {
             .filter(|e| e.start <= off && off < e.end)
             .collect()
     }
+}
+
+// --------------------------------------------------- D4(3): canonical, machine-comparable render
+
+/// The line grammar of the cross-language lock (deviation D-42, `runtime/IFBC.md` §6): one line per
+/// header, table row, instruction, line mark, exception row and pool entry — every field positional
+/// and decimal, and nothing resolved beyond a D.3 family's kind suffix, which both sides read out of
+/// `type_table`. `runtime/infy_ifbc.c`'s `infy_ifbc_dump_canonical` produces the same text from the
+/// same bytes; the two texts are compared as committed fixtures (`runtime/fixtures/*.can.txt`), so
+/// "both sides read a container identically" is a diff, not a claim.
+pub fn dump_canonical(bytes: &[u8]) -> Result<String, IfbcDecodeErr> {
+    decode(bytes)?.dump_canonical()
+}
+
+/// D4(3)'s other half: one image's §7.8.3 conclusions as sorted `V <code> f=<func> off=<off>` lines
+/// — the mirror of `infy_ifbc_verify_canonical`. Only blocking findings are rendered: §7.8.3 item 6's
+/// `W-0705` fires per instruction here and once per function there, so it is not comparable text
+/// (recorded in D-42 rather than papered over).
+pub fn verify_canonical(m: &IfbcModule, hosts: &HostSigTable) -> String {
+    let mut rows: Vec<(String, u32, u32)> = verify(m, hosts, true)
+        .into_iter()
+        .filter(|v| !v.code.starts_with('W'))
+        .map(|v| (v.code.to_string(), v.func, v.off))
+        .collect();
+    rows.sort();
+    let mut o = String::new();
+    for (code, f, off) in rows {
+        o.push_str(&format!("V {code} f={f} off={off}\n"));
+    }
+    o
+}
+
+/// `I`-line rendering of one instruction: `<func> <off> <opcode byte> <mnemonic> <arity>
+/// <operands…> <switch case targets…>`.
+fn canonical_insn(f: usize, off: u32, ins: &Instr, m: &IfbcModule) -> String {
+    let mn = if ins.op.is_typed_family() {
+        format!(
+            "{}.{}",
+            ins.op.base(),
+            m.ty_kind(ins.ops[0]).map(|k| k.suffix()).unwrap_or("?")
+        )
+    } else {
+        ins.op.base().to_string()
+    };
+    let mut o = format!("I {f} {off} {} {mn} {}", ins.op.byte(), ins.op.arity());
+    for x in ins.operands() {
+        o.push_str(&format!(" {x}"));
+    }
+    for t in switch_targets(m, off, ins) {
+        o.push_str(&format!(" {t}"));
+    }
+    o
 }
 
 fn hex32(h: &[u8; 32]) -> String {
@@ -3177,6 +3326,14 @@ fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<Ve
     }
 
     // ---- items 2/3/4/5: one abstract execution per block
+    // Items 3 and 5 first, exactly once per instruction: operand legality and D.3/D.7 adjacency do
+    // not depend on the stack height, and running them inside the walk below re-reported one defect
+    // once per path that reached it (the loader's `check_type` walks each boundary once, and D4(3)
+    // holds both sides to one text — see deviation D-42).
+    for (idx, (off, ins)) in instrs.iter().enumerate() {
+        check_operands(m, ins, f, *off, fi, out);
+        check_adjacency(m, &instrs, idx, *off, fi, out);
+    }
     let mut height: BTreeMap<u32, i64> = BTreeMap::new();
     let mut work: Vec<u32> = vec![f.code_off];
     height.insert(f.code_off, 0);
@@ -3192,8 +3349,7 @@ fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<Ve
                 Some(x) => *x,
                 None => break,
             };
-            let (pops, pushes) = effect(m, fi, &ins, off, hosts, out);
-            if h < pops as i64 {
+            let (pops, pushes) = effect(m, fi, &ins, off, hosts, out);            if h < pops as i64 {
                 push(
                     out,
                     VerifyViolation::new(
@@ -3219,8 +3375,6 @@ fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<Ve
                     ),
                 );
             }
-            check_operands(m, &ins, f, off, fi, out);
-            check_adjacency(m, &instrs, idx, off, fi, out);
 
             match ins.op {
                 Op::Jmp => {
@@ -3276,8 +3430,10 @@ fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<Ve
                 }
                 Some(_) => {}
                 None => {
+                    // Record the entry height and keep walking into `next` right here: pushing it as
+                    // a work item too re-entered the same block from its own successor, which made
+                    // `effect` report a table-dependent finding once per path (D4(3) / D-42).
                     height.insert(next, h);
-                    work.push(next);
                 }
             }
         }
@@ -3923,6 +4079,170 @@ mod tests {
         assert!(r_codes(&m).is_empty(), "the fixture draws a load-time violation: {:?}", r_reports(&m));
         assert_eq!(m.types.len(), N_SCALAR_ROWS);
         assert_eq!(m.funcs.len(), 2);
+    }
+
+    /// D4(3)'s second image: **every** opcode appendix D defines, in byte order, one instruction
+    /// each — the 17 gap ops and `switch`'s inline case table included — plus one family byte whose
+    /// type operand names no row, which is the `?` suffix path both sides share. Every operand is
+    /// chosen inside its own table because this side's `decode` treats a dangling reference as a
+    /// *container* error (`validate_refs`) while the loader treats it as `R-0706`; an image either
+    /// side refuses has no shared text. Committed as `runtime/fixtures/ifbc_all_ops.bin`.
+    fn all_ops_fixture_module() -> IfbcModule {
+        let mut m = IfbcModule::new_unit("CPY-313", 1, "u", "all_ops.py").unwrap();
+        // one import row, so `import` / `call.host` / `call.embed` have a row to name.
+        assert_eq!(m.intern_host(&HostSigTable::std_default(), "std.io.log"), Some(0));
+        let body: Vec<(Op, Vec<u32>)> = all_ops()
+            .into_iter()
+            .map(|op| {
+                if op == Op::Switch {
+                    // the inline case table is part of the instruction (D-38 (h))
+                    return (op, vec![0u32, 7]);
+                }
+                let mut kinds = op.operand_kinds();
+                // D.3's families put their type in operand 0 but `operand_kinds` is the verifier's
+                // table, where the families are handled by `is_typed_family` instead — pad to arity.
+                while kinds.len() < op.arity() {
+                    kinds.push(OperandKind::Type);
+                }
+                let ops = kinds
+                    .into_iter()
+                    .map(|k| match k {
+                        OperandKind::Func | OperandKind::Import => 0,
+                        _ if op == Op::Sub => NONE32,
+                        _ => 7,
+                    })
+                    .collect();
+                (op, ops)
+            })
+            .collect();
+        let (off, len, ms) = build_into(&mut m, 8, &body);
+        m.push_func("all_ops", off, len, 8, ms, &[], TyKind::Int, 0, F_ENTRY);
+        m.seal();
+        m
+    }
+
+    /// D4(3)'s third image: one function per load-time check **both** verifiers implement, each
+    /// carrying exactly one defect, so §7.8.3's conclusions are comparable as
+    /// `(code, func, off)` triples. The classes where the two sides provably reach different
+    /// findings — out-of-range operands (this side rejects them while decoding, the loader as
+    /// `R-0706`), the dynamic-call rejections, the "a function must end in a terminator" rule, and
+    /// `W-0705`'s granularity — are listed in deviation **D-42** instead of being rendered here, and
+    /// this side must not claim an equivalence it cannot show.
+    fn verify_matrix_module() -> IfbcModule {
+        let mut m = IfbcModule::new_unit("CPY-313", 1, "u", "verify_matrix.py").unwrap();
+        // `field_off` needs a legal field index so only the layout rule fires: a non-`repr(C)` row
+        // with three fields (D.9 / R-0713).
+        let inst = m.intern_type(TyKind::Instance, "P", NONE32, NONE32);
+        for (i, n) in ["a", "b", "c"].iter().enumerate() {
+            m.add_type_field(inst, n, (i * 8) as u32, TyKind::Int as u32);
+        }
+        let ty_i = TyKind::Int as u32;
+        // f0 comes first on purpose: `build_into` starts it at code offset 0, which is the one
+        // target its `switch` can name and still be legal (a case must land on a boundary *of its
+        // own function*, so any other function's entry offset would be a second finding).
+        let cases: Vec<(u32, Vec<(Op, Vec<u32>)>)> = vec![
+            // f0 switch case target that is not a boundary -> R-0704 (D-38 (h)), one bad target
+            (1, vec![(Op::PushB, vec![5]), (Op::Switch, vec![0, 7]), (Op::Ldl, vec![0]), (Op::Ret, vec![])]),
+            // f1 ldnull anywhere -> R-0706 (both sides reject it at the instruction)
+            (1, vec![(Op::LdNull, vec![]), (Op::Ret, vec![])]),
+            // f2 div without its guard -> R-0706 (D.3, UB-003)
+            (1, vec![(Op::PushB, vec![1]), (Op::PushB, vec![1]), (Op::Div, vec![ty_i]), (Op::Ret, vec![])]),
+            // f3 shl without its guard -> R-0706 (D.3, UB-004)
+            (1, vec![(Op::PushB, vec![1]), (Op::PushB, vec![1]), (Op::Shl, vec![ty_i]), (Op::Ret, vec![])]),
+            // f4 unbox.dyn with no tag checkpoint -> R-0710 (UB-020)
+            (1, vec![(Op::PushB, vec![1]), (Op::UnboxDyn, vec![]), (Op::Ret, vec![])]),
+            // f5 jump into the middle of an instruction -> R-0704 (item 1)
+            (1, vec![(Op::Jmp, vec![2]), (Op::Ldl, vec![0]), (Op::Ret, vec![])]),
+            // f6 pop with an empty operand stack -> R-0705 (item 2)
+            (1, vec![(Op::Pop, vec![]), (Op::Ret, vec![])]),
+            // f7 field_off on a non-repr(C) row -> R-0713
+            (1, vec![(Op::FieldOff, vec![inst, 1]), (Op::Ret, vec![])]),
+            // f8 yield inside a stack frame -> R-0707 (item 4, D.8)
+            (1, vec![(Op::PushB, vec![1]), (Op::Yield, vec![]), (Op::Ret, vec![])]),
+            // f9 tailcall into a frame of a different shape -> R-0707 (D-22: not R-0709)
+            (1, vec![(Op::PushB, vec![1]), (Op::TailCallStat, vec![10]), (Op::Ret, vec![])]),
+            // f10 the tailcall target: deliberately clean (its locals differ from f9's)
+            (2, vec![(Op::PushB, vec![1]), (Op::Ret, vec![])]),
+        ];
+        for (i, (locals, body)) in cases.into_iter().enumerate() {
+            let (off, len, ms) = build_into(&mut m, locals, &body);
+            m.push_func(&format!("c{i}"), off, len, locals, ms, &[], TyKind::Int, 0, 0);
+        }
+        m.seal();
+        m
+    }
+
+    fn fixture_bytes(dir: &str, name: &str) -> Vec<u8> {
+        let path = format!("{dir}{name}");
+        std::fs::read(&path).unwrap_or_else(|e| {
+            panic!("{path} 不在仓库里（{e}）—— .bin 用 INFY_REGENERATE_FIXTURE=1 生成，文本由 C 侧的 INFY_REGENERATE_CANONICAL=1 生成")
+        })
+    }
+
+    /// The two `.bin` images D4(3) added are the Rust writer's own output, pinned the same way
+    /// D4(2) pinned `ifbc_rust_writer.bin`: only `INFY_REGENERATE_FIXTURE=1` rewrites them.
+    #[test]
+    fn canonical_cross_check_images_are_the_writers_output() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/runtime/fixtures/");
+        for (name, m) in [
+            ("ifbc_all_ops.bin", all_ops_fixture_module()),
+            ("ifbc_verify_matrix.bin", verify_matrix_module()),
+        ] {
+            let bytes = m.encode();
+            if std::env::var("INFY_REGENERATE_FIXTURE").is_ok() {
+                std::fs::write(format!("{dir}{name}"), &bytes).expect("explicit fixture regeneration");
+            }
+            let on_disk = fixture_bytes(dir, name);
+            assert_eq!(on_disk, bytes, "{name} 与 IFBC 写入器的输出不再逐字节相同（D-38 线格式漂移）");
+            assert!(
+                decode(&bytes).is_ok(),
+                "{name} 必须能被本侧解码（规范化渲染没有可比文本）：{:?}",
+                decode(&bytes).err()
+            );
+        }
+    }
+
+    /// D4(3) proper: this side's canonical text has to equal the text the **C loader** rendered into
+    /// the committed `.can.txt` / `.ver.txt`. Neither side defines the answer alone — the texts only
+    /// move when `runtime/test_ifbc.c` is run with `INFY_REGENERATE_CANONICAL=1`, so a drift in
+    /// either renderer, or in either reader's idea of a record, fails here and in the C harness.
+    #[test]
+    fn canonical_render_equals_the_c_loader_render() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/runtime/fixtures/");
+        let hosts = HostSigTable::std_default();
+        for (bin, txt) in [
+            ("ifbc_rust_writer.bin", "ifbc_rust_writer.can.txt"),
+            ("ifbc_all_ops.bin", "ifbc_all_ops.can.txt"),
+        ] {
+            let bytes = fixture_bytes(dir, bin);
+            let want = String::from_utf8(fixture_bytes(dir, txt)).expect("canonical text is UTF-8");
+            let got = dump_canonical(&bytes).unwrap_or_else(|e| panic!("{bin} 本侧无法规范化渲染: {e}"));
+            assert_eq!(want, got, "{txt} 不是本侧对 {bin} 的渲染结果 —— 两侧的反汇编又开始分叉");
+            if bin == "ifbc_all_ops.bin" {
+                let ins = got.lines().filter(|l| l.starts_with("I ")).count();
+                assert_eq!(ins, all_ops().len(), "{bin} 必须覆盖附录 D 的全部 opcode");
+                assert!(got.contains("sub.?"), "{bin} 必须覆盖类型操作数越界的 `?` 后缀");
+                assert!(got.lines().any(|l| l.starts_with("I ") && l.split(' ').nth(3) == Some("67")), "switch 的家族字节必须在场");
+                assert!(got.contains("new.set") && got.contains("seq.iter") && got.contains("inst.get"), "间隙指令必须在场");
+            }
+        }
+        // §7.8.3's conclusions, compared as sorted (code, func, off) triples.
+        let bytes = fixture_bytes(dir, "ifbc_verify_matrix.bin");
+        let m = decode(&bytes).expect("the verify matrix must decode");
+        let got = verify_canonical(&m, &hosts);
+        let want = String::from_utf8(fixture_bytes(dir, "ifbc_verify_matrix.ver.txt")).expect("UTF-8");
+        assert_eq!(want, got, "两侧的装载期校验结论不再逐条相同");
+        let codes: Vec<&str> = got.lines().filter_map(|l| l.split(' ').nth(1)).collect();
+        for c in ["R-0704", "R-0705", "R-0706", "R-0707", "R-0710", "R-0713"] {
+            assert!(codes.iter().any(|x| *x == c), "校验矩阵没有覆盖 {c}");
+        }
+        // and the clean image is clean on both sides (no blocking finding at all).
+        let clean = fixture_bytes(dir, "ifbc_rust_writer.bin");
+        assert_eq!(
+            verify_canonical(&decode(&clean).expect("decodes"), &hosts),
+            "",
+            "夹具镜像在本侧引出了阻塞性校验结论，而 C 侧接受它"
+        );
     }
 
     #[test]
