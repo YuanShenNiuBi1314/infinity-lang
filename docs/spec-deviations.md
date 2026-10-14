@@ -633,3 +633,44 @@ C 侧已如此实现（`insn_boundaries`/`OPS[OP_SWITCH].special = SP_SWITCH`）
 `CodeBuilder::emit` 对 `Switch` 直接报 `SwitchNotSupported`，是"以拒绝冒充合规"的形态）。
 同族的 D.9 `0xe3 field_off idx`：字段索引是这个指令的**必然操作数**（校验与执行都要 `types[ty].nfields`
 和 `fields[f].off`），D.9 的助记符列漏了它 —— 以 C 的 2 操作数形态（`ty,field`）为准，Rust 补齐。
+
+## D-40 D4 实现段 (1)（Rust 侧）落地时的补充裁定：D-38 未覆盖的 5 处操作数形状 + 4 处实现选择
+
+D-38 把"哪侧改什么"钉到 (a)–(i)，但审计是按**它列出的那些差异**做的；动手时又遇到 5 处
+两侧操作数形状不一致、D-38 没点名的指令。按协议（"发现的形状缺口若 D-38 未覆盖，先补 D-38
+再动代码，不许两侧各自即兴"）在这里补齐，判据与 D-38 同一条：**附录 D 的家族/助记符列本身
+就有漏项**（D-39 已两次实证：`switch` 的目标表、`field_off` 的字段索引），所以操作数以
+"校验与执行是否必需"定，不靠助记符列的字面个数。
+
+| 指令 | Rust（D-38 前） | C（`infy_ifbc.c`） | 裁定 | 依据 |
+|---|---|---|---|---|
+| `new.list` | 2（`ty,count`） | 1（`ty`，push 空容器） | **2**：`elem_ty,count`，装载时弹 `count` 个；`count==0` 就是 C 现在的"空容器" | 栈形态必须可判定：Python 的 `BUILD_LIST` 把元素先压在栈上，1 操作数形态无法表达，只能把 lowering 改成"先建空容器再 `seq.push`"（那是把 B 轨 lowering 拖进容器协议细节，且 `seq.push` 在 C 侧还不存在） |
+| `new.dict` | 3（`kt,vt,count`） | 2（`kt,vt`，push 空） | **3**：同上，弹 `2*count` | 同 `new.list` |
+| `new.frame` | 0 | 1（`f`，func 索引） | **1**：`f` | 协程帧必须指名是哪个函数，0 操作数的 `new.frame` 无法执行；C 的形态可执行，Rust 补齐（D.6 的助记符列没写操作数） |
+| `typeof.idx` | 0 | 1（`T`，类型索引，且装载期做越界校验） | **1**：`T` | D.9 同一行的 `size_of idx`/`align_of idx` 都带 `idx`，`typeof.idx` 单独不带是抄漏；C 的 `check_type` 已把它当类型索引用 |
+| `call.virt` | 1（`imm`） | 1（`idx < n_types`） | 个数不变，**kind 改为类型索引** | 两侧个数本就相同，是"这个 u32 是什么"的分歧；C 按 `n_types` 越界校验，Rust 跟同一判据（影响反汇编可读性与校验路径） |
+
+实现选择（规范未定 → 选一个确定实现）：
+
+1. **自动置的标量行 `size/align = 0`**。D-38 只说"前 18 行由构建器自动置为标量行"，没给这些行的
+   布局数。仓库里唯一有据的布局来源是 `docs/internals/runtime-abi.md` §1 + `src/hir.rs` 的
+   gcc 校准探针，而那份表没有 `bytes`/`dyn` 的 `sizeof`（`InfyDyn` 是引用计数装箱，其尺寸在冻结头
+   里、没被任何探针量过）。写一个没量过的数进产物 = 本仓库明令禁止的"编造常数"（B1 轮抓到过两个），
+   所以留 0 并写明：**要用 `size_of.idx`/`align_of.idx`/`field_off` 的生产者必须自己填真布局**。
+2. **`ImportEntry::ifabi` 从线上删除**，签名域校验改用模块头 `ifabi` 与 `HostSigTable::ifabi`
+   相等（D-38 (a) 给的合并行形状里根本没有 `ifabi`；头里那一处已是唯一真相）。原先那条
+   "每行 `ifabi` 必须等于工具链的"检查没有失效，只是换了它本来就该看的量。
+3. **签名文本/摘要按折叠后的标量码算**（`(dyn, dyn) -> dyn` 而不是 `(list, list) -> list`）。
+   `sig_hash` 是校验项 5 的快路径，必须覆盖线上真有的字节；`List`/`Dict`/… 在 IFABI 线上就是
+   装箱 `dyn`（§2 的封闭集 `>17` 不可表达，`R-0708`）。
+4. **`max_stack` 由 `CodeBuilder` 的运行栈高峰值给出**，`call.*` 只按 opcode 隐含效果计入
+   （构建器不知道被调元数）⇒ 这是**保守上界**，永不低于装载器自己算出的高度，因此不会造成
+   C 侧假失败；代价是可能多分配几个栈槽（C 的 `stack_cap = max_stack`）。
+5. `switch` 的目标数上限取装载器的 `OPS_MAX * 16 = 48`（`MAX_SWITCH_CASES`），发射期与解码期都拒
+   超出者：解码不照抄这条，两侧对同一镜像的"能不能线性扫描"结论就不同。
+
+登记为后续项、**本轮不动语义**：`new.set ty` 没有元素个数的落点，而 `effect()` 把它的类型索引
+当弹出个数用（BACKLOG **F25**）；本侧装载期校验拒绝 `call.virt`/`call.embed`/`invoke.dynamic`
+而 C 侧校验并执行，且 `coro.resume`/`coro.throw`/`throw.inf` 的栈效果与 C 的 `sim_delta` 不同
+（BACKLOG **F26**）。D4 的第 (3) 步只交叉验证反汇编，这两条不挡 D4，但挡"两侧校验结论等价"这种
+更强的声称，所以写在这里不许被当成已完成。

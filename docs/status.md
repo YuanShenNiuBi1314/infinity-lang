@@ -36,9 +36,9 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 410 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 423 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
-Finished `dev` profile  (51 warnings，全部为 unused/dead code，见 BACKLOG F2)
+Finished `dev` profile  (50 warnings，全部为 unused/dead code，见 BACKLOG F2；D4(1) 清掉一处死字段)
 $ infy check examples/tour
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)   # exit 0
 $ infy build examples/tour
@@ -114,10 +114,10 @@ $ (cd examples/tour && infy fmt --check)
 2 file(s) are not canonical                        # exit 2，见下文"导览源码不是格式化不动点"
 ```
 
-410 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 410）：
-`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `pkg` **24** · `sema` 22 · `codegen` **22** ·
-`hir` 20 · `artifact` 18 · `toml` 15 · `cli` **16** · `borrow` 15 · `sha256` 12 · `codes` 9 · `parser` 8 ·
-`base64` 7 · `ifbc` 6 · `stdlib` 4 · `diag` 2。
+423 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 423）：
+`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `pkg` 24 · `sema` 22 · `codegen` 22 ·
+`hir` 20 · `ifbc` **19**（D4(1) 前是 6） · `artifact` 18 · `cli` 16 · `toml` 15 · `borrow` 15 ·
+`sha256` 12 · `codes` 9 · `parser` 8 · `base64` 7 · `stdlib` 4 · `diag` 2。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -524,6 +524,79 @@ rt harness **32335 / 0**（在 `target/scratch` 里跑）、替身链 IFBC **82/
 `W-0003`（约束恒假）要的是静态不可满足性判定，本轮只对当前配置求值 → **F24**；panic 的**逐测试隔离**要把
 `infy_rt_internal.h` 的 `infy_rt_catch` 提升进冻结公共头（ABI 变更 + 四条链同批），本轮不动 C 侧；
 `#[test]` 函数在普通构建里仍被编译成 C 符号（只是不进运行集），§5.9 没要求剔除。
+
+## D4(1) · Rust 侧 IFBC 线格式对齐 D-38（本轮，代码段第一半）
+
+D-38（上一轮，纯文档）把"哪侧改什么"钉死成 (a)–(i)；本轮执行 **D4 余项 (1)**：`src/ifbc.rs`
+向合并后的唯一线格式对齐。C 侧本轮**零改动**（(2) 是下一轮），两侧仍不在同一字节上相遇
+（`.inf ifbc` 恒空 = D1 未落地）。
+
+**容器（D-38 (a)）**：删掉每区的 `byte_len:u32 || body` 包装（当年注释说"不包就分不出 `code` 与
+`line_map`"——该理由不成立，`code` 自己的前导 `u32` 就是它的长度），现在 header(47) 之后逐区
+自定界，正是 `infy_ifbc.c::parse_sections` 的走法。落点 =
+`ifbc::tests::regions_are_self_delimiting_exactly_where_the_loader_reads_them`
+（各区起点是**算术推出来的**：`47 → 4+18·32 → 4+13 → 4+8+48 → 4+code_len → …`，不是抄一次输出）。
+
+**三张表（D-38 (a)）**：
+`type_table` 每行 8×`u32`（`name_str,kind,flags,size,align,nfields,payload_a,payload_b`）+
+`nfields×{name_str,off,ty}`；`kind` 空间统一到 IFABI 标量码，`TyKind` **重编号**到
+`SIG_*`（`void0 unit1 bool2 char3 i8..i64 7 u8..u64 11 f32 12 f64 13 str14 bytes15 ptr16 dyn17`），
+扩展类别从 18 起（`list/tuple/dict/func/coro/instance/ref/box/rc/arc/option/result/never/usize/isize`），
+构建器自动置前 18 行使"类型索引 == 标量码"恒成立（`N_SCALAR_ROWS`）；重编号后 `InfyDynTag`
+不再是数值相等，改由显式表 `dyn_tag()` 给出。
+`import_table` = C 形状 + 尾部 `sig_hash u32`，`kind` 折叠为 `host0/embed1/event2`
+（`PyModule/Infib/Entry` 删除：源语言在 header 的 `lang_tag`，入口在 `F_ENTRY`），
+`ret_sig/psigs` 是标量码，容器的签名折叠成 `dyn`；每行的 `ifabi u16` 从线上删除（header 那份是唯一真相）。
+`func_table` = `n_funcs u32` + `max_mem_bytes u64`（§7.9，Rust 侧新增模块字段）+ **48 字节/条**
+（`code_off,code_len,locals,max_stack,nargs,ret_arity,ret_sig,name_str,sig_str,sig_hash,flags,frame_kind`）。
+`line_map`/`exception_table`/`string_pool` 本就逐字节一致，未动。
+
+**指令面（D-38 (b)–(h) + D-39/D-40）**：`guard.nonzero/shift` 去操作数（字节停在 D.3 的
+0x27/0x2F，C 的 0x0C/0x0D 由 (2) 迁入）、`ldg/stg` 迁到 0x0E/0x0F、`ldw` 补第 2 操作数并按
+`i64(7)/u64(11)/f64(13)` 校验注解、`box.dyn` 去操作数（恒等）、`field_off` 补第 2 操作数并按
+`repr(C)`→`R-0713`、字段越界→`R-0706` 校验；**`switch` 解禁**（`CodeBuilder::switch`，长度
+`1+4(1+n)`，上限 `MAX_SWITCH_CASES = 48` 与装载器 `insn_len` 同判据；`SwitchNotSupported` 这一
+"以拒绝冒充合规"的错误变体已删）。操作数形状补充裁定（D-38 未覆盖）：`new.list ty,count`、
+`new.dict kt,vt,count`、`new.frame f`、`typeof.idx T`、`call.virt` 的 kind 改类型索引。
+校验面顺带对齐三条：项 2 现在按 `max_stack` 拦高度、项 4 现在按 `ret_arity` 拦 `ret/ret.multi`、
+`tailcall.stat` 的帧尺寸比较改成 C 的五元组（locals/max_stack/nargs/ret_arity/frame_kind），
+并且按 **D-22** 报 `R-0707` 而不是 `R-0709`（这条本轮才落到 Rust 侧，C 侧 B3 轮已改）。
+
+**`src/btrack.rs` 连动**：`TyKind::Instance`（旧 11）改名 `TyKind::Dyn`（5 处）、
+`push_func` 多收 `max_stack`（新）与 `flags: u32`、两处 guard 与一处 `box.dyn` 的操作数清空、
+`Selected::Object` 的发射改成按 `op.arity()` 构造操作数并在需要多于一个操作数时**显式拒绝**
+（原来非 1 操作数一律发 0 个，D-38 之后会静默发错宽度）。
+
+**新增 13 项 `ifbc` 单测**（模块 6 → **19**）：区段自定界的逐字节偏移、标量行自动置、
+签名码折叠与 `sig_hash` 覆盖线上文本、opcode 字节/操作数个数对照表（含家族块 21 行逐个断言）、
+`switch` 的变长往返 + 边界检查（正/反例）、发射期拒绝超上限、48 字节记录与 `max_mem_bytes`
+往返、`max_stack` 高度正反例、`ldw` 注解域正反例、`field_off` 三态（合法 / 非 `repr(C)` /
+字段越界）、`tailcall` 帧不兼容报 `R-0707` 且**不**报 `R-0709`、返回形状与 `ret_arity` 正反例。
+
+**证据（本轮实测）**：`cargo test --offline --lib` **423 passed / 0 failed**（基线 410）、
+`cargo check --offline --lib` 0 error / **50 warning**（基线 51，删掉 `CodeBuilder` 的死字段
+`bounds`）；`infy check examples/tour` exit 0、`infy build examples/tour` exit 0
+（C11 仍 **12513 字节**、产物仍 **199975 字节**、`build-id 4d8250b5…55ba` 未变 ⇒
+IFBC 不在非 B 轨路径上，逐字节未受影响）、`--verify-reproducible` exit 0、`infy test examples/tour`
+exit 0（`0 passed, 0 failed, 0 total`）、`(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6）。
+C 侧零改动仍复跑四条链：`gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` **0 告警** exit 0、
+rt harness **32335 assertions / 0 failures** exit 0、替身链 IFBC **82/82** exit 0、
+生产链 IFBC **82/82** exit 0，两份 stdout `cmp` 无输出。
+
+**文档同步（不留旧声称）**：新建 `docs/internals/ifbc-encoding-rust.md`（`src/ifbc.rs` 的模块注释
+一直指向这份"Rust 侧字节表"，**而它此前根本不存在**—— opcode 表由一次性探针从
+`Op::from_byte/arity/operand_kinds/stack_effect` 打印生成，不是手抄）；
+`runtime/IFBC.md` §2 的标量码表按 `infy_ifbc.c:54` 的 `SIG_*` 改正（原表漏了 `u16/u32`，
+把 `u64` 记成 9、`f64` 记成 11，与装载器实际校验值不符；`ldw` 注解说明同错同改）、并在 §1 加
+"§1.2/§1.3/§1.5 与 §3.1 是 D4(2) 待改，不是已合规"的状态块；`docs/spec-deviations.md` 追加
+**D-40**（D-38 未覆盖的 5 处操作数形状 + 5 处实现选择，含"标量行 `size/align` 留 0，不编造
+未量过的常数"）；新登记 BACKLOG **F25**（`new.set` 没有元素个数落点，`effect()` 把类型索引当
+弹出个数用）与 **F26**（本侧校验拒绝 `call.virt/call.embed/invoke.dynamic`、
+`coro.resume/throw/throw.inf` 的栈效果与 C 的 `sim_delta` 不同 ⇒ 两侧"校验结论等价"不能声称）。
+
+**D4 余项**：(2) C 侧（OPS 表按家族重排、exec 按 kind 分派、push/ldw/field_off 操作数、
+间隙指令补装载+校验+执行+dumper、三表读取器对齐合并形状、82 断言 harness 同批）→
+(3) 同一镜像 Rust 反汇编 == C 反汇编逐指令相等，然后回 D1 的装载验收。
 
 ## 仍未实现
 

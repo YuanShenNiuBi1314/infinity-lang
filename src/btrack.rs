@@ -1898,7 +1898,7 @@ pub fn unit_signature(co: &CodeObj, hosts: &HostSigTable) -> HostSig {
     if let Some(s) = hosts.get("__infy_unit__") {
         return s.clone();
     }
-    HostSig::new(&co.name, &vec![TyKind::Instance; co.argcount as usize], TyKind::Instance)
+    HostSig::new(&co.name, &vec![TyKind::Dyn; co.argcount as usize], TyKind::Dyn)
 }
 
 fn intern_kind(m: &mut IfbcModule, k: TyKind) -> u32 {
@@ -1959,7 +1959,7 @@ pub fn lower_named(
             unit_signature(co, hosts)
         } else {
             // A nested function's parameters stay `dyn` until the object model can type them.
-            HostSig::new(&co.name, &vec![TyKind::Instance; co.argcount as usize], TyKind::Instance)
+            HostSig::new(&co.name, &vec![TyKind::Dyn; co.argcount as usize], TyKind::Dyn)
         };
         let base = m.code.len() as u32;
         let lr = Lowerer::new(cap, hosts, &mut m, co, sig, base).run();
@@ -1968,6 +1968,9 @@ pub fn lower_named(
         if !viol.is_empty() {
             continue;
         }
+        // D-38: `func_table` carries a declared operand-stack ceiling; the builder tracked the peak
+        // of the emitted stream, and `finish_into` consumes the builder, so take it first.
+        let max_stack = builder.max_stack();
         let (code_off, code_len) = builder.finish_into(&mut m);
         let _ = code_off;
         m.lines.extend(lines.iter().map(|(o, l)| ifbc::LineEntry { code_off: *o, line: *l }));
@@ -1978,6 +1981,7 @@ pub fn lower_named(
             code_off,
             code_len,
             locals,
+            max_stack,
             &param_kinds,
             ret_kind,
             if co.is_coroutine_frame() {
@@ -2069,7 +2073,7 @@ impl<'a> Lowerer<'a> {
         base: u32,
     ) -> Lowerer<'a> {
         let nlocals = co.nlocals.max(co.varnames.len() as u32);
-        let ty_dyn = m.intern_type(TyKind::Instance, "dyn", NONE32, NONE32);
+        let ty_dyn = m.intern_type(TyKind::Dyn, "dyn", NONE32, NONE32);
         let ty_unit = m.intern_type(TyKind::Unit, "unit", NONE32, NONE32);
         let ty_int = m.intern_type(TyKind::Int, "i64", NONE32, NONE32);
         let ty_float = m.intern_type(TyKind::Float, "f64", NONE32, NONE32);
@@ -2404,7 +2408,7 @@ impl<'a> Lowerer<'a> {
         let ret_ty = if self.ret_kind.dyn_tag().is_some() {
             self.ret_kind
         } else {
-            TyKind::Instance
+            TyKind::Dyn
         };
         let want = match ret_ty {
             TyKind::Unit => self.ty_unit,
@@ -2449,8 +2453,11 @@ impl<'a> Lowerer<'a> {
         self.emit(Op::UnboxDyn, &[], at)
     }
 
+    /// D.7 / D-38 (f): `box.dyn` is the identity on an already-boxed value, so it takes no operand;
+    /// the type only steers this side's symbolic stack.
     fn box_as(&mut self, ty: u32, at: &PyInstr) -> Result<(), ()> {
-        self.emit(Op::BoxDyn, &[ty], at)
+        let _ = ty;
+        self.emit(Op::BoxDyn, &[], at)
     }
 
     /// A host call: args already on the stack in Python order; the result is re-boxed as a `dyn` so
@@ -2544,7 +2551,7 @@ impl<'a> Lowerer<'a> {
         for (i, a) in args.iter().enumerate() {
             let ty = a.ty();
             self.push_val(a, at)?;
-            if sig.params.get(i).copied().unwrap_or(TyKind::Instance).is_numeric() {
+            if sig.params.get(i).copied().unwrap_or(TyKind::Dyn).is_numeric() {
                 self.emit(Op::IsDyn, &[ty], at)?;
                 self.emit(Op::UnboxDyn, &[], at)?;
             }
@@ -3367,9 +3374,10 @@ impl<'a> Lowerer<'a> {
                 self.emit(Op::IsDyn, &[ty], at)?;
                 self.emit(Op::UnboxDyn, &[], at)?;
                 // D.3: the boundary checks must be adjacent and may not be dropped (UB-003/UB-004).
+                // D-38 (c): the guards themselves carry no operand — the type rides on `op` below.
                 match op {
-                    Op::Div | Op::Rem => self.emit(Op::GuardNonzero, &[ty], at)?,
-                    Op::Shl | Op::Shr | Op::ShrA => self.emit(Op::GuardShift, &[ty], at)?,
+                    Op::Div | Op::Rem => self.emit(Op::GuardNonzero, &[], at)?,
+                    Op::Shl | Op::Shr | Op::ShrA => self.emit(Op::GuardShift, &[], at)?,
                     _ => {}
                 }
                 self.emit(op, &[ty], at)?;
@@ -3380,11 +3388,27 @@ impl<'a> Lowerer<'a> {
             Selected::Object(op, ty) => {
                 self.push_val(l, at)?;
                 self.push_val(r, at)?;
-                if op.arity() == 1 {
-                    self.emit(op, &[ty], at)?;
-                } else {
-                    self.emit(op, &[], at)?;
-                }
+                // D-38 moved operand counts (guards/`box.dyn` to 0, `ldw`/`field_off` to 2), so the
+                // width comes from the table rather than a hand-written slice. A mapping row that
+                // needs more than the one type operand (the container forms `new.list`/`new.dict`,
+                // which also want an element count) is refused here instead of emitting a
+                // mis-sized instruction.
+                let ops: Vec<u32> = match op.arity() {
+                    0 => Vec::new(),
+                    1 => vec![ty],
+                    n => {
+                        self.err(
+                            format!("{}({})", at.opname, dispatch_key(at)),
+                            format!(
+                                "能力表映射到 {}，它有 {n} 个操作数，而二元运算的 lowering 只能给出类型操作数；需要一个带元素计数的构造形态",
+                                op.base()
+                            ),
+                            at,
+                        );
+                        return Err(());
+                    }
+                };
+                self.emit(op, &ops, at)?;
                 let res = self.object_result_ty(op, ty);
                 self.stack.push(Val::Stack { ty: res });
             }

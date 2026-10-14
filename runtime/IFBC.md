@@ -22,6 +22,14 @@ bounds‑checks **every** read against the remaining image size; a short/truncat
 rejected with **R‑0703** (the umbrella load‑failure code). Arbitrary bytes are hostile input: the
 loader returns a code, it does not read or write out of bounds.
 
+> **Status of §1.2/§1.3/§1.5 and §3.1 while D4 is being implemented.** Deviation **D-38** fixed one
+> merged wire format for both sides, and **D4(1) has already landed it on the Rust side**
+> (`src/ifbc.rs`, plus its mirror `docs/internals/ifbc-encoding-rust.md`). The C code below still
+> reads the shapes as documented here — `payload_a/payload_b` and `sig_hash` (import), `sig_str`
+> (func), and the family‑byte opcode table are what **D4(2)** adds. Until then the two sides do not
+> exchange a byte (`.inf ifbc` is still empty), so this is a tracked divergence, not a live
+> mismatch. `§2` above is *not* pending: that table was already the loader's own `SIG_*` enum.
+
 ### 1.1 header (47 bytes, fixed by §7.8.1 / runtime‑abi.md §9)
 
 | bytes | field | notes |
@@ -117,21 +125,25 @@ n_strings × { u32 len; len × byte }     # raw bytes (UTF-8 str or bytes; no NU
 
 ## 2. IFABI scalar signature codes (`ret_sig` / `param_sig`)
 
-A closed domain; any value `> 17` is not expressible in IFABI ⇒ **R‑0708**.
+A closed domain; any value `> 17` is not expressible in IFABI ⇒ **R‑0708**. This table is the
+`SIG_*` enum in `infy_ifbc.c` (line 54) — it is the domain **D-38** unifies `type_table.kind` with,
+so a signature byte and a `type_table` index in `0..=17` address one space.
 
-| code | type | code | type |
-|---|---|---|---|
-| 0 | void | 9 | u64 |
-| 1 | unit `()` | 10 | f32 |
-| 2 | bool | 11 | f64 |
-| 3 | char | 12 | str |
-| 4 | i8 | 13 | bytes |
-| 5 | i16 | 14 | ptr |
-| 6 | i32 | 15 | dyn |
-| 7 | i64 | 16 | (reserved) |
-| 8 | u8 | 17 | (reserved) |
+| code | type | code | type | code | type |
+|---|---|---|---|---|---|
+| 0 | void | 6 | i32 | 12 | f32 |
+| 1 | unit `()` | 7 | i64 | 13 | f64 |
+| 2 | bool | 8 | u8 | 14 | str |
+| 3 | char | 9 | u16 | 15 | bytes |
+| 4 | i8 | 10 | u32 | 16 | ptr |
+| 5 | i16 | 11 | u64 | 17 | dyn |
 
-(For `ldw` the annotation operand must be one of `u64(9)/i64(7)/f64(11)`; else R‑0706.)
+(Earlier revisions of this file numbered the block `9 = u64, 10 = f32, 11 = f64, 12 = str, 13 =
+bytes, 14 = ptr, 15 = dyn` with `16/17` reserved, i.e. it dropped `u16`/`u32` — that table did not
+match the enum the loader validates against. Corrected against `infy_ifbc.c`, as **D-38** pinned.)
+
+(For `ldw` the annotation operand must be one of `i64(7)/u64(11)/f64(13)` — the three the loader
+accepts at `check_type`; else R‑0706.)
 
 ## 3. Instruction encoding
 

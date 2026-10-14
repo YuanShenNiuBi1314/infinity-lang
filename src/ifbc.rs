@@ -5,20 +5,21 @@
 //! dependency) so that both the B-track ingest (`crate::btrack`) and `infy ifbc dump|verify`
 //! (§7.8.4) sit on one implementation.
 //!
-//! Container, as fixed by `docs/internals/runtime-abi.md` §9:
+//! Container, as fixed by deviation **D-38** (the one wire format both sides now align to):
 //!
 //! ```text
 //! header | type_table | import_table | func_table | code | line_map | exception_table | string_pool
 //! header: magic "IFB1" | ifbc_version u16 | ifabi u16 | lang_tag u16 | module_hash [u8;32]
-//!         | func_count u32 | frame_kind u8                        (= 49 bytes)
+//!         | func_count u32 | frame_kind u8                        (= 47 bytes)
 //! ```
 //!
-//! Every region after the header is wrapped as `byte_len:u32 || byte_len bytes`. That wrapper is a
-//! decision of this implementation (spec hole, recorded in `docs/internals/ifbc-encoding-rust.md`):
-//! the normative header carries no region offset table, so without a length prefix `code` — whose
-//! size is only implied by `func_table` plus padding to 4 bytes — could not be told apart from
-//! `line_map`. All integers are big-endian (D.1), every instruction is `opcode:u8` + 0..3 `u32`
-//! operands (D.1), and function entry offsets and the end of the code region are 4-byte aligned.
+//! Every region after the header is **self-delimiting**: the tables and the trailing regions open
+//! with their own `u32` count and `code` with its own `u32` byte length (`runtime/IFBC.md` §1).
+//! This module used to wrap each region in an extra `byte_len:u32 || body` and called the wrapper a
+//! spec hole; D-38 removed it, because `code`'s own leading length already separates it from
+//! `line_map`, which is what `runtime/infy_ifbc.c` has always walked. All integers are big-endian
+//! (D.1), an instruction is `opcode:u8` + its opcode-implied `u32` operands, and function entry
+//! offsets and the end of the code region are 4-byte aligned.
 //!
 //! Determinism (§7.3): the string pool interns by first appearance, every map the encoder walks is a
 //! `BTreeMap`, and `module_hash` is SHA-256 over the normalised region body, so two builds of one
@@ -49,6 +50,16 @@ pub const FRAME_KIND_COROUTINE: u8 = 1;
 pub const NONE32: u32 = u32::MAX;
 /// Maximum operands per instruction (D.1: 0..3).
 pub const MAX_OPS: usize = 3;
+/// D-38: the row caps both sides share. `runtime/infy_ifbc.c` rejects an absurd count with the
+/// umbrella load failure rather than trusting a `u32`, so the build-time decoder caps the same way.
+pub const MAX_TABLE_ROWS: u32 = 1 << 20;
+/// The cap for the three count-prefixed regions at the tail of the container.
+pub const MAX_LONG_ROWS: u32 = 1 << 24;
+/// `switch n` case-table cap: C's `insn_len` treats `n > OPS_MAX * 16` as hostile input.
+pub const MAX_SWITCH_CASES: u32 = 48;
+/// D-38: the first `type_table` rows are the IFABI scalar codes (§2 of `runtime/IFBC.md`), so a
+/// type index in `0..N_SCALAR_ROWS` **is** a scalar code. `intern_type` seeds them on first use.
+pub const N_SCALAR_ROWS: usize = 18;
 
 /// Region names in the normative container order (§7.8.1).
 pub const REGIONS: [&str; 8] = [
@@ -117,94 +128,136 @@ impl LangTag {
     }
 }
 
-/// Type-class kinds. 0..=11 are exactly `InfyDynTag` in `runtime/infy_rt.h` (`DY_NONE, DY_INT, …,
-/// DY_INSTANCE`), so `is.dyn T`/`cast.dyn T` need no translation at run time. That alignment is a
-/// deliberate reconciliation with the one part of the C side that already exists (§7.7.7). Kinds
-/// 12.. are static-only INFY types with no `dyn` tag.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Type-class kinds. **D-38 renumbered** this enum into the IFABI scalar-code space: `0..=17` are
+/// exactly `SIG_*` in `runtime/infy_ifbc.c` (`void, unit, bool, char, i8, i16, i32, i64, u8, u16,
+/// u32, u64, f32, f64, str, bytes, ptr, dyn`), which is what lets an `import_table` row's `u8`
+/// signature codes and a `type_table` index name the *same* space. Kinds `18..` are the extended
+/// static classes D-38 lists after the scalar block.
+///
+/// The old numbering copied `InfyDynTag`'s order for `0..=11`; that identity is gone, so
+/// [`TyKind::dyn_tag`] is an explicit table now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum TyKind {
-    Unit = 0,
-    Int = 1,
-    Float = 2,
-    Str = 3,
-    Bytes = 4,
-    List = 5,
-    Tuple = 6,
-    Dict = 7,
-    Bool = 8,
-    Func = 9,
-    Coro = 10,
-    Instance = 11,
-    I8 = 12,
-    I16 = 13,
-    I32 = 14,
-    U8 = 15,
-    U16 = 16,
-    U32 = 17,
-    U64 = 18,
-    F32 = 19,
-    Char = 20,
-    Usize = 21,
-    Isize = 22,
-    Ref = 23,
-    Box = 24,
-    Rc = 25,
-    Arc = 26,
-    Option = 27,
-    Result = 28,
-    Never = 29,
+    // ---- 0..=17: the IFABI scalar codes, the closed signature domain (§2 of `IFBC.md`)
+    Void = 0,
+    Unit = 1,
+    Bool = 2,
+    Char = 3,
+    I8 = 4,
+    I16 = 5,
+    I32 = 6,
+    /// D.3's `i64` width; B-track's Python int.
+    Int = 7,
+    U8 = 8,
+    U16 = 9,
+    U32 = 10,
+    U64 = 11,
+    F32 = 12,
+    /// D.3's `f64` width.
+    Float = 13,
+    Str = 14,
+    Bytes = 15,
+    Ptr = 16,
+    Dyn = 17,
+    // ---- 18..: extended static classes, not expressible as an IFABI signature code
+    List = 18,
+    Tuple = 19,
+    Dict = 20,
+    Func = 21,
+    Coro = 22,
+    Instance = 23,
+    Ref = 24,
+    Box = 25,
+    Rc = 26,
+    Arc = 27,
+    Option = 28,
+    Result = 29,
+    Never = 30,
+    Usize = 31,
+    Isize = 32,
 }
 
 impl TyKind {
     pub fn as_u8(self) -> u8 {
         self as u8
     }
-    pub fn from_u8(b: u8) -> Option<TyKind> {
-        const TABLE: [TyKind; 30] = [
-            TyKind::Unit,
-            TyKind::Int,
-            TyKind::Float,
-            TyKind::Str,
-            TyKind::Bytes,
-            TyKind::List,
-            TyKind::Tuple,
-            TyKind::Dict,
-            TyKind::Bool,
-            TyKind::Func,
-            TyKind::Coro,
-            TyKind::Instance,
-            TyKind::I8,
-            TyKind::I16,
-            TyKind::I32,
-            TyKind::U8,
-            TyKind::U16,
-            TyKind::U32,
-            TyKind::U64,
-            TyKind::F32,
-            TyKind::Char,
-            TyKind::Usize,
-            TyKind::Isize,
-            TyKind::Ref,
-            TyKind::Box,
-            TyKind::Rc,
-            TyKind::Arc,
-            TyKind::Option,
-            TyKind::Result,
-            TyKind::Never,
-        ];
-        if (b as usize) >= TABLE.len() {
-            return None;
-        }
-        Some(TABLE[b as usize])
+    /// The `type_table.kind` field is a `u32` (D-38 merged shape).
+    pub fn as_u32(self) -> u32 {
+        self as u32
     }
-    /// The `InfyDynTag` value for dyn-visible kinds (§7.7.7).
-    pub fn dyn_tag(self) -> Option<u8> {
-        let v = self as u8;
-        if v <= TyKind::Instance as u8 {
-            Some(v)
+    pub fn from_u8(b: u8) -> Option<TyKind> {
+        Self::from_u32(b as u32)
+    }
+    pub fn from_u32(b: u32) -> Option<TyKind> {
+        Some(match b {
+            0 => TyKind::Void,
+            1 => TyKind::Unit,
+            2 => TyKind::Bool,
+            3 => TyKind::Char,
+            4 => TyKind::I8,
+            5 => TyKind::I16,
+            6 => TyKind::I32,
+            7 => TyKind::Int,
+            8 => TyKind::U8,
+            9 => TyKind::U16,
+            10 => TyKind::U32,
+            11 => TyKind::U64,
+            12 => TyKind::F32,
+            13 => TyKind::Float,
+            14 => TyKind::Str,
+            15 => TyKind::Bytes,
+            16 => TyKind::Ptr,
+            17 => TyKind::Dyn,
+            18 => TyKind::List,
+            19 => TyKind::Tuple,
+            20 => TyKind::Dict,
+            21 => TyKind::Func,
+            22 => TyKind::Coro,
+            23 => TyKind::Instance,
+            24 => TyKind::Ref,
+            25 => TyKind::Box,
+            26 => TyKind::Rc,
+            27 => TyKind::Arc,
+            28 => TyKind::Option,
+            29 => TyKind::Result,
+            30 => TyKind::Never,
+            31 => TyKind::Usize,
+            32 => TyKind::Isize,
+            _ => return None,
+        })
+    }
+    /// Inside the closed IFABI signature domain (`<= SIG_DYN`), so it can appear as an
+    /// `import_table` `ret_sig`/`param_sig` byte.
+    pub fn is_scalar_code(self) -> bool {
+        (self as u32) <= TyKind::Dyn as u32
+    }
+    /// The signature code an `import_table` row may carry for this kind: anything outside the
+    /// closed set is a boxed dynamic value on the IFABI wire (`SIG_DYN = 17`), which is what
+    /// §7.7.7's B-track representation says a container or instance *is*.
+    pub fn sig_code(self) -> u8 {
+        if self.is_scalar_code() {
+            self as u8
         } else {
-            None
+            TyKind::Dyn as u8
+        }
+    }
+    /// The `InfyDynTag` of the dyn-visible kinds (§7.7.7), explicit since D-38's renumbering.
+    pub fn dyn_tag(self) -> Option<u8> {
+        match self {
+            TyKind::Unit => Some(0),     // DY_NONE
+            TyKind::Int => Some(1),      // DY_INT
+            TyKind::Float => Some(2),    // DY_FLOAT
+            TyKind::Str => Some(3),      // DY_STR
+            TyKind::Bytes => Some(4),    // DY_BYTES
+            TyKind::List => Some(5),     // DY_LIST
+            TyKind::Tuple => Some(6),    // DY_TUPLE
+            TyKind::Dict => Some(7),     // DY_DICT
+            TyKind::Bool => Some(8),     // DY_BOOL
+            TyKind::Func => Some(9),     // DY_FUNC
+            TyKind::Coro => Some(10),    // DY_CORO
+            TyKind::Dyn => Some(11),     // DY_INSTANCE
+            _ => None,
         }
     }
     /// Kinds that may carry an arithmetic/comparison type suffix (D.3).
@@ -225,32 +278,34 @@ impl TyKind {
                 | TyKind::Isize
         )
     }
-    /// `i64`, `f32`, … — the suffix text of a mnemonic such as `add.i64`.
+    /// `i64`, `f32`, … — the suffix text of a mnemonic such as `add.i64`, and the pool name of the
+    /// scalar row the kind seeds.
     pub fn suffix(self) -> &'static str {
         match self {
+            TyKind::Void => "void",
             TyKind::Unit => "unit",
-            TyKind::Int => "i64",
-            TyKind::Float => "f64",
-            TyKind::Str => "str",
-            TyKind::Bytes => "bytes",
-            TyKind::List => "list",
-            TyKind::Tuple => "tuple",
-            TyKind::Dict => "dict",
             TyKind::Bool => "bool",
-            TyKind::Func => "func",
-            TyKind::Coro => "coro",
-            TyKind::Instance => "object",
+            TyKind::Char => "char",
             TyKind::I8 => "i8",
             TyKind::I16 => "i16",
             TyKind::I32 => "i32",
+            TyKind::Int => "i64",
             TyKind::U8 => "u8",
             TyKind::U16 => "u16",
             TyKind::U32 => "u32",
             TyKind::U64 => "u64",
             TyKind::F32 => "f32",
-            TyKind::Char => "char",
-            TyKind::Usize => "usize",
-            TyKind::Isize => "isize",
+            TyKind::Float => "f64",
+            TyKind::Str => "str",
+            TyKind::Bytes => "bytes",
+            TyKind::Ptr => "ptr",
+            TyKind::Dyn => "dyn",
+            TyKind::List => "list",
+            TyKind::Tuple => "tuple",
+            TyKind::Dict => "dict",
+            TyKind::Func => "func",
+            TyKind::Coro => "coro",
+            TyKind::Instance => "instance",
             TyKind::Ref => "ref",
             TyKind::Box => "box",
             TyKind::Rc => "rc",
@@ -258,30 +313,72 @@ impl TyKind {
             TyKind::Option => "option",
             TyKind::Result => "result",
             TyKind::Never => "never",
+            TyKind::Usize => "usize",
+            TyKind::Isize => "isize",
         }
     }
 }
 
-/// One `type_table` row. `a`/`b` are payloads: for `list`/`tuple` `a` is the element type index, for
-/// `dict` `a`/`b` are key/value; otherwise `NONE32`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `type_table.flags` bit 0 = `#[repr(C)]`, the precondition of `field_off ty,field` (D.9).
+pub const TF_REPR_C: u32 = 1 << 0;
+
+/// One `type_table` row in D-38's merged shape: the six fields `runtime/infy_ifbc.c` reads, plus
+/// the two payloads this side carries for container elements and generic arguments (the C side
+/// ignores them, so they are not new semantics).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeEntry {
-    pub kind: u8,
+    pub kind: u32,
     pub name: u32,
+    pub flags: u32,
+    pub size: u32,
+    pub align: u32,
+    /// `nfields` on the wire, then `nfields × {name_str, off, ty}`.
+    pub fields: Vec<TypeField>,
+    /// `payload_a` / `payload_b`: for `list`/`tuple` `a` is the element type index, for `dict`
+    /// `a`/`b` are key/value; otherwise `NONE32`.
     pub a: u32,
     pub b: u32,
 }
 
-/// What an `import_table` row refers to. Validation item 5 (§7.8.3) only accepts `Host` rows for
-/// `call.host` and requires them to match `IFABI` element by element.
+/// One field record of a `type_table` row; `ty` is a `type_table` index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TypeField {
+    pub name: u32,
+    pub off: u32,
+    pub ty: u32,
+}
+
+impl TypeEntry {
+    /// The row D-38 auto-seeds for a scalar code: name only, no layout claim, no payload. The
+    /// producer that needs `size_of.idx`/`align_of.idx`/`field_off` on a row fills those in.
+    fn scalar_row(name: u32, kind: u32) -> TypeEntry {
+        TypeEntry {
+            kind,
+            name,
+            flags: 0,
+            size: 0,
+            align: 0,
+            fields: Vec::new(),
+            a: NONE32,
+            b: NONE32,
+        }
+    }
+}
+
+/// What an `import_table` row refers to. D-38 folded this side's `PyModule`/`Infib`/`Entry` classes
+/// into the three the loader knows: the source language is the header's `lang_tag`, and an entry
+/// point is `FuncEntry::flags`' `F_ENTRY`, so neither needs an import row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ImportKind {
     Host = 0,
-    PyModule = 1,
-    Infib = 2,
-    Entry = 3,
+    Embed = 1,
+    Event = 2,
 }
+
+/// `import_table.flags` bit 0 = "IFABI-signed": the compiler stamps it after checking the row
+/// against the IFABI thunk table (`IFBC.md` §5.5, validation item 5).
+pub const IMP_SIGNED: u8 = 1 << 0;
 
 impl ImportKind {
     pub fn as_u8(self) -> u8 {
@@ -290,37 +387,50 @@ impl ImportKind {
     pub fn from_u8(b: u8) -> Option<ImportKind> {
         Some(match b {
             0 => ImportKind::Host,
-            1 => ImportKind::PyModule,
-            2 => ImportKind::Infib,
-            3 => ImportKind::Entry,
+            1 => ImportKind::Embed,
+            2 => ImportKind::Event,
             _ => return None,
         })
     }
     pub fn word(self) -> &'static str {
         match self {
             ImportKind::Host => "host",
-            ImportKind::PyModule => "pymod",
-            ImportKind::Infib => "infib",
-            ImportKind::Entry => "entry",
+            ImportKind::Embed => "embed",
+            ImportKind::Event => "event",
         }
     }
 }
 
-/// One `import_table` row: an external name plus the signature it is checked against.
+/// One `import_table` row: an external name plus the signature it is checked against. `ret_sig`
+/// and `params` are **IFABI scalar codes** (§2 of `IFBC.md`), i.e. the first `N_SCALAR_ROWS`
+/// `type_table` indices, so a `u8` here and a `u32` type index name one space (D-38).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportEntry {
     pub name: u32,
     pub kind: ImportKind,
-    pub ifabi: u16,
-    pub ret_ty: u32,
-    pub params: Vec<u32>,
+    pub flags: u8,
+    pub ret_sig: u8,
+    pub params: Vec<u8>,
+    /// Validation item 5's fast comparison value; the text stays rebuildable from the codes.
     pub sig_hash: u32,
 }
 
 impl ImportEntry {
-    pub fn sig_text(&self, pool: &StringPool, types: &[TypeEntry]) -> String {
-        let ps: Vec<String> = self.params.iter().map(|t| ty_text(types, pool, *t)).collect();
-        format!("({}) -> {}", ps.join(", "), ty_text(types, pool, self.ret_ty))
+    pub fn sig_text(&self) -> String {
+        let ps: Vec<String> = self.params.iter().map(|c| sig_name(*c).to_string()).collect();
+        format!("({}) -> {}", ps.join(", "), sig_name(self.ret_sig))
+    }
+}
+
+/// The scalar-code name space: `ret_sig`/`param_sig` bytes rendered for `dump`.
+pub fn sig_kind(code: u8) -> Option<TyKind> {
+    TyKind::from_u32(code as u32).filter(|k| k.is_scalar_code())
+}
+
+pub fn sig_name(code: u8) -> &'static str {
+    match sig_kind(code) {
+        Some(k) => k.suffix(),
+        None => "?",
     }
 }
 
@@ -332,7 +442,7 @@ pub fn ty_text(types: &[TypeEntry], pool: &StringPool, idx: u32) -> String {
     match types.get(idx as usize) {
         Some(t) => {
             let base = pool.get(t.name).cloned().unwrap_or_else(|| "?".to_string());
-            match TyKind::from_u8(t.kind) {
+            match TyKind::from_u32(t.kind) {
                 Some(k) if matches!(k, TyKind::List | TyKind::Dict | TyKind::Tuple) => {
                     if t.a == NONE32 {
                         base
@@ -348,27 +458,35 @@ pub fn ty_text(types: &[TypeEntry], pool: &StringPool, idx: u32) -> String {
 }
 
 /// Function flags (bits of `FuncEntry::flags`).
-pub const F_ENTRY: u8 = 1 << 0;
-pub const F_COROUTINE: u8 = 1 << 1;
-pub const F_BOUNDARY: u8 = 1 << 2;
+pub const F_ENTRY: u32 = 1 << 0;
+pub const F_COROUTINE: u32 = 1 << 1;
+pub const F_BOUNDARY: u32 = 1 << 2;
+/// `func_table.flags` bit 0 on the C side is "has_return" (`IFBC.md` §1.5); D-38 keeps both names
+/// for the same bit set so neither side has to guess.
+pub const F_HAS_RETURN: u32 = 1 << 0;
 
-/// One `func_table` row (36 bytes on the wire).
+/// One `func_table` row: D-38's 48-byte merged record, twelve `u32` in the loader's order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FuncEntry {
-    pub name: u32,
     pub code_off: u32,
     pub code_len: u32,
     /// Local-window slot count: parameters + locals + compiler scratch (§7.7.1 rule 1).
     pub locals: u32,
-    pub arity: u32,
-    pub ret_ty: u32,
+    /// Declared operand-stack ceiling; the height pass rejects a height above it (R-0705).
+    pub max_stack: u32,
+    pub nargs: u32,
+    /// 0 = unit, 1 = scalar, n = tuple — `ret`/`ret.multi` must match it (item 4).
+    pub ret_arity: u32,
+    /// The return type as a scalar code (§2 domain), diagnostic; `ret_arity` carries the shape.
+    pub ret_sig: u32,
+    pub name: u32,
     /// String-pool index of the canonical signature text, for `infy doc` and diagnostics.
-    pub sig: u32,
+    pub sig_str: u32,
     /// `HostSigTable::sig_hash` of that signature: validation item 5 compares bytes, not names.
     pub sig_hash: u32,
-    /// 0 = stack + local window (§7.8.1), 1 = coroutine frame (D.8).
-    pub frame: u8,
-    pub flags: u8,
+    pub flags: u32,
+    /// 0 = stack + local window (§7.8.1), 1 = coroutine frame (D.8, deviation D-23).
+    pub frame_kind: u32,
 }
 
 /// `line_map`: `count u32` then `count × { code_off u32, line u32 }` sorted by `code_off`
@@ -457,9 +575,10 @@ pub enum Op {
     LdFrame = 0x09,
     Dup2 = 0x0A,
     Swap = 0x0B,
-    /// Module-global window access, placed in D.2's unassigned 0x0C..0x1F gap (`DEV-IFBC-12`).
-    Ldg = 0x0C,
-    Stg = 0x0D,
+    /// D-38: `0x0C`/`0x0D` are the C loader's old `guard.nonzero`/`guard.shift` bytes, which move
+    /// back to D.3's own block (`0x27`/`0x2F`); the global-window pair takes the next free gap.
+    Ldg = 0x0E,
+    Stg = 0x0F,
 
     // ---- D.3 arithmetic and comparison, 0x20..0x3F (operand 0 = type index)
     Add = 0x20,
@@ -470,7 +589,8 @@ pub enum Op {
     Neg = 0x25,
     Abs = 0x26,
     /// D.3 mandates `guard.nonzero` immediately before `div`/`rem` but assigns it no byte; 0x27 is
-    /// D.3's own gap (`DEV-IFBC-4`).
+    /// D.3's own gap, and D-38 (c) pins it there with **0 operands** (the C side's 0x0C/0x0D pair
+    /// migrates here, and the type travels on the guarded instruction's own operand 0).
     GuardNonzero = 0x27,
     And = 0x28,
     Or = 0x29,
@@ -479,7 +599,8 @@ pub enum Op {
     Shl = 0x2C,
     Shr = 0x2D,
     ShrA = 0x2E,
-    /// D.3's `guard.shift`, same reasoning as `GuardNonzero`; 0x2F is the gap before `cmplt`.
+    /// D.3's `guard.shift`, same reasoning as `GuardNonzero`; 0x2F is the gap before `cmplt`, and
+    /// D-38 (c) gives it **0 operands** as well.
     GuardShift = 0x2F,
     CmpLt = 0x30,
     CmpLe = 0x31,
@@ -494,8 +615,10 @@ pub enum Op {
     Jmp = 0x40,
     Br = 0x41,
     Brf = 0x42,
-    /// D.4's `switch n, [targets]` is variable-length, contradicting D.1's fixed width. Reserved:
-    /// `CodeBuilder::switch` refuses to emit it and the verifier rejects the byte (`DEV-IFBC-5`).
+    /// D.4's `switch n, [targets]`: one operand (the case count) plus an **inline** `n × u32`
+    /// target table, so its length is `1 + 4*(1+n)` — statically computable, still a single
+    /// forward pass. D-38/D-39: this is unbanned (the earlier `SwitchNotSupported` refusal was
+    /// "以拒绝冒充合规"); `MAX_SWITCH_CASES` mirrors the loader's hostile-count cap.
     Switch = 0x43,
     TickLoop = 0x44,
     Leave = 0x45,
@@ -570,21 +693,25 @@ pub enum Op {
     FieldOff = 0xE3,
 }
 
-/// Every appendix-D row that groups more than one mnemonic, with the byte assignment this
-/// implementation makes. Printed by `disassemble`'s legend and mirrored in
-/// `docs/internals/ifbc-encoding-rust.md` so the C side can cross-check one table.
-pub const GROUPING: [(&str, &str); 11] = [
+/// Every appendix-D row that groups more than one mnemonic or leaves an operand count open, with
+/// the byte/width assignment this implementation makes. Printed by `disassemble`'s legend and
+/// mirrored in `docs/internals/ifbc-encoding-rust.md`, and since **D-38** it is the table both
+/// sides share (the `DEV-IFBC-*` ids below were "this side's choice" until D-38 made them law).
+pub const GROUPING: [(&str, &str); 14] = [
     ("D.2 0x06", "dup / dup2 / swap -> 0x06 dup, 0x0A dup2, 0x0B swap"),
-    ("D.2 0x0A..0x1F", "unassigned gap -> 0x0C ldg, 0x0D stg (global window)"),
-    ("D.3 all rows", "type suffix = operand 0 (a type_table index), not a separate byte: DEV-IFBC-1"),
-    ("D.3 0x27, 0x2F", "guard.nonzero, guard.shift (mandated by D.3, never numbered by D)"),
-    ("D.4 0x43", "switch: reserved, not emitted; verifier rejects it: DEV-IFBC-5"),
-    ("D.5 0x68, 0x69", "import, import.attr: DEV-IFBC-6"),
+    ("D.2 0x0A..0x1F", "unassigned gap -> 0x0E ldg, 0x0F stg (global window); 0x0C/0x0D are free now that guard.* sit at their D.3 bytes"),
+    ("D.2 0x03", "ldw i,ty -> 2 operands; operand 1 is a static type annotation the executor never reads: D-38 (e)"),
+    ("D.2 0x04", "push k,ty -> 2 operands: a pool constant must carry its type: D-38 (d) / DEV-IFBC-13"),
+    ("D.3 all rows", "family byte + operand 0 = type_table index, not one byte per (op,type): D-38 (b) / DEV-IFBC-1"),
+    ("D.3 0x27, 0x2F", "guard.nonzero, guard.shift: 0 operands, D.3's adjacency only ever inspects the previous byte: D-38 (c)"),
+    ("D.4 0x43", "switch n + n inline u32 targets, length 1+4*(1+n): D-38 (h) / D-39 (the old fixed-width reading)")  ,
+    ("D.5 0x68, 0x69", "import, import.attr: DEV-IFBC-6, confirmed by D-38 (i)"),
+    ("D.6 0x81, 0x82", "new.list elem_ty,count / new.dict k_ty,v_ty,count: D.6 names the type operands only; the count is what makes the stack form decidable (D-38 addendum)"),
+    ("D.6 0x83", "new.frame f: D.6 lists no operand, but a frame record must name its coroutine function (D-38 addendum)"),
     ("D.6 0x84..0x87", "seq.push, seq.len, seq.next, seq.iter: DEV-IFBC-7"),
     ("D.6 0x8B..0x8F", "inst.get, inst.set, map.insert, str.concat, seq.concat: DEV-IFBC-7"),
     ("D.6 0x92, 0x93", "new.tuple, new.set: DEV-IFBC-7"),
-    ("D.2 0x04", "push k takes a second operand = the constant's type index: DEV-IFBC-13"),
-    ("D.7 0xA5, 0xA6", "dyn.truthy, dyn.identity: DEV-IFBC-7"),
+    ("D.7 0xA3", "box.dyn: 0 operands, B-track values are already InfyDyn: D-38 (f). D.7 0xA5/0xA6 dyn.truthy, dyn.identity: DEV-IFBC-7. D.9 0xE0 typeof.idx T and 0xe3 field_off idx,fld: D.9's mnemonic column drops operands the check needs (D-38 addendum / D-39)"),
 ];
 
 /// Operand forms, so the verifier and the disassembler label the same u32 correctly.
@@ -628,8 +755,8 @@ impl Op {
             0x09 => Op::LdFrame,
             0x0A => Op::Dup2,
             0x0B => Op::Swap,
-            0x0C => Op::Ldg,
-            0x0D => Op::Stg,
+            0x0E => Op::Ldg,
+            0x0F => Op::Stg,
             0x20 => Op::Add,
             0x21 => Op::Sub,
             0x22 => Op::Mul,
@@ -815,6 +942,8 @@ impl Op {
     }
 
     /// Number of `u32` operands implied by the opcode (D.1: the count is implied, never encoded).
+    /// `switch` is the one exception: its count *value* is operand 0 and its target table follows
+    /// inline, so `arity()` is 1 and [`Op::switch_extra`] counts the rest (D-38 (h), D-39).
     pub fn arity(self) -> usize {
         match self {
             // zero operands
@@ -831,18 +960,19 @@ impl Op {
             | Op::FrameExit
             | Op::TagGet
             | Op::UnboxDyn
+            | Op::BoxDyn
             | Op::DynTruthy
             | Op::DynIdentity
             | Op::Yield
             | Op::YieldFrom
             | Op::RefInc
             | Op::RefDec
-            | Op::TypeOfIdx
-            | Op::NewFrame => 0,
+            // D-38 (c): the guards carry no type operand; the guarded instruction has its own.
+            | Op::GuardNonzero
+            | Op::GuardShift => 0,
             // one operand
             Op::Ldl
             | Op::Stl
-            | Op::Ldw
             | Op::Ldg
             | Op::Stg
             | Op::PushB
@@ -858,6 +988,7 @@ impl Op {
             | Op::Import
             | Op::ImportAttr
             | Op::NewStr
+            | Op::NewFrame
             | Op::IdxGet
             | Op::IdxSet
             | Op::Slice
@@ -873,17 +1004,17 @@ impl Op {
             | Op::MoveOut
             | Op::CastDyn
             | Op::IsDyn
-            | Op::BoxDyn
-            | Op::CallVirt
             | Op::CallEmbed
             | Op::InvokeDynamic
             | Op::CoroResume
             | Op::CoroThrow
             | Op::SizeOf
             | Op::AlignOf
-            | Op::FieldOff
+            | Op::TypeOfIdx
             | Op::RetMulti
-            // D.3 families: operand 0 is the type index (DEV-IFBC-1)
+            // `switch n`: operand 0 is the case count, the table is inline (D-38 (h)).
+            | Op::Switch
+            // D.3 families: operand 0 is the type index (DEV-IFBC-1, pinned by D-38 (b))
             | Op::Add
             | Op::Sub
             | Op::Mul
@@ -904,58 +1035,60 @@ impl Op {
             | Op::CmpGe
             | Op::CmpEq
             | Op::CmpNe
-            | Op::Cmp
-            | Op::GuardNonzero
-            | Op::GuardShift => 1,
-            // two operands — `push k` carries the constant's type as operand 1 (`DEV-IFBC-13`:
-            // IFBC has no implicit literal typing, so a pool constant must be tagged)
-            Op::NewList | Op::ClosureNew | Op::EnterTry | Op::Switch | Op::Push => 2,
+            | Op::Cmp => 1,
+            // two operands — `push k,ty` (D-38 (d)) and `ldw i,ty` (D-38 (e)), plus `field_off
+            // ty,field` (D-38 (g)); `new.list elem_ty,count` / `closure.new` / `enter.try`
+            Op::NewList | Op::ClosureNew | Op::EnterTry | Op::Push | Op::Ldw | Op::FieldOff => 2,
             // one operand (added by this implementation, see the D.6 gap note)
             Op::NewTuple | Op::NewSet => 1,
-            // three operands — D.6's `new.dict k_ty,v_ty` plus this implementation's element count
+            // two type operands plus this implementation's element count (D-38 addendum)
             Op::NewDict => 3,
         }
+    }
+
+    /// `switch` is the only opcode whose length depends on an operand value: the `n` case targets
+    /// sit inside the instruction, so the linear pass still needs one forward scan (D-39).
+    pub fn is_variable_width(self) -> bool {
+        matches!(self, Op::Switch)
     }
 
     /// Operand forms, positionally. A D.3 family's operand 0 is always `Type`.
     pub fn operand_kinds(self) -> Vec<OperandKind> {
         use OperandKind::*;
         match self {
-            Op::Ldl | Op::Stl | Op::Ldw | Op::Ldg | Op::Stg | Op::MoveOut => vec![Slot],
+            Op::Ldl | Op::Stl | Op::Ldg | Op::Stg | Op::MoveOut => vec![Slot],
+            // D-38 (e): `ldw i,ty` — the annotation is operand 1 and the executor never reads it.
+            Op::Ldw => vec![Slot, Type],
             Op::ThrowInf | Op::NewStr | Op::ImportAttr | Op::InstGet | Op::InstSet => vec![Pool],
             Op::Push => vec![Pool, Type],
-            Op::PushB
-            | Op::TickLoop
-            | Op::SizeOf
-            | Op::AlignOf
-            | Op::FieldOff
-            | Op::RetMulti
-            | Op::CoroResume
-            | Op::CoroThrow => vec![Imm],
+            Op::PushB | Op::TickLoop | Op::RetMulti | Op::CoroResume | Op::CoroThrow => vec![Imm],
+            // D-38 addendum: D.9's mnemonic column drops the index these checks need, so the
+            // mirror of `runtime/infy_ifbc.c`'s `check_type` is that they are `type_table` indices.
+            Op::TypeOfIdx | Op::SizeOf | Op::AlignOf => vec![Type],
+            // D-38 (g): `field_off ty,field`.
+            Op::FieldOff => vec![Type, Imm],
             Op::Jmp | Op::Br | Op::Brf => vec![CodeOff],
-            Op::CallStat | Op::TailCallStat => vec![Func],
+            Op::CallStat | Op::TailCallStat | Op::NewFrame => vec![Func],
             Op::CallHost | Op::Import => vec![Import],
-            Op::CallVirt | Op::CallEmbed | Op::InvokeDynamic => vec![Imm],
-            Op::ClosureNew => vec![Imm, Imm],
-            Op::IdxGet
-            | Op::IdxSet
-            | Op::Slice
-            | Op::SeqLen
-            | Op::SeqIter
-            | Op::SeqNext
-            | Op::SeqPush
-            | Op::CastDyn
-            | Op::IsDyn
-            | Op::BoxDyn
-            | Op::StrConcat
-            | Op::SeqConcat
+            // `call.virt idx` is the vtable slot's type index (same check as C's).
+            Op::CallVirt => vec![Type],
+            // `call.embed idx` addresses an import row like `call.host` (§5.5 checks the row's kind
+            // against the call site); `invoke.dynamic f` is a `func_table` index this side rejects
+            // with R-0712, so its operand stays an immediate (see `verify_func`'s item-5 pass).
+            Op::CallEmbed => vec![Import],
+            Op::InvokeDynamic => vec![Imm],
+            Op::ClosureNew => vec![Func, Imm],
+            Op::IdxGet | Op::IdxSet | Op::Slice | Op::SeqLen | Op::SeqIter | Op::SeqNext
+            | Op::SeqPush | Op::CastDyn | Op::IsDyn | Op::StrConcat | Op::SeqConcat
             | Op::MapInsert => vec![Type],
             Op::NewList => vec![Type, Imm],
             Op::NewTuple => vec![Imm],
             Op::NewSet => vec![Type],
             Op::NewDict => vec![Type, Type, Imm],
             Op::EnterTry => vec![CodeOff, CodeOff],
-            Op::Switch => vec![Imm, CodeOff],
+            // operand 0 is the case count; the targets are inline (verified as code offsets by
+            // the switch branch of item 1, not by the positional kinds).
+            Op::Switch => vec![Imm],
             _ => Vec::new(),
         }
     }
@@ -1008,8 +1141,11 @@ impl Op {
         use Op::*;
         match self {
             Nop | LdFrame | GuardNonzero | GuardShift | TickLoop | EnterTry | Leave | FrameEnter
-            | FrameExit | Jmp | Br | Brf | Switch | ThrowInf | Ret | RetMulti | Yield | YieldFrom
+            | FrameExit | Jmp | Br | Brf | ThrowInf | Ret | RetMulti | Yield | YieldFrom
             | CoroResume | CoroThrow | RefDec | Import | RefInc => (0, 0),
+            // D-38 (h): `switch n` pops the case index and pushes nothing (the successor is the
+            // selected target or the byte after the inline table) — C's `delta = -1`.
+            Switch => (1, 0),
             Ldl | Ldw | Push | PushB | LdNull | Ldg | SeqLen | NewStr | NewFrame | TypeOfIdx
             | SizeOf | AlignOf | FieldOff | DynTruthy => (0, 1),
             Stl | Stg | Pop | MoveOut | NewTuple | NewSet => (1, 0),
@@ -1091,7 +1227,9 @@ impl StringPool {
 pub enum IfbcEncodeErr {
     WrongArity { op: &'static str, expected: usize, given: usize },
     UnknownMnemonic(String),
-    SwitchNotSupported,
+    /// `switch` with more cases than the loader will scan (`MAX_SWITCH_CASES`): refusing to emit it
+    /// is what keeps an image this side writes decodable by `runtime/infy_ifbc.c`.
+    SwitchCaseCountTooLarge { given: usize },
     SlotOutOfRange { slot: u32, locals: u32 },
     CodeRegionOverflow,
 }
@@ -1103,9 +1241,10 @@ impl fmt::Display for IfbcEncodeErr {
                 write!(f, "{op} 需要 {expected} 个操作数，实际 {given} 个")
             }
             IfbcEncodeErr::UnknownMnemonic(m) => write!(f, "未知 IFBC 助记符 `{m}`"),
-            IfbcEncodeErr::SwitchNotSupported => {
-                write!(f, "switch 的变长目标表与 D.1 的定宽指令冲突，本实现不予发射")
-            }
+            IfbcEncodeErr::SwitchCaseCountTooLarge { given } => write!(
+                f,
+                "switch 的目标表有 {given} 项，超过装载器上限 {MAX_SWITCH_CASES}（D-38 (h)）"
+            ),
             IfbcEncodeErr::SlotOutOfRange { slot, locals } => {
                 write!(f, "局部槽 {slot} 超出帧窗口 {locals}")
             }
@@ -1138,6 +1277,9 @@ pub enum IfbcDecodeErr {
     MisalignedRegion { region: &'static str, len: u32 },
     UnknownOpcode { byte: u8, off: u32 },
     InstructionRunsPastFunc { op: &'static str, off: u32 },
+    /// `switch n` with `n > MAX_SWITCH_CASES`: C's `insn_len` treats an absurd count as hostile and
+    /// fails the linear pass, so the build-time decoder refuses it the same way (D-38 (h)).
+    SwitchCasesTooLarge { off: u32, n: u32 },
     BadUtf8InPool { pool: u32 },
     HashMismatch { stored: [u8; 32], computed: [u8; 32] },
     LineMapUnsorted { at: u32 },
@@ -1201,6 +1343,10 @@ impl fmt::Display for IfbcDecodeErr {
             IfbcDecodeErr::InstructionRunsPastFunc { op, off } => {
                 write!(f, "{op}@{off:#06x} 的操作数越过函数代码区间")
             }
+            IfbcDecodeErr::SwitchCasesTooLarge { off, n } => write!(
+                f,
+                "switch@{off:#06x} 的目标表有 {n} 项，超过装载器上限 {MAX_SWITCH_CASES}（敌意输入）"
+            ),
             IfbcDecodeErr::BadUtf8InPool { pool } => {
                 write!(f, "string_pool[{pool}] 不是合法 UTF-8")
             }
@@ -1238,6 +1384,9 @@ pub struct IfbcModule {
     pub types: Vec<TypeEntry>,
     pub imports: Vec<ImportEntry>,
     pub funcs: Vec<FuncEntry>,
+    /// §7.9's per-unit arena budget, the `u64` the loader reads right after `n_funcs`
+    /// (`runtime/IFBC.md` §1.5). 0 = no limit; over budget at run time is `R-0709`.
+    pub max_mem_bytes: u64,
     /// Instruction stream, big-endian, 4-byte aligned (§7.8.1 / D.1).
     pub code: Vec<u8>,
     pub lines: Vec<LineEntry>,
@@ -1259,6 +1408,7 @@ impl Default for IfbcModule {
             types: Vec::new(),
             imports: Vec::new(),
             funcs: Vec::new(),
+            max_mem_bytes: 0,
             code: Vec::new(),
             lines: Vec::new(),
             exceptions: Vec::new(),
@@ -1275,12 +1425,19 @@ fn put_u16(buf: &mut Vec<u8>, v: u16) {
 fn put_u32(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_be_bytes());
 }
+fn put_u64(buf: &mut Vec<u8>, v: u64) {
+    buf.extend_from_slice(&v.to_be_bytes());
+}
 fn be_u16(b: &[u8]) -> Option<u16> {
     b.get(..2).map(|x| u16::from_be_bytes([x[0], x[1]]))
 }
 fn be_u32(b: &[u8]) -> Option<u32> {
     b.get(..4)
         .map(|x| u32::from_be_bytes([x[0], x[1], x[2], x[3]]))
+}
+fn be_u64(b: &[u8]) -> Option<u64> {
+    b.get(..8)
+        .map(|x| u64::from_be_bytes([x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7]]))
 }
 
 impl IfbcModule {
@@ -1298,6 +1455,7 @@ impl IfbcModule {
         };
         m.strings.intern(unit);
         m.strings.intern(source_name);
+        m.seed_scalar_rows();
         Some(m)
     }
 
@@ -1306,20 +1464,66 @@ impl IfbcModule {
         self.strings.intern(s)
     }
 
+    /// D-38: write the `N_SCALAR_ROWS` scalar rows so **type index `0..=17` *is* the IFABI scalar
+    /// code**. That identity is what lets an `import_table` `u8` signature code and a `type_table`
+    /// `u32` index address one space. No-op once any row exists (including a decoded image, whose
+    /// producer owns the invariant). `size`/`align`/`flags` are the producer's payload: nothing is
+    /// claimed here, because a wrong layout number is worse than an empty one.
+    pub fn seed_scalar_rows(&mut self) {
+        if !self.types.is_empty() {
+            return;
+        }
+        for k in 0..N_SCALAR_ROWS {
+            let kind = TyKind::from_u32(k as u32).expect("the scalar block is 0..=17");
+            let name = self.strings.intern(kind.suffix());
+            self.types.push(TypeEntry::scalar_row(name, kind.as_u32()));
+        }
+    }
+
     /// Add (or reuse) a type-table row; identity is `(kind, name, a, b)` so interning is stable.
+    /// A scalar kind resolves to **its own code index**, which is what keeps the seeded block
+    /// from growing a second `i64` row.
     pub fn intern_type(&mut self, kind: TyKind, name: &str, a: u32, b: u32) -> u32 {
+        self.seed_scalar_rows();
+        if kind.is_scalar_code() && self.types[kind as usize].kind == kind.as_u32() {
+            return kind as u32;
+        }
         let name_idx = self.strings.intern(name);
         for (i, t) in self.types.iter().enumerate() {
-            if t.kind == kind.as_u8() && t.name == name_idx && t.a == a && t.b == b {
+            if t.kind == kind.as_u32() && t.name == name_idx && t.a == a && t.b == b {
                 return i as u32;
             }
         }
-        self.types.push(TypeEntry { kind: kind.as_u8(), name: name_idx, a, b });
+        self.types.push(TypeEntry {
+            kind: kind.as_u32(),
+            name: name_idx,
+            flags: 0,
+            size: 0,
+            align: 0,
+            fields: Vec::new(),
+            a,
+            b,
+        });
         (self.types.len() - 1) as u32
     }
 
+    /// Attach a field to a `type_table` row (the D.9 `field_off ty,field` target set).
+    pub fn add_type_field(&mut self, ty: u32, field_name: &str, off: u32, field_ty: u32) {
+        let name = self.strings.intern(field_name);
+        if let Some(t) = self.types.get_mut(ty as usize) {
+            t.fields.push(TypeField { name, off, ty: field_ty });
+        }
+    }
+
+    /// Stamp `#[repr(C)]` (`flags` bit 0), the precondition `field_off` is checked against.
+    pub fn set_type_repr_c(&mut self, ty: u32) {
+        if let Some(t) = self.types.get_mut(ty as usize) {
+            t.flags |= TF_REPR_C;
+        }
+    }
+
     pub fn ty_kind(&self, idx: u32) -> Option<TyKind> {
-        self.types.get(idx as usize).and_then(|t| TyKind::from_u8(t.kind))
+        self.types.get(idx as usize).and_then(|t| TyKind::from_u32(t.kind))
     }
 
     pub fn type_name(&self, idx: u32) -> Option<String> {
@@ -1328,49 +1532,57 @@ impl IfbcModule {
     }
 
     /// Register an `import_table` row for a host function, returning its index. The signature is
-    /// taken from `hosts`, which is what makes validation item 5 checkable.
+    /// taken from `hosts`, which is what makes validation item 5 checkable. The row is stamped
+    /// `IMP_SIGNED` because it only exists once the name has been checked against the IFABI table.
     pub fn intern_host(&mut self, hosts: &HostSigTable, name: &str) -> Option<u32> {
         let sig = hosts.get(name)?;
-        for (i, e) in self.imports.iter().enumerate() {
-            if e.kind == ImportKind::Host && self.strings.get(e.name).map(|s| s.as_str()) == Some(name)
-            {
-                return Some(i as u32);
-            }
+        // `nparams` is a `u8` on the wire (the loader's row shape); a signature that cannot be
+        // written must not be written partly.
+        if sig.params.len() > u8::MAX as usize {
+            return None;
+        }
+        self.seed_scalar_rows();
+        if let Some(i) = self.imports.iter().position(|e| {
+            e.kind == ImportKind::Host && self.strings.get(e.name).map(|s| s.as_str()) == Some(name)
+        }) {
+            return Some(i as u32);
         }
         let name_idx = self.strings.intern(name);
-        let params: Vec<u32> = sig
-            .params
-            .iter()
-            .map(|tk| self.intern_tykind(*tk))
-            .collect();
-        let ret_ty = self.intern_tykind(sig.ret);
+        // The signature codes address the seeded scalar block; intern the rows too so a
+        // `dump`/`verify` of the module can name them.
+        for k in sig.params.iter().chain(std::iter::once(&sig.ret)) {
+            let _ = self.intern_tykind(*k);
+        }
+        let params: Vec<u8> = sig.params.iter().map(|k| k.sig_code()).collect();
+        let ret_sig = sig.ret.sig_code();
         self.imports.push(ImportEntry {
             name: name_idx,
             kind: ImportKind::Host,
-            ifabi: self.ifabi,
-            ret_ty,
+            flags: IMP_SIGNED,
+            ret_sig,
             params,
             sig_hash: sig.sig_hash(),
         });
         Some((self.imports.len() - 1) as u32)
     }
 
-    /// Register an `import_table` row for an ingested Python module (scan item 3).
+    /// Register an `import_table` row for an ingested module (scan item 3). D-38 folds this side's
+    /// `PyModule`/`Infib` classes into `embed`: the source language is the header's `lang_tag`, and
+    /// an imported module is exactly "a unit the embed track reaches".
     pub fn intern_module_import(&mut self, name: &str) -> u32 {
-        if let Some(i) = self
-            .imports
-            .iter()
-            .position(|e| e.kind == ImportKind::PyModule && self.strings.get(e.name).map(|s| s.as_str()) == Some(name))
-        {
+        self.seed_scalar_rows();
+        if let Some(i) = self.imports.iter().position(|e| {
+            e.kind == ImportKind::Embed && self.strings.get(e.name).map(|s| s.as_str()) == Some(name)
+        }) {
             return i as u32;
         }
         let name_idx = self.strings.intern(name);
-        let ty = self.intern_type(TyKind::Instance, "dyn", NONE32, NONE32);
+        let _ = self.intern_tykind(TyKind::Dyn);
         self.imports.push(ImportEntry {
             name: name_idx,
-            kind: ImportKind::PyModule,
-            ifabi: self.ifabi,
-            ret_ty: ty,
+            kind: ImportKind::Embed,
+            flags: 0,
+            ret_sig: TyKind::Dyn.sig_code(),
             params: Vec::new(),
             sig_hash: 0,
         });
@@ -1382,45 +1594,56 @@ impl IfbcModule {
     }
 
     /// Append one function to `func_table`, returning its index. `code` must already have been
-    /// appended (by [`CodeBuilder::finish_into`]) so `code_off`/`code_len` are known.
+    /// appended (by [`CodeBuilder::finish_into`]) so `code_off`/`code_len` are known, and
+    /// `max_stack` is the producer's declared operand-stack ceiling (the height pass checks it).
     pub fn push_func(
         &mut self,
         name: &str,
         code_off: u32,
         code_len: u32,
         locals: u32,
+        max_stack: u32,
         params: &[TyKind],
         ret: TyKind,
         frame: u8,
-        flags: u8,
+        flags: u32,
     ) -> u32 {
+        self.seed_scalar_rows();
         let name_idx = self.strings.intern(name);
         let param_tys: Vec<u32> = params.iter().map(|k| self.intern_tykind(*k)).collect();
         let ret_idx = self.intern_tykind(ret);
         let sig_text = HostSig::canonical_text(&param_tys, &self.types, ret_idx);
         let sig_hash = HostSig::hash_text(&sig_text);
-        let sig_idx = self.strings.intern(&sig_text);
+        let sig_str = self.strings.intern(&sig_text);
+        // §7.8.3 item 4's `ret`/`ret.multi` match: a unit-shaped return pops nothing.
+        let ret_arity = if matches!(ret, TyKind::Unit | TyKind::Void | TyKind::Never) {
+            0
+        } else {
+            1
+        };
         self.funcs.push(FuncEntry {
-            name: name_idx,
             code_off,
             code_len,
             locals,
-            arity: params.len() as u32,
-            ret_ty: ret_idx,
-            sig: sig_idx,
+            max_stack,
+            nargs: params.len() as u32,
+            ret_arity,
+            ret_sig: ret.sig_code() as u32,
+            name: name_idx,
+            sig_str,
             sig_hash,
-            frame,
             flags,
+            frame_kind: frame as u32,
         });
         (self.funcs.len() - 1) as u32
     }
 
     // ------------------------------------------------------------------ hash + encode
 
-    /// The normalised module contents that `module_hash` is taken over: the seven regions with
-    /// their length prefixes, in container order, **excluding** the header (and therefore excluding
-    /// the hash field itself). `unit` and `source_name` are interned into the pool before encoding,
-    /// so they are covered too.
+    /// The normalised module contents that `module_hash` is taken over: the seven regions after the
+    /// header, in container order, **excluding** the header (and therefore excluding the hash field
+    /// itself). `unit` and `source_name` are interned into the pool before encoding, so they are
+    /// covered too.
     pub fn normalised(&self) -> Vec<u8> {
         let mut out = Vec::new();
         self.write_body_into(&mut out);
@@ -1438,7 +1661,7 @@ impl IfbcModule {
         self.module_hash = self.compute_module_hash();
     }
 
-    /// Full container bytes: the [`HEADER_LEN`]-byte header followed by the length-prefixed regions.
+    /// Full container bytes: the [`HEADER_LEN`]-byte header followed by the self-delimiting regions.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(HEADER_LEN + 256);
         out.extend_from_slice(MAGIC);
@@ -1452,66 +1675,83 @@ impl IfbcModule {
         out
     }
 
+    /// D-38: no region wrapper. Each region opens with its own count (`code` with its byte length),
+    /// exactly the walk `runtime/infy_ifbc.c::parse_sections` does.
     fn write_body_into(&self, out: &mut Vec<u8>) {
-        let start = out.len();
-        write_region(out, REGIONS[1], &self.encode_types());
-        write_region(out, REGIONS[2], &self.encode_imports());
-        write_region(out, REGIONS[3], &self.encode_funcs());
+        out.extend_from_slice(&self.encode_types());
+        out.extend_from_slice(&self.encode_imports());
+        out.extend_from_slice(&self.encode_funcs());
         let mut code = self.code.clone();
         while code.len() % 4 != 0 {
             code.push(0);
         }
-        write_region(out, REGIONS[4], &code);
-        write_region(out, REGIONS[5], &self.encode_lines());
-        write_region(out, REGIONS[6], &self.encode_exceptions());
-        write_region(out, REGIONS[7], &self.encode_pool());
-        let _ = start;
+        put_u32(out, code.len() as u32);
+        out.extend_from_slice(&code);
+        out.extend_from_slice(&self.encode_lines());
+        out.extend_from_slice(&self.encode_exceptions());
+        out.extend_from_slice(&self.encode_pool());
     }
 
+    /// `n u32` then `n × {name_str, kind, flags, size, align, nfields, payload_a, payload_b}` and
+    /// that row's `nfields × {name_str, off, ty}` (D-38's merged shape).
     fn encode_types(&self) -> Vec<u8> {
         let mut b = Vec::new();
         put_u32(&mut b, self.types.len() as u32);
         for t in &self.types {
-            b.push(t.kind);
             put_u32(&mut b, t.name);
+            put_u32(&mut b, t.kind);
+            put_u32(&mut b, t.flags);
+            put_u32(&mut b, t.size);
+            put_u32(&mut b, t.align);
+            put_u32(&mut b, t.fields.len() as u32);
             put_u32(&mut b, t.a);
             put_u32(&mut b, t.b);
-        }
-        b
-    }
-
-    fn encode_imports(&self) -> Vec<u8> {
-        let mut b = Vec::new();
-        put_u32(&mut b, self.imports.len() as u32);
-        for e in &self.imports {
-            put_u32(&mut b, e.name);
-            put_u16(&mut b, e.ifabi);
-            b.push(e.kind.as_u8());
-            b.push(e.params.len() as u8);
-            put_u32(&mut b, e.ret_ty);
-            put_u32(&mut b, e.sig_hash);
-            for p in &e.params {
-                put_u32(&mut b, *p);
+            for f in &t.fields {
+                put_u32(&mut b, f.name);
+                put_u32(&mut b, f.off);
+                put_u32(&mut b, f.ty);
             }
         }
         b
     }
 
+    /// `n u32` then `n × {name_str u32, kind u8, nparams u8, ret_sig u8, flags u8, sig_hash u32,
+    /// psigs: nparams × u8}` — the C row plus D-38's trailing signature digest.
+    fn encode_imports(&self) -> Vec<u8> {
+        let mut b = Vec::new();
+        put_u32(&mut b, self.imports.len() as u32);
+        for e in &self.imports {
+            put_u32(&mut b, e.name);
+            b.push(e.kind.as_u8());
+            b.push(e.params.len() as u8);
+            b.push(e.ret_sig);
+            b.push(e.flags);
+            put_u32(&mut b, e.sig_hash);
+            for p in &e.params {
+                b.push(*p);
+            }
+        }
+        b
+    }
+
+    /// `n_funcs u32`, `max_mem_bytes u64`, then 48-byte records in the loader's field order.
     fn encode_funcs(&self) -> Vec<u8> {
         let mut b = Vec::new();
         put_u32(&mut b, self.funcs.len() as u32);
+        put_u64(&mut b, self.max_mem_bytes);
         for f in &self.funcs {
-            put_u32(&mut b, f.name);
             put_u32(&mut b, f.code_off);
             put_u32(&mut b, f.code_len);
             put_u32(&mut b, f.locals);
-            put_u32(&mut b, f.arity);
-            put_u32(&mut b, f.ret_ty);
-            put_u32(&mut b, f.sig);
+            put_u32(&mut b, f.max_stack);
+            put_u32(&mut b, f.nargs);
+            put_u32(&mut b, f.ret_arity);
+            put_u32(&mut b, f.ret_sig);
+            put_u32(&mut b, f.name);
+            put_u32(&mut b, f.sig_str);
             put_u32(&mut b, f.sig_hash);
-            b.push(f.frame);
-            b.push(f.flags);
-            put_u16(&mut b, 0);
+            put_u32(&mut b, f.flags);
+            put_u32(&mut b, f.frame_kind);
         }
         b
     }
@@ -1551,13 +1791,6 @@ impl IfbcModule {
     }
 }
 
-/// `byte_len:u32 || bytes` — the region wrapper described at the top of this module.
-fn write_region(out: &mut Vec<u8>, name: &'static str, body: &[u8]) {
-    let _ = name;
-    put_u32(out, body.len() as u32);
-    out.extend_from_slice(body);
-}
-
 // ------------------------------------------------------------------------ host signatures
 
 /// One host (INFY-native) entry point a B-track frame may reach with `call.host`, or the signature
@@ -1590,21 +1823,20 @@ impl HostSig {
         self
     }
 
-    /// Canonical signature text `(i64, f64) -> dyn` — the byte form whose digest is compared
-    /// element-wise by validation item 5 (§7.8.3).
+    /// Canonical signature text `(i64, f64) -> dyn` — the byte form whose digest validation item 5
+    /// compares (§7.8.3). The names are the **scalar codes** the `import_table` row encodes
+    /// ([`TyKind::sig_code`]), not the static kinds: a container or instance *is* a boxed `dyn` on
+    /// the IFABI wire, so the text and the digest describe the same bytes the loader checks.
     pub fn canonical_text(params: &[u32], types: &[TypeEntry], ret: u32) -> String {
-        let pool = StringPool::new();
-        let ps: Vec<String> = params
-            .iter()
-            .map(|t| types.get(*t as usize).and_then(|e| TyKind::from_u8(e.kind)).map(|k| k.suffix()).unwrap_or("?").to_string())
-            .collect();
-        let _ = pool;
-        let r = types
-            .get(ret as usize)
-            .and_then(|e| TyKind::from_u8(e.kind))
-            .map(|k| k.suffix())
-            .unwrap_or("?");
-        format!("({}) -> {}", ps.join(", "), r)
+        let name_of = |idx: u32| -> &'static str {
+            types
+                .get(idx as usize)
+                .and_then(|e| TyKind::from_u32(e.kind))
+                .map(|k| sig_name(k.sig_code()))
+                .unwrap_or("?")
+        };
+        let ps: Vec<&str> = params.iter().map(|t| name_of(*t)).collect();
+        format!("({}) -> {}", ps.join(", "), name_of(ret))
     }
 
     /// `sha256(canonical text)` truncated to a big-endian `u32`, compared byte-wise at load.
@@ -1613,16 +1845,16 @@ impl HostSig {
         u32::from_be_bytes([d[0], d[1], d[2], d[3]])
     }
 
-    /// Signature digest computed from the declared kinds (no module tables needed).
+    /// Signature digest computed from the declared kinds (no module tables needed); the text is the
+    /// scalar-code form [`HostSig::canonical_text`] produces, so an `import_table` row's digest and
+    /// its `sig_text` render the same thing.
     pub fn sig_hash(&self) -> u32 {
-        let ps: Vec<String> = self.params.iter().map(|k| k.suffix().to_string()).collect();
-        let text = format!("({}) -> {}", ps.join(", "), self.ret.suffix());
-        HostSig::hash_text(&text)
+        HostSig::hash_text(&self.text())
     }
 
     pub fn text(&self) -> String {
-        let ps: Vec<String> = self.params.iter().map(|k| k.suffix().to_string()).collect();
-        format!("({}) -> {}", ps.join(", "), self.ret.suffix())
+        let ps: Vec<&str> = self.params.iter().map(|k| sig_name(k.sig_code())).collect();
+        format!("({}) -> {}", ps.join(", "), sig_name(self.ret.sig_code()))
     }
 
     /// The same signature under a different name — how `print` and `log` share one host entry.
@@ -1667,7 +1899,7 @@ impl HostSigTable {
     pub fn std_default() -> HostSigTable {
         use TyKind::*;
         let mut t = HostSigTable::new();
-        let dyn_ = Instance;
+        let dyn_ = Dyn;
         for (name, params, ret) in [
             ("std.io.log", vec![dyn_], Unit),
             ("std.io.warn", vec![dyn_], Unit),
@@ -1704,29 +1936,34 @@ impl HostSigTable {
         self
     }
 
-    /// Validation item 5 for one `import_table` row: it must be a host row, its `ifabi` must be the
-    /// module's, and its signature digest must equal the table's for the same name.
+    /// Validation item 5 for one `import_table` row: it must be a host row, the module's header
+    /// IFABI must be the table's, the row must carry the IFABI-signed stamp, every signature code
+    /// must be inside §2's closed set, and the digest must equal the table's for the same name
+    /// (`IFBC.md` §5.5 — all of it is `R-0708`).
     pub fn check_import(&self, m: &IfbcModule, idx: usize) -> Result<(), String> {
         let e = m
             .imports
             .get(idx)
             .ok_or_else(|| format!("import_table 无第 {idx} 项（校验项 5 → R-0708）"))?;
+        let name = m.strings.get(e.name).cloned().unwrap_or_default();
         if e.kind != ImportKind::Host {
             return Err(format!(
-                "call.host 目标 `{:?}` 不是 host 行（kind = {}）",
-                m.strings.get(e.name).cloned().unwrap_or_default(),
+                "call.host 目标 `{name}` 不是 host 行（kind = {}）",
                 e.kind.word()
             ));
         }
-        if e.ifabi != self.ifabi {
-            return Err(format!(
-                "host `{:?}` 的 IFABI-{} 与工具链 IFABI-{} 不符",
-                m.strings.get(e.name).cloned().unwrap_or_default(),
-                e.ifabi,
-                self.ifabi
-            ));
+        // D-38: no per-row `ifabi` field survives the merge — the header's is the module's version.
+        if m.ifabi != self.ifabi {
+            return Err(format!("模块头 IFABI-{} 与工具链 IFABI-{} 不符", m.ifabi, self.ifabi));
         }
-        let name = m.strings.get(e.name).cloned().unwrap_or_default();
+        if e.flags & IMP_SIGNED == 0 {
+            return Err(format!("host `{name}` 的 import 行缺 IFABI-signed 标记（IFBC.md §5.5）"));
+        }
+        for c in e.params.iter().chain(std::iter::once(&e.ret_sig)) {
+            if sig_kind(*c).is_none() {
+                return Err(format!("host `{name}` 的签名码 {c} 不在 §2 的封闭集内（>17 不可表达）"));
+            }
+        }
         let sig = self
             .entries
             .get(&name)
@@ -1747,8 +1984,9 @@ impl HostSigTable {
 
 // ------------------------------------------------------------------------ code builder
 
-/// Emits `opcode:u8 + 0..3 u32` big-endian instructions (D.1) into one function's code, tracking the
-/// offsets needed for back-patching jumps and for the `line_map`.
+/// Emits `opcode:u8` plus its `u32` operands big-endian (D.1) into one function's code, tracking the
+/// offsets needed for back-patching jumps, the `line_map`, and the operand-stack high-water mark
+/// that becomes `func_table.max_stack`.
 ///
 /// Offsets handed out and patched are **absolute offsets into the module `code` region**, because
 /// that is what a jump operand holds; `base` is where this function's code will land.
@@ -1759,10 +1997,12 @@ pub struct CodeBuilder {
     /// (code_off, line) pairs collected as instructions are emitted; §7.4 requires the mapping back
     /// to the original language line.
     marks: Vec<(u32, u32)>,
-    /// Instruction boundaries discovered while emitting, for the linearity self-check.
-    bounds: Vec<u32>,
     locals: u32,
     scratch_next: u32,
+    /// Running operand-stack height, and the peak so far (the declared ceiling D-38's `func_table`
+    /// record carries).
+    height: i64,
+    max_stack: u32,
 }
 
 /// A pending jump, patched once the target is known.
@@ -1780,9 +2020,10 @@ impl CodeBuilder {
             bytes: Vec::new(),
             base,
             marks: Vec::new(),
-            bounds: Vec::new(),
             locals: 0,
             scratch_next: 0,
+            height: 0,
+            max_stack: 0,
         }
     }
 
@@ -1815,6 +2056,13 @@ impl CodeBuilder {
         &self.marks
     }
 
+    /// Declared operand-stack ceiling for the function built so far: the peak of the running
+    /// height. `call.*` contribute their opcode-implied effect (no callee arity), so the number is
+    /// a **conservative upper bound** — never below what the loader's own height pass measures.
+    pub fn max_stack(&self) -> u32 {
+        self.max_stack
+    }
+
     /// Emit an instruction. `line` is the original-language line the emitted code came from and is
     /// what makes `R-0703` diagnostics point at Python/Lua source (§7.4).
     pub fn emit(&mut self, op: Op, operands: &[u32], line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
@@ -1825,19 +2073,53 @@ impl CodeBuilder {
                 given: operands.len(),
             });
         }
-        if matches!(op, Op::Switch) {
-            return Err(IfbcEncodeErr::SwitchNotSupported);
-        }
         let off = self.offset();
-        self.bounds.push(off);
         self.bytes.push(op.byte());
         for o in operands {
             put_u32(&mut self.bytes, *o);
         }
+        self.note_height(op, operands);
         if let Some(l) = line {
             self.marks.push((off, l));
         }
         Ok(off)
+    }
+
+    /// `switch n, [targets]` (D.4, pinned by D-38 (h)): the case count and its inline target table
+    /// are one instruction, so the linear pass stays single-and-forward.
+    pub fn switch(&mut self, targets: &[u32], line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
+        if targets.len() > MAX_SWITCH_CASES as usize {
+            return Err(IfbcEncodeErr::SwitchCaseCountTooLarge { given: targets.len() });
+        }
+        let off = self.offset();
+        self.bytes.push(Op::Switch.byte());
+        put_u32(&mut self.bytes, targets.len() as u32);
+        for t in targets {
+            put_u32(&mut self.bytes, *t);
+        }
+        self.note_height(Op::Switch, &[targets.len() as u32]);
+        if let Some(l) = line {
+            self.marks.push((off, l));
+        }
+        Ok(off)
+    }
+
+    fn note_height(&mut self, op: Op, operands: &[u32]) {
+        // The container forms size their own pop count from an operand, exactly like `effect`.
+        let (pops, pushes) = match op {
+            Op::NewList | Op::NewTuple | Op::NewSet => (operands[operands.len() - 1] as usize, 1),
+            Op::NewDict => (2 * operands[2] as usize, 1),
+            Op::ClosureNew => (operands[1] as usize, 1),
+            _ => op.stack_effect(),
+        };
+        self.height = self.height - pops as i64 + pushes as i64;
+        if self.height < 0 {
+            // Unbalanced emission: the verifier reports it, the ceiling only ever needs the peak.
+            self.height = 0;
+        }
+        if self.height > self.max_stack as i64 {
+            self.max_stack = self.height as u32;
+        }
     }
 
     /// Emit and return the absolute offset of the operand slot `i`, so the caller can back-patch.
@@ -1876,8 +2158,9 @@ impl CodeBuilder {
     pub fn stl(&mut self, slot: u32, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
         self.emit(Op::Stl, &[slot], line)
     }
-    pub fn push_pool(&mut self, pool: u32, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
-        self.emit(Op::Push, &[pool], line)
+    /// `push k,ty` — D-38 (d): a pool constant must carry its type, IFBC has no implicit literals.
+    pub fn push_pool(&mut self, pool: u32, ty: u32, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
+        self.emit(Op::Push, &[pool, ty], line)
     }
     pub fn push_b(&mut self, v: u32, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
         self.emit(Op::PushB, &[v], line)
@@ -1895,13 +2178,14 @@ impl CodeBuilder {
     pub fn tickloop(&mut self, quota: u32, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
         self.emit(Op::TickLoop, &[quota], line)
     }
-    /// D.3: mandatory immediately before `div`/`rem`.
-    pub fn guard_nonzero(&mut self, ty: u32, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
-        self.emit(Op::GuardNonzero, &[ty], line)
+    /// D.3: mandatory immediately before `div`/`rem`. D-38 (c): **no operands** — the type travels
+    /// on the guarded instruction's own operand 0, and D.3's adjacency check only inspects bytes.
+    pub fn guard_nonzero(&mut self, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
+        self.emit(Op::GuardNonzero, &[], line)
     }
-    /// D.3: mandatory immediately before `shl`/`shr`/`shr.a`.
-    pub fn guard_shift(&mut self, ty: u32, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
-        self.emit(Op::GuardShift, &[ty], line)
+    /// D.3: mandatory immediately before `shl`/`shr`/`shr.a`; 0 operands for the same reason.
+    pub fn guard_shift(&mut self, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
+        self.emit(Op::GuardShift, &[], line)
     }
     /// D.7 / UB-020: mandatory immediately before every `unbox.dyn`.
     pub fn is_dyn(&mut self, ty: u32, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
@@ -1910,8 +2194,18 @@ impl CodeBuilder {
     pub fn unbox_dyn(&mut self, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
         self.emit(Op::UnboxDyn, &[], line)
     }
-    pub fn box_dyn(&mut self, ty: u32, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
-        self.emit(Op::BoxDyn, &[ty], line)
+    /// D.7 / D-38 (f): `box.dyn` is the identity — a B-track value already *is* an `InfyDyn` — so it
+    /// takes no type operand.
+    pub fn box_dyn(&mut self, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
+        self.emit(Op::BoxDyn, &[], line)
+    }
+    /// `ldw i,ty` — D-38 (e): the annotation is operand 1 and must be `i64`/`u64`/`f64`.
+    pub fn ldw(&mut self, slot: u32, ty: u32, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
+        self.emit(Op::Ldw, &[slot, ty], line)
+    }
+    /// `field_off ty,field` — D-38 (g).
+    pub fn field_off(&mut self, ty: u32, field: u32, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
+        self.emit(Op::FieldOff, &[ty, field], line)
     }
     /// A D.3 family instruction: `opcode` + operand 0 = type index (DEV-IFBC-1).
     pub fn family(&mut self, op: Op, ty: u32, line: Option<u32>) -> Result<u32, IfbcEncodeErr> {
@@ -2025,7 +2319,9 @@ pub fn decode(bytes: &[u8]) -> Result<IfbcModule, IfbcDecodeErr> {
     };
     m.types = decode_types(&mut r)?;
     m.imports = decode_imports(&mut r)?;
-    m.funcs = decode_funcs(&mut r, func_count)?;
+    let (funcs, max_mem_bytes) = decode_funcs(&mut r, func_count)?;
+    m.funcs = funcs;
+    m.max_mem_bytes = max_mem_bytes;
     m.code = decode_code(&mut r, &m)?;
     m.lines = decode_lines(&mut r)?;
     m.exceptions = decode_exceptions(&mut r, &m)?;
@@ -2050,7 +2346,7 @@ pub fn decode(bytes: &[u8]) -> Result<IfbcModule, IfbcDecodeErr> {
 }
 
 /// Cross-table reference checks that only become possible once the pool is decoded: every `name`,
-/// `sig`, type, import, func and slot index must be inside its table (§7.8.3 items 1, 3 and 5).
+/// signature, type, import, func and slot index must be inside its table (§7.8.3 items 1, 3 and 5).
 fn validate_refs(m: &IfbcModule) -> Result<(), IfbcDecodeErr> {
     let plen = m.strings.len() as u32;
     let tlen = m.types.len() as u32;
@@ -2066,17 +2362,27 @@ fn validate_refs(m: &IfbcModule) -> Result<(), IfbcDecodeErr> {
                 return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: k, len: tlen });
             }
         }
+        for f in &t.fields {
+            if !in_bounds(f.name, plen) {
+                return Err(IfbcDecodeErr::PoolIndexOutOfRange { pool: f.name, len: plen });
+            }
+            if !in_bounds(f.ty, tlen) {
+                return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: f.ty, len: tlen });
+            }
+        }
     }
     for e in &m.imports {
         if !in_bounds(e.name, plen) {
             return Err(IfbcDecodeErr::PoolIndexOutOfRange { pool: e.name, len: plen });
         }
-        if !in_bounds(e.ret_ty, tlen) {
-            return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: e.ret_ty, len: tlen });
+        // D-38: a signature byte addresses the scalar block, so its range is §2's closed set
+        // (`> 17` is not expressible in IFABI), not the type-table length.
+        if sig_kind(e.ret_sig).is_none() {
+            return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: e.ret_sig as u32, len: 18 });
         }
         for p in &e.params {
-            if !in_bounds(*p, tlen) {
-                return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: *p, len: tlen });
+            if sig_kind(*p).is_none() {
+                return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: *p as u32, len: 18 });
             }
         }
     }
@@ -2084,11 +2390,11 @@ fn validate_refs(m: &IfbcModule) -> Result<(), IfbcDecodeErr> {
         if !in_bounds(f.name, plen) {
             return Err(IfbcDecodeErr::PoolIndexOutOfRange { pool: f.name, len: plen });
         }
-        if !in_bounds(f.sig, plen) {
-            return Err(IfbcDecodeErr::PoolIndexOutOfRange { pool: f.sig, len: plen });
+        if !in_bounds(f.sig_str, plen) {
+            return Err(IfbcDecodeErr::PoolIndexOutOfRange { pool: f.sig_str, len: plen });
         }
-        if !in_bounds(f.ret_ty, tlen) {
-            return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: f.ret_ty, len: tlen });
+        if sig_kind(f.ret_sig as u8).is_none() {
+            return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: f.ret_sig, len: 18 });
         }
     }
     for (i, f) in m.funcs.iter().enumerate() {
@@ -2126,108 +2432,122 @@ fn validate_refs(m: &IfbcModule) -> Result<(), IfbcDecodeErr> {
     Ok(())
 }
 
+/// D-38's merged row: the six `u32` the loader reads, then `payload_a`/`payload_b`, then the
+/// `nfields × {name_str, off, ty}` triples. Self-delimiting: the leading count is the region's.
 fn decode_types(r: &mut Reader) -> Result<Vec<TypeEntry>, IfbcDecodeErr> {
     let region = REGIONS[1];
-    let len = r.u32(region)? as usize;
-    let body = r.take(len, region)?;
-    let mut br = Reader::new(body);
-    let n = br.u32(region)?;
-    if (n as usize) * 13 + 4 > len {
-        return Err(IfbcDecodeErr::RegionCount { region, max: n });
-    }
-    let mut out = Vec::with_capacity(n.min(len.saturating_sub(4) as u32 / 13) as usize);
-    for _ in 0..n {
-        let kind = br.u8(region)?;
-        if TyKind::from_u8(kind).is_none() {
-            return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: kind as u32, len: 30 });
-        }
-        let name = br.u32(region)?;
-        let a = br.u32(region)?;
-        let b = br.u32(region)?;
-        out.push(TypeEntry { kind, name, a, b });
-    }
-    Ok(out)
-}
-
-fn decode_imports(r: &mut Reader) -> Result<Vec<ImportEntry>, IfbcDecodeErr> {
-    let region = REGIONS[2];
-    let len = r.u32(region)? as usize;
-    let body = r.take(len, region)?;
-    let mut br = Reader::new(body);
-    let n = br.u32(region)?;
-    if (n as usize) * 16 + 4 > len {
+    let n = r.u32(region)?;
+    if n > MAX_TABLE_ROWS {
         return Err(IfbcDecodeErr::RegionCount { region, max: n });
     }
     let mut out = Vec::new();
     for _ in 0..n {
-        let name = br.u32(region)?;
-        let ifabi = br.u16(region)?;
-        let kb = br.u8(region)?;
-        let kind = ImportKind::from_u8(kb).ok_or(IfbcDecodeErr::RegionTruncated {
-            region,
-            need: 1,
-            got: 0,
-        })?;
-        let arity = br.u8(region)?;
-        let ret_ty = br.u32(region)?;
-        let sig_hash = br.u32(region)?;
-        if (arity as usize) * 4 + 16 > len {
-            return Err(IfbcDecodeErr::RegionTruncated { region, need: 1, got: 0 });
+        let name = r.u32(region)?;
+        let kind = r.u32(region)?;
+        if TyKind::from_u32(kind).is_none() {
+            return Err(IfbcDecodeErr::TypeIndexOutOfRange { ty: kind, len: 33 });
         }
-        let mut params = Vec::with_capacity(arity as usize);
-        for _ in 0..arity {
-            params.push(br.u32(region)?);
+        let flags = r.u32(region)?;
+        let size = r.u32(region)?;
+        let align = r.u32(region)?;
+        let nfields = r.u32(region)?;
+        let a = r.u32(region)?;
+        let b = r.u32(region)?;
+        if nfields > MAX_TABLE_ROWS {
+            return Err(IfbcDecodeErr::RegionCount { region, max: nfields });
         }
-        out.push(ImportEntry { name, kind, ifabi, ret_ty, params, sig_hash });
+        let mut fields = Vec::new();
+        for _ in 0..nfields {
+            let fname = r.u32(region)?;
+            let off = r.u32(region)?;
+            let fty = r.u32(region)?;
+            fields.push(TypeField { name: fname, off, ty: fty });
+        }
+        out.push(TypeEntry { kind, name, flags, size, align, fields, a, b });
     }
     Ok(out)
 }
 
-fn decode_funcs(r: &mut Reader, func_count: u32) -> Result<Vec<FuncEntry>, IfbcDecodeErr> {
+/// D-38's merged row: `name_str u32, kind u8, nparams u8, ret_sig u8, flags u8, sig_hash u32`,
+/// then `nparams` signature-code bytes. No per-row `ifabi` — the header owns the version.
+fn decode_imports(r: &mut Reader) -> Result<Vec<ImportEntry>, IfbcDecodeErr> {
+    let region = REGIONS[2];
+    let n = r.u32(region)?;
+    if n > MAX_TABLE_ROWS {
+        return Err(IfbcDecodeErr::RegionCount { region, max: n });
+    }
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let name = r.u32(region)?;
+        let kind = ImportKind::from_u8(r.u8(region)?).ok_or(IfbcDecodeErr::RegionTruncated {
+            region,
+            need: 1,
+            got: 0,
+        })?;
+        let nparams = r.u8(region)?;
+        let ret_sig = r.u8(region)?;
+        let flags = r.u8(region)?;
+        let sig_hash = r.u32(region)?;
+        let mut params = Vec::with_capacity(nparams as usize);
+        for _ in 0..nparams {
+            params.push(r.u8(region)?);
+        }
+        out.push(ImportEntry { name, kind, flags, ret_sig, params, sig_hash });
+    }
+    Ok(out)
+}
+
+/// `n_funcs u32`, `max_mem_bytes u64`, then the 48-byte records (D-38's merge of C's ten fields and
+/// this side's signature text/digest). Returns the rows plus the §7.9 unit budget.
+fn decode_funcs(r: &mut Reader, func_count: u32) -> Result<(Vec<FuncEntry>, u64), IfbcDecodeErr> {
     let region = REGIONS[3];
-    let len = r.u32(region)? as usize;
-    let body = r.take(len, region)?;
-    let mut br = Reader::new(body);
-    let n = br.u32(region)?;
+    let n = r.u32(region)?;
     if n != func_count {
         return Err(IfbcDecodeErr::FuncCountMismatch { header: func_count, table: n });
     }
-    if (n as usize) * 36 + 4 > len {
+    if n > MAX_TABLE_ROWS {
         return Err(IfbcDecodeErr::RegionCount { region, max: n });
     }
-    let mut out = Vec::with_capacity(n as usize);
+    let max_mem_bytes = {
+        let bytes = r.take(8, region)?;
+        be_u64(bytes).unwrap_or(0)
+    };
+    let mut out = Vec::new();
     for _ in 0..n {
-        let name = br.u32(region)?;
-        let code_off = br.u32(region)?;
-        let code_len = br.u32(region)?;
-        let locals = br.u32(region)?;
-        let arity = br.u32(region)?;
-        let ret_ty = br.u32(region)?;
-        let sig = br.u32(region)?;
-        let sig_hash = br.u32(region)?;
-        let frame = br.u8(region)?;
+        let code_off = r.u32(region)?;
+        let code_len = r.u32(region)?;
+        let locals = r.u32(region)?;
+        let max_stack = r.u32(region)?;
+        let nargs = r.u32(region)?;
+        let ret_arity = r.u32(region)?;
+        let ret_sig = r.u32(region)?;
+        let name = r.u32(region)?;
+        let sig_str = r.u32(region)?;
+        let sig_hash = r.u32(region)?;
+        let flags = r.u32(region)?;
+        let frame_kind = r.u32(region)?;
         // D.8 names the values "0" and "coroutine" without a numeric table; this implementation
         // fixes 0 = stack + local window / 1 = coroutine and rejects anything else (deviation
         // D-23). The C loader applies the same range check.
-        if frame > FRAME_KIND_COROUTINE {
-            return Err(IfbcDecodeErr::BadFrameKind(frame));
+        if frame_kind > FRAME_KIND_COROUTINE as u32 {
+            return Err(IfbcDecodeErr::BadFrameKind(frame_kind as u8));
         }
-        let flags = br.u8(region)?;
-        let _ = br.u16(region)?;
         out.push(FuncEntry {
-            name,
             code_off,
             code_len,
             locals,
-            arity,
-            ret_ty,
-            sig,
+            max_stack,
+            nargs,
+            ret_arity,
+            ret_sig,
+            name,
+            sig_str,
             sig_hash,
-            frame,
             flags,
+            frame_kind,
         });
     }
-    Ok(out)
+    Ok((out, max_mem_bytes))
 }
 
 fn decode_code(r: &mut Reader, m: &IfbcModule) -> Result<Vec<u8>, IfbcDecodeErr> {
@@ -2256,18 +2576,15 @@ fn decode_code(r: &mut Reader, m: &IfbcModule) -> Result<Vec<u8>, IfbcDecodeErr>
 
 fn decode_lines(r: &mut Reader) -> Result<Vec<LineEntry>, IfbcDecodeErr> {
     let region = REGIONS[5];
-    let len = r.u32(region)? as usize;
-    let body = r.take(len, region)?;
-    let mut br = Reader::new(body);
-    let n = br.u32(region)?;
-    if (n as usize) * 8 + 4 > len {
+    let n = r.u32(region)?;
+    if n > MAX_LONG_ROWS {
         return Err(IfbcDecodeErr::RegionCount { region, max: n });
     }
-    let mut out = Vec::with_capacity(n as usize);
+    let mut out = Vec::new();
     let mut last = 0u32;
     for i in 0..n {
-        let code_off = br.u32(region)?;
-        let line = br.u32(region)?;
+        let code_off = r.u32(region)?;
+        let line = r.u32(region)?;
         if i > 0 && code_off < last {
             return Err(IfbcDecodeErr::LineMapUnsorted { at: code_off });
         }
@@ -2279,20 +2596,17 @@ fn decode_lines(r: &mut Reader) -> Result<Vec<LineEntry>, IfbcDecodeErr> {
 
 fn decode_exceptions(r: &mut Reader, m: &IfbcModule) -> Result<Vec<ExcEntry>, IfbcDecodeErr> {
     let region = REGIONS[6];
-    let len = r.u32(region)? as usize;
-    let body = r.take(len, region)?;
-    let mut br = Reader::new(body);
-    let n = br.u32(region)?;
-    if (n as usize) * 12 + 4 > len {
+    let n = r.u32(region)?;
+    if n > MAX_LONG_ROWS {
         return Err(IfbcDecodeErr::RegionCount { region, max: n });
     }
-    let mut out = Vec::with_capacity(n as usize);
+    let mut out = Vec::new();
     for i in 0..n {
-        let start = br.u32(region)?;
-        let end = br.u32(region)?;
-        let handler = br.u32(region)?;
-        let depth = br.u16(region)?;
-        let kind = ExcKind::from_u16(br.u16(region)?).ok_or(IfbcDecodeErr::ExcRangeInvalid {
+        let start = r.u32(region)?;
+        let end = r.u32(region)?;
+        let handler = r.u32(region)?;
+        let depth = r.u16(region)?;
+        let kind = ExcKind::from_u16(r.u16(region)?).ok_or(IfbcDecodeErr::ExcRangeInvalid {
             at: i as usize,
         })?;
         if end < start || (end as usize) > m.code.len() || (handler as usize) > m.code.len() {
@@ -2305,14 +2619,14 @@ fn decode_exceptions(r: &mut Reader, m: &IfbcModule) -> Result<Vec<ExcEntry>, If
 
 fn decode_pool(r: &mut Reader) -> Result<Vec<String>, IfbcDecodeErr> {
     let region = REGIONS[7];
-    let len = r.u32(region)? as usize;
-    let body = r.take(len, region)?;
-    let mut br = Reader::new(body);
-    let n = br.u32(region)?;
+    let n = r.u32(region)?;
+    if n > MAX_LONG_ROWS {
+        return Err(IfbcDecodeErr::RegionCount { region, max: n });
+    }
     let mut out = Vec::new();
     for i in 0..n {
-        let el = br.u32(region)? as usize;
-        let raw = br.take(el, region)?;
+        let el = r.u32(region)? as usize;
+        let raw = r.take(el, region)?;
         let s = std::str::from_utf8(raw)
             .map_err(|_| IfbcDecodeErr::BadUtf8InPool { pool: i })?
             .to_string();
@@ -2341,11 +2655,29 @@ pub fn instructions_of(m: &IfbcModule, func: usize) -> Result<Vec<(u32, Instr)>,
     while p < end {
         let byte = m.code[p];
         let op = Op::from_byte(byte).ok_or(IfbcDecodeErr::UnknownOpcode { byte, off: p as u32 })?;
-        let width = 1 + 4 * op.arity();
+        let fixed = 1 + 4 * op.arity();
+        if p + fixed > end {
+            return Err(IfbcDecodeErr::InstructionRunsPastFunc { op: op.base(), off: p as u32 });
+        }
+        // D-38 (h): `switch n` is the only opcode whose length depends on an operand value. The
+        // count is capped exactly like the loader's `insn_len`, so a hostile table cannot make this
+        // walk run away, and the inline targets are consumed with the instruction (never mistaken
+        // for executable code by the linear pass).
+        let mut extra = 0u32;
+        let mut width = fixed;
+        if op.is_variable_width() {
+            let n = be_u32(&m.code[p + 1..p + 5]).unwrap_or(0);
+            if n > MAX_SWITCH_CASES {
+                return Err(IfbcDecodeErr::SwitchCasesTooLarge { off: p as u32, n });
+            }
+            extra = n;
+            width = fixed + 4 * n as usize;
+        }
         if p + width > end {
             return Err(IfbcDecodeErr::InstructionRunsPastFunc { op: op.base(), off: p as u32 });
         }
         let mut instr = Instr::new(op);
+        instr.extra = extra;
         for i in 0..op.arity() {
             let q = p + 1 + i * 4;
             instr.ops[i] = be_u32(&m.code[q..q + 4]).unwrap_or(0);
@@ -2355,28 +2687,48 @@ pub fn instructions_of(m: &IfbcModule, func: usize) -> Result<Vec<(u32, Instr)>,
     }
     Ok(out)
 }
+
+/// The inline case table of the `switch` at `off` (empty for every other opcode). The targets live
+/// inside the instruction, so they are read from the code region rather than from `Instr::ops`.
+pub fn switch_targets(m: &IfbcModule, off: u32, ins: &Instr) -> Vec<u32> {
+    if ins.op != Op::Switch || ins.extra == 0 {
+        return Vec::new();
+    }
+    let base = off as usize + 1 + 4;
+    let end = base + 4 * ins.extra as usize;
+    if end > m.code.len() {
+        return Vec::new();
+    }
+    (0..ins.extra as usize)
+        .filter_map(|k| be_u32(&m.code[base + 4 * k..base + 4 * k + 4]))
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Instr {
     pub op: Op,
     pub ops: [u32; MAX_OPS],
+    /// Inline operand words that follow the opcode-implied ones — only `switch` uses this
+    /// (the case count), see [`switch_targets`].
+    pub extra: u32,
 }
 
 impl Instr {
     pub fn new(op: Op) -> Instr {
-        Instr { op, ops: [0; MAX_OPS] }
+        Instr { op, ops: [0; MAX_OPS], extra: 0 }
     }
     pub fn with(op: Op, a: u32) -> Instr {
-        Instr { op, ops: [a, 0, 0] }
+        Instr { op, ops: [a, 0, 0], extra: 0 }
     }
     pub fn with2(op: Op, a: u32, b: u32) -> Instr {
-        Instr { op, ops: [a, b, 0] }
+        Instr { op, ops: [a, b, 0], extra: 0 }
     }
     pub fn operands(&self) -> &[u32] {
         &self.ops[..self.op.arity()]
     }
-    /// Encoded width in bytes: `1 + 4 * arity` (D.1).
+    /// Encoded width in bytes: `1 + 4 * (arity + extra)` (D.1, plus D-38 (h) for `switch`).
     pub fn width(&self) -> usize {
-        1 + 4 * self.op.arity()
+        1 + 4 * (self.op.arity() + self.extra as usize)
     }
     /// Render `add.i64 3` given the module's tables.
     pub fn render(&self, m: &IfbcModule) -> String {
@@ -2421,6 +2773,8 @@ impl Instr {
             };
             s.push_str(&txt);
         }
+        // The `switch` case table lives inside the instruction and needs its code offset to read,
+        // so it is printed by the disassembler (`[0x…, 0x…]` after the count), not here.
         s
     }
 }
@@ -2445,7 +2799,7 @@ impl IfbcModule {
         let tag = self.lang.name().unwrap_or("UNKNOWN");
         o.push_str(&format!(
             "IFBC module  magic={}  ifbc_version={}  ifabi={}  lang_tag={}({:#06x})  cap={}  \
-             frame_kind={}  funcs={}  image_len={}\n",
+             frame_kind={}  funcs={}  max_mem_bytes={}  image_len={}\n",
             std::str::from_utf8(MAGIC).unwrap_or("?"),
             self.ifbc_version,
             self.ifabi,
@@ -2454,6 +2808,7 @@ impl IfbcModule {
             self.lang.cap_version,
             self.frame_kind,
             self.funcs.len(),
+            self.max_mem_bytes,
             self.encode().len()
         ));
         o.push_str(&format!("unit          = {:?}\n", self.unit));
@@ -2462,11 +2817,14 @@ impl IfbcModule {
             "module_hash   = sha256:{}\n",
             hex32(&self.module_hash)
         ));
-        o.push_str(&format!("regions       = {}\n", REGIONS.join(" | ")));
+        o.push_str(&format!(
+            "regions       = {}  (各区自定界, D-38)\n",
+            REGIONS.join(" | ")
+        ));
 
         o.push_str(&format!("\ntype_table ({}):\n", self.types.len()));
         for (i, t) in self.types.iter().enumerate() {
-            let k = TyKind::from_u8(t.kind).map(|k| k.suffix()).unwrap_or("?");
+            let k = TyKind::from_u32(t.kind).map(|k| k.suffix()).unwrap_or("?");
             let name = self.strings.get(t.name).cloned().unwrap_or_default();
             let kids: Vec<String> = [t.a, t.b]
                 .iter()
@@ -2474,39 +2832,52 @@ impl IfbcModule {
                 .map(|x| format!("ty#{x}"))
                 .collect();
             o.push_str(&format!(
-                "  #{i:<3} {k:<8} name={name:<10} {}",
+                "  #{i:<3} {k:<8} name={name:<10} kind={:<4} size={} align={} repr_c={} \
+                 nfields={} {}\n",
+                t.kind,
+                t.size,
+                t.align,
+                (t.flags & TF_REPR_C) != 0,
+                t.fields.len(),
                 kids.join(" ")
             ));
-            if let Some(dt) = TyKind::from_u8(t.kind).and_then(|k| k.dyn_tag()) {
-                o.push_str(&format!("InfyDynTag={dt}"));
+            if let Some(dt) = TyKind::from_u32(t.kind).and_then(|k| k.dyn_tag()) {
+                o.push_str(&format!("      InfyDynTag={dt}\n"));
             }
-            o.push('\n');
+            for (j, fld) in t.fields.iter().enumerate() {
+                let fname = self.strings.get(fld.name).cloned().unwrap_or_default();
+                o.push_str(&format!("      field #{j} {fname:?} off={} ty=#{}\n", fld.off, fld.ty));
+            }
         }
 
         o.push_str(&format!("\nimport_table ({}):\n", self.imports.len()));
         for (i, e) in self.imports.iter().enumerate() {
             o.push_str(&format!(
-                "  #{i:<3} {:<6} ifabi={} {:?}  {}  sig_hash={:#010x}\n",
+                "  #{i:<3} {:<6} signed={} {:?}  {}  sig_hash={:#010x}\n",
                 e.kind.word(),
-                e.ifabi,
+                (e.flags & IMP_SIGNED) != 0,
                 self.strings.get(e.name).cloned().unwrap_or_default(),
-                e.sig_text(&self.strings, &self.types),
+                e.sig_text(),
                 e.sig_hash
             ));
         }
 
         for (i, f) in self.funcs.iter().enumerate() {
-            let frame = if f.frame == FRAME_KIND_COROUTINE { "coroutine" } else { "stack" };
+            let frame = if f.frame_kind == FRAME_KIND_COROUTINE as u32 { "coroutine" } else { "stack" };
             o.push_str(&format!(
-                "\nfunc #{i} {:?}  code=[{:#06x},{:#06x})  locals={}  arity={}  frame={frame}  \
-                 flags={:#04x}  sig={:?}  sig_hash={:#010x}\n",
+                "\nfunc #{i} {:?}  code=[{:#06x},{:#06x})  locals={}  max_stack={}  nargs={}  \
+                 ret_arity={}  ret_sig={}  frame={frame}  flags={:#04x}  sig={:?}  \
+                 sig_hash={:#010x}\n",
                 self.strings.get(f.name).cloned().unwrap_or_default(),
                 f.code_off,
                 f.code_off + f.code_len,
                 f.locals,
-                f.arity,
+                f.max_stack,
+                f.nargs,
+                f.ret_arity,
+                sig_name(f.ret_sig as u8),
                 f.flags,
-                self.strings.get(f.sig).cloned().unwrap_or_default(),
+                self.strings.get(f.sig_str).cloned().unwrap_or_default(),
                 f.sig_hash
             ));
             let per = self.line_per_code_off();
@@ -2519,10 +2890,20 @@ impl IfbcModule {
                             .find(|(o, _)| *o <= off)
                             .map(|(_, l)| *l)
                             .unwrap_or(0);
+                        let text = match switch_targets(self, off, &ins).is_empty() {
+                            false => {
+                                let t: Vec<String> = switch_targets(self, off, &ins)
+                                    .iter()
+                                    .map(|x| format!("{x:#06x}"))
+                                    .collect();
+                                format!("{} [{}]", ins.render(self), t.join(", "))
+                            }
+                            true => ins.render(self),
+                        };
                         o.push_str(&format!(
                             "  {off:#06x}  {:02x}  {:<22} ; line {line}\n",
                             ins.op.byte(),
-                            ins.render(self),
+                            text,
                         ));
                     }
                 }
@@ -2603,33 +2984,43 @@ pub fn all_ops() -> Vec<Op> {
 }
 
 impl TyKind {
-    /// Inverse of [`TyKind::suffix`]; accepts `dyn`/`object` as the B-track boxed value.
+    /// Inverse of [`TyKind::suffix`]; `object`/`instance-as-dyn` stay accepted as the B-track
+    /// boxed value, whose name in the §2 scalar table is `dyn`.
     pub fn from_suffix(s: &str) -> Option<TyKind> {
         let k = match s {
+            "void" => TyKind::Void,
             "unit" => TyKind::Unit,
-            "i64" | "int" => TyKind::Int,
-            "f64" | "float" => TyKind::Float,
-            "str" => TyKind::Str,
-            "bytes" => TyKind::Bytes,
-            "list" => TyKind::List,
-            "tuple" => TyKind::Tuple,
-            "dict" => TyKind::Dict,
             "bool" => TyKind::Bool,
-            "func" => TyKind::Func,
-            "coro" => TyKind::Coro,
-            "object" | "dyn" | "instance" => TyKind::Instance,
+            "char" => TyKind::Char,
             "i8" => TyKind::I8,
             "i16" => TyKind::I16,
             "i32" => TyKind::I32,
+            "i64" | "int" => TyKind::Int,
             "u8" => TyKind::U8,
             "u16" => TyKind::U16,
             "u32" => TyKind::U32,
             "u64" => TyKind::U64,
             "f32" => TyKind::F32,
-            "char" => TyKind::Char,
+            "f64" | "float" => TyKind::Float,
+            "str" => TyKind::Str,
+            "bytes" => TyKind::Bytes,
+            "ptr" => TyKind::Ptr,
+            "dyn" | "object" => TyKind::Dyn,
+            "list" => TyKind::List,
+            "tuple" => TyKind::Tuple,
+            "dict" => TyKind::Dict,
+            "func" => TyKind::Func,
+            "coro" => TyKind::Coro,
+            "instance" => TyKind::Instance,
+            "ref" => TyKind::Ref,
+            "box" => TyKind::Box,
+            "rc" => TyKind::Rc,
+            "arc" => TyKind::Arc,
+            "option" => TyKind::Option,
+            "result" => TyKind::Result,
+            "never" => TyKind::Never,
             "usize" => TyKind::Usize,
             "isize" => TyKind::Isize,
-            "never" => TyKind::Never,
             _ => return None,
         };
         Some(k)
@@ -2763,11 +3154,22 @@ fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<Ve
                 );
             }
         }
+        // D-38 (h): `switch` is legal, so its inline table is checked like any other target set —
+        // every case must land on an instruction boundary of this function.
         if matches!(ins.op, Op::Switch) {
-            push(
-                out,
-                VerifyViolation::new("R-0704", fi as u32, *off, "switch 的变长目标表使指令流不可线性扫描".to_string()),
-            );
+            for t in switch_targets(m, *off, ins) {
+                if !boundaries.contains(&t) || t < f.code_off || t >= f_end {
+                    push(
+                        out,
+                        VerifyViolation::new(
+                            "R-0704",
+                            fi as u32,
+                            *off,
+                            format!("switch 的某个 case 目标 {t:#06x} 不是本函数内的指令边界"),
+                        ),
+                    );
+                }
+            }
         }
         if matches!(ins.op, Op::LdNull) {
             push(out, VerifyViolation::new("R-0706", fi as u32, *off, "ldnull 被禁用：INFY 无 null，须用 Option".to_string()));
@@ -2804,6 +3206,19 @@ fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<Ve
                 break;
             }
             h = h - pops as i64 + pushes as i64;
+            // D-38: `max_stack` is on the wire now, so item 2 checks the height against the declared
+            // ceiling exactly like the loader does (`R-0705`).
+            if h > f.max_stack as i64 {
+                push(
+                    out,
+                    VerifyViolation::new(
+                        "R-0705",
+                        fi as u32,
+                        off,
+                        format!("{} 之后栈高 {h} 超过声明上限 max_stack={}", ins.op.base(), f.max_stack),
+                    ),
+                );
+            }
             check_operands(m, &ins, f, off, fi, out);
             check_adjacency(m, &instrs, idx, off, fi, out);
 
@@ -2814,6 +3229,12 @@ fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<Ve
                 }
                 Op::Br | Op::Brf => {
                     push_block(&mut height, &mut work, ins.ops[0], h, out, fi, off, ins.op.base());
+                }
+                // every case target is a block entry, and so is the byte after the table (D-38 (h)).
+                Op::Switch => {
+                    for t in switch_targets(m, off, &ins) {
+                        push_block(&mut height, &mut work, t, h, out, fi, off, "switch case");
+                    }
                 }
                 Op::Ret | Op::ThrowInf => {
                     if matches!(ins.op, Op::Ret) && h < 1 {
@@ -2830,14 +3251,6 @@ fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<Ve
                         );
                     }
                     break;
-                }
-                Op::Yield | Op::YieldFrom => {
-                    if f.frame != FRAME_KIND_COROUTINE {
-                        push(
-                            out,
-                            VerifyViolation::new("R-0707", fi as u32, off, format!("{} 出现在非协程帧", ins.op.base())),
-                        );
-                    }
                 }
                 _ => {}
             }
@@ -2886,12 +3299,134 @@ fn verify_func(m: &IfbcModule, hosts: &HostSigTable, fi: usize, out: &mut Vec<Ve
     } else {
         push(out, VerifyViolation::new("R-0707", fi as u32, f.code_off, "函数无代码".to_string()));
     }
-    if f.ret_ty != NONE32 && m.ty_kind(f.ret_ty).is_none() {
-        push(out, VerifyViolation::new("R-0706", fi as u32, f.code_off, "返回类型索引越界".to_string()));
+    // ---- item 4 (the mirror of `infy_ifbc.c::check_frame`): coroutine-only instructions need a
+    // coroutine frame, and the return shape the code actually takes must agree with the declared
+    // `ret_arity` D-38 put in `func_table`.
+    let mut ret_arity_seen: i64 = -1;
+    for (off, ins) in &instrs {
+        if matches!(ins.op, Op::Yield | Op::YieldFrom | Op::FrameEnter | Op::FrameExit)
+            && f.frame_kind != FRAME_KIND_COROUTINE as u32
+        {
+            push(
+                out,
+                VerifyViolation::new(
+                    "R-0707",
+                    fi as u32,
+                    *off,
+                    format!("{} 出现在非协程帧（frame_kind={}）", ins.op.base(), f.frame_kind),
+                ),
+            );
+        }
+        match ins.op {
+            Op::Ret => {
+                if ret_arity_seen < 0 {
+                    ret_arity_seen = 1;
+                } else if ret_arity_seen != 1 {
+                    push(
+                        out,
+                        VerifyViolation::new("R-0707", fi as u32, *off, "各返回路径的返回元数不一致".to_string()),
+                    );
+                }
+            }
+            Op::RetMulti => {
+                let n = ins.ops[0] as i64;
+                if ret_arity_seen < 0 {
+                    ret_arity_seen = n;
+                } else if ret_arity_seen != n {
+                    push(
+                        out,
+                        VerifyViolation::new(
+                            "R-0707",
+                            fi as u32,
+                            *off,
+                            format!("ret.multi 的 {n} 与先前返回路径的 {ret_arity_seen} 不一致"),
+                        ),
+                    );
+                }
+                if n as u32 != f.ret_arity {
+                    push(
+                        out,
+                        VerifyViolation::new(
+                            "R-0707",
+                            fi as u32,
+                            *off,
+                            format!("ret.multi {n} != 声明的 ret_arity={}", f.ret_arity),
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    if f.ret_arity > 1 && ret_arity_seen == 1 {
+        push(
+            out,
+            VerifyViolation::new(
+                "R-0707",
+                fi as u32,
+                f.code_off,
+                format!("声明返回元数 {} 但代码只返回单值", f.ret_arity),
+            ),
+        );
+    }
+    if f.ret_arity == 1 && ret_arity_seen > 1 {
+        push(
+            out,
+            VerifyViolation::new(
+                "R-0707",
+                fi as u32,
+                f.code_off,
+                format!("声明标量返回但代码返回 {} 元组", ret_arity_seen),
+            ),
+        );
+    }
+    // `ret_sig` is a scalar code (§2), not a type index, since D-38 merged the record.
+    if sig_kind(f.ret_sig as u8).is_none() {
+        push(
+            out,
+            VerifyViolation::new(
+                "R-0706",
+                fi as u32,
+                f.code_off,
+                format!("返回签名码 {} 不在 §2 的封闭集内", f.ret_sig),
+            ),
+        );
     }
 
     // ---- item 5: every host call target must exist and match IFABI
     for (off, ins) in &instrs {
+        if ins.op == Op::CallEmbed {
+            // §5.5: the loader compares the row's kind against the call site (R-0708). `call.embed`
+            // itself stays rejected by `effect` (this side cannot prove its height), but the row it
+            // names is still checked, so a wrong-kind row is reported here rather than silently
+            // reaching the runtime.
+            let idx = ins.ops[0] as usize;
+            match m.imports.get(idx) {
+                None => push(
+                    out,
+                    VerifyViolation::new(
+                        "R-0708",
+                        fi as u32,
+                        *off,
+                        format!("call.embed 目标 #{idx} 不在 import_table 内"),
+                    ),
+                ),
+                Some(e) if e.kind != ImportKind::Embed => push(
+                    out,
+                    VerifyViolation::new(
+                        "R-0708",
+                        fi as u32,
+                        *off,
+                        format!(
+                            "call.embed 目标 {:?} 不是 embed 行（kind = {}）",
+                            m.strings.get(e.name).cloned().unwrap_or_default(),
+                            e.kind.word()
+                        ),
+                    ),
+                ),
+                Some(_) => {}
+            }
+        }
         if ins.op == Op::CallHost {
             let idx = ins.ops[0] as usize;
             if let Err(msg) = hosts.check_import(m, idx) {
@@ -2959,10 +3494,7 @@ fn effect(
         }
         Op::ClosureNew => (ins.ops[1] as usize, 1),
         Op::CallStat => match m.funcs.get(ins.ops[0] as usize) {
-            Some(t) => (
-                t.arity as usize,
-                if m.ty_kind(t.ret_ty) == Some(TyKind::Unit) { 0 } else { 1 },
-            ),
+            Some(t) => (t.nargs as usize, if t.ret_arity == 0 { 0 } else { 1 }),
             None => {
                 push(
                     out,
@@ -2978,18 +3510,38 @@ fn effect(
         },
         Op::TailCallStat => match m.funcs.get(ins.ops[0] as usize) {
             Some(t) => {
-                if Some(t.locals) != m.funcs.get(fi).map(|x| x.locals) {
+                // D-22: a load-time "boundary" finding is R-0707, and R-0709 belongs only to the
+                // run-time arena check. The comparison set is the C loader's (`check_boundary`).
+                let cur = m.funcs.get(fi);
+                let incompatible = cur
+                    .map(|c| {
+                        c.locals != t.locals
+                            || c.max_stack != t.max_stack
+                            || c.nargs != t.nargs
+                            || c.ret_arity != t.ret_arity
+                            || c.frame_kind != t.frame_kind
+                    })
+                    .unwrap_or(false);
+                if incompatible {
                     push(
                         out,
                         VerifyViolation::new(
-                            "R-0709",
+                            "R-0707",
                             fi as u32,
                             off,
-                            "tailcall.stat 的帧尺寸与调用者不兼容（校验项 4 / 边界）".to_string(),
+                            format!(
+                                "tailcall.stat 到 #{} 的帧尺寸不兼容（locals {}/{}, max_stack {}/{}, nargs {}/{}, ret_arity {}/{}, frame {}/{}）",
+                                ins.ops[0],
+                                m.funcs.get(fi).map(|c| c.locals).unwrap_or(0), t.locals,
+                                m.funcs.get(fi).map(|c| c.max_stack).unwrap_or(0), t.max_stack,
+                                m.funcs.get(fi).map(|c| c.nargs).unwrap_or(0), t.nargs,
+                                m.funcs.get(fi).map(|c| c.ret_arity).unwrap_or(0), t.ret_arity,
+                                m.funcs.get(fi).map(|c| c.frame_kind).unwrap_or(0), t.frame_kind,
+                            ),
                         ),
                     );
                 }
-                (t.arity as usize, 0)
+                (t.nargs as usize, 0)
             }
             None => (0, 0),
         },
@@ -3000,7 +3552,11 @@ fn effect(
                 }
                 (
                     x.params.len(),
-                    if m.ty_kind(x.ret_ty) == Some(TyKind::Unit) { 0 } else { 1 },
+                    if matches!(sig_kind(x.ret_sig), Some(TyKind::Unit) | Some(TyKind::Void)) {
+                        0
+                    } else {
+                        1
+                    },
                 )
             }
             None => {
@@ -3075,7 +3631,9 @@ fn check_operands(m: &IfbcModule, ins: &Instr, f: &FuncEntry, off: u32, fi: usiz
             _ => {}
         }
     }
-    if ins.op.is_typed_family() || matches!(ins.op, Op::GuardNonzero | Op::GuardShift) {
+    // D.3's families carry their type in operand 0. Since D-38 (c) the two guards have no operand
+    // at all — D.3's adjacency rule only ever inspects the previous byte.
+    if ins.op.is_typed_family() {
         match m.ty_kind(ins.ops[0]) {
             // `not` is D.3's boolean family member; every other family needs a numeric suffix.
             Some(TyKind::Bool) if ins.op == Op::Not => {}
@@ -3095,7 +3653,27 @@ fn check_operands(m: &IfbcModule, ins: &Instr, f: &FuncEntry, off: u32, fi: usiz
             ),
         }
     }
-    if matches!(ins.op, Op::IsDyn | Op::CastDyn | Op::BoxDyn) {
+    // D-38 (e): `ldw i,ty`'s annotation must be one of the three wide scalars the loader accepts —
+    // `i64`(7) / `u64`(11) / `f64`(13) in the §2 code space.
+    if ins.op == Op::Ldw {
+        match m.ty_kind(ins.ops[1]) {
+            Some(k) if matches!(k, TyKind::Int | TyKind::U64 | TyKind::Float) => {}
+            Some(k) => push(
+                out,
+                VerifyViolation::new(
+                    "R-0706",
+                    fi as u32,
+                    off,
+                    format!("ldw 的宽类型注解 {} 只能是 i64/u64/f64（§2 的码表）", k.suffix()),
+                ),
+            ),
+            None => push(
+                out,
+                VerifyViolation::new("R-0706", fi as u32, off, "ldw 的类型注解索引非法".to_string()),
+            ),
+        }
+    }
+    if matches!(ins.op, Op::IsDyn | Op::CastDyn) {
         match m.ty_kind(ins.ops[0]) {
             Some(k) if k.dyn_tag().is_some() => {}
             Some(k) => push(
@@ -3108,6 +3686,40 @@ fn check_operands(m: &IfbcModule, ins: &Instr, f: &FuncEntry, off: u32, fi: usiz
                 ),
             ),
             None => push(out, VerifyViolation::new("R-0710", fi as u32, off, "dyn 指令的类型索引非法".to_string())),
+        }
+    }
+    // D-38 (g) + `IFBC.md` §5's extras: `field_off ty,field` needs a `repr(C)` row and an in-range
+    // field index. Non-`repr(C)` is `R-0713`, the range failure is `R-0706`.
+    if ins.op == Op::FieldOff {
+        match m.types.get(ins.ops[0] as usize) {
+            None => push(
+                out,
+                VerifyViolation::new("R-0706", fi as u32, off, "field_off 的类型索引越界".to_string()),
+            ),
+            Some(t) => {
+                if t.flags & TF_REPR_C == 0 {
+                    push(
+                        out,
+                        VerifyViolation::new(
+                            "R-0713",
+                            fi as u32,
+                            off,
+                            "field_off 作用于非 #[repr(C)] 的类型（D.9 / R_FIELD_OFF_REPR）".to_string(),
+                        ),
+                    );
+                }
+                if ins.ops[1] as usize >= t.fields.len() {
+                    push(
+                        out,
+                        VerifyViolation::new(
+                            "R-0706",
+                            fi as u32,
+                            off,
+                            format!("field_off 的字段索引 {} 超出该行的 {nfields} 个字段", ins.ops[1], nfields = t.fields.len()),
+                        ),
+                    );
+                }
+            }
         }
     }
 }
@@ -3139,15 +3751,16 @@ fn check_adjacency(
         }
     };
     match ins.op {
+        // D-38 (c): the guards carry no operand, so adjacency is the byte test the loader does.
         Op::Div | Op::Rem => need(
             "guard.nonzero",
             "R-0706",
-            prev.map(|p| p.op == Op::GuardNonzero && p.ops[0] == ins.ops[0]).unwrap_or(false),
+            prev.map(|p| p.op == Op::GuardNonzero).unwrap_or(false),
         ),
         Op::Shl | Op::Shr | Op::ShrA => need(
             "guard.shift",
             "R-0706",
-            prev.map(|p| p.op == Op::GuardShift && p.ops[0] == ins.ops[0]).unwrap_or(false),
+            prev.map(|p| p.op == Op::GuardShift).unwrap_or(false),
         ),
         Op::UnboxDyn => need(
             "is.dyn",
@@ -3171,7 +3784,8 @@ mod tests {
     /// guards, the D.7 tag checkpoints, the line map and the exception table.
     fn sample() -> IfbcModule {
         let mut m = IfbcModule::new_unit("CPY-313", 1, "__infy_unit__", "b_track/demo.py").unwrap();
-        let ty_i = m.intern_type(TyKind::Int, "i64", NONE32, NONE32);
+        // D-38: index 0..=17 *is* the scalar code, so `i64` is 7 without interning anything.
+        let ty_i = TyKind::Int as u32;
         let k2 = m.intern("2");
         let k1 = m.intern("1");
         let hosts = HostSigTable::std_default();
@@ -3183,14 +3797,16 @@ mod tests {
         b.emit(Op::Push, &[k2, ty_i], Some(1)).unwrap();
         b.emit(Op::IsDyn, &[ty_i], Some(1)).unwrap();
         b.emit(Op::UnboxDyn, &[], Some(1)).unwrap();
-        b.emit(Op::GuardNonzero, &[ty_i], Some(1)).unwrap();
+        // D-38 (c): the guards carry no operand; D-38 (f): neither does `box.dyn`.
+        b.emit(Op::GuardNonzero, &[], Some(1)).unwrap();
         b.emit(Op::Div, &[ty_i], Some(1)).unwrap();
-        b.emit(Op::BoxDyn, &[ty_i], Some(1)).unwrap();
+        b.emit(Op::BoxDyn, &[], Some(1)).unwrap();
         b.emit(Op::Push, &[k1, ty_i], Some(1)).unwrap();
         b.emit(Op::TickLoop, &[TICKLOOP_TEST], Some(2)).unwrap();
         b.emit(Op::Jmp, &[0], Some(2)).unwrap();
         b.emit(Op::Ret, &[], Some(3)).unwrap();
         // the marks belong to the builder, and `finish_into` consumes it, so snapshot them first
+        let max_stack = b.max_stack();
         let lines: Vec<LineEntry> = b.marks().iter().map(|(o, l)| LineEntry { code_off: *o, line: *l }).collect();
         let (off, len) = b.finish_into(&mut m);
         m.lines = lines;
@@ -3207,8 +3823,9 @@ mod tests {
             off,
             len,
             2,
-            &[TyKind::Instance],
-            TyKind::Instance,
+            max_stack,
+            &[TyKind::Dyn],
+            TyKind::Dyn,
             0,
             F_ENTRY,
         );
@@ -3216,15 +3833,53 @@ mod tests {
         m
     }
 
-    fn find_instr(m: &IfbcModule, op: Op) -> usize {
-        for i in 0..m.funcs.len() {
-            for (off, ins) in instructions_of(m, i).unwrap() {
-                if ins.op == op {
-                    return off as usize;
-                }
+    /// Emit one function's body into `m` and return `(code_off, code_len, max_stack)`. A `Switch`
+    /// entry passes its **case targets** (the count is written from the list length), which is the
+    /// only variable-width form (D-38 (h)).
+    fn build_into(m: &mut IfbcModule, locals: u32, body: &[(Op, Vec<u32>)]) -> (u32, u32, u32) {
+        let mut b = CodeBuilder::new(m.code.len() as u32);
+        b.set_locals(locals);
+        for (op, ops) in body {
+            if *op == Op::Switch && ops.len() != 1 {
+                b.switch(ops, Some(1)).expect("switch");
+            } else {
+                b.emit(*op, ops, Some(1)).expect("emit");
             }
         }
-        panic!("no {op:?} in the sample")
+        let max_stack = b.max_stack();
+        let marks: Vec<(u32, u32)> = b.marks().to_vec();
+        let (off, len) = b.finish_into(m);
+        for (o, l) in marks {
+            m.lines.push(LineEntry { code_off: o, line: l });
+        }
+        (off, len, max_stack)
+    }
+
+    /// A one-function module whose body is `body`, returning `ret`.
+    fn one_func(locals: u32, body: &[(Op, Vec<u32>)], ret: TyKind) -> IfbcModule {
+        let mut m = IfbcModule::new_unit("CPY-313", 1, "u", "s.py").unwrap();
+        let (off, len, ms) = build_into(&mut m, locals, body);
+        m.push_func("u", off, len, locals, ms, &[], ret, 0, F_ENTRY);
+        m.seal();
+        m
+    }
+
+    /// Every `R-07xx` a module draws from the build-time verifier (warnings dropped: W-0705 is a
+    /// notice by §7.8.3 and would fire on every hand-written body).
+    fn r_codes(m: &IfbcModule) -> Vec<&'static str> {
+        verify(m, &HostSigTable::std_default(), true)
+            .into_iter()
+            .filter(|v| v.code.starts_with('R'))
+            .map(|v| v.code)
+            .collect()
+    }
+
+    fn r_reports(m: &IfbcModule) -> Vec<String> {
+        verify(m, &HostSigTable::std_default(), true)
+            .into_iter()
+            .filter(|v| v.code.starts_with('R'))
+            .map(|v| v.render())
+            .collect()
     }
 
     #[test]
@@ -3240,6 +3895,378 @@ mod tests {
         assert_eq!(d.strings.entries(), m.strings.entries());
         assert_eq!(d.lines, m.lines);
         assert_eq!(d.exceptions, m.exceptions);
+    }
+
+    /// D-38 (a): the regions are self-delimiting — nothing between the header and `type_table`'s own
+    /// `u32 n_types`, and every region's extent follows from its record shape. This is the byte
+    /// layout `runtime/infy_ifbc.c::parse_sections` walks, so the offsets are arithmetic, not a
+    /// captured dump: type = 8 u32/row, import = 13 + nparams, func = 4 + 8 + 48/row.
+    #[test]
+    fn regions_are_self_delimiting_exactly_where_the_loader_reads_them() {
+        let m = sample();
+        let img = m.encode();
+        // 18 seeded scalar rows, no extras: `i64`/`dyn`/`unit` all resolve inside the block.
+        assert_eq!(m.types.len(), N_SCALAR_ROWS);
+        let n_types = u32::from_be_bytes([img[47], img[48], img[49], img[50]]);
+        assert_eq!(n_types, 18, "type_table opens with its own count at the header end");
+        let type_len = 4 + 18 * 32;
+        let import_at = HEADER_LEN + type_len;
+        assert_eq!(
+            u32::from_be_bytes([img[import_at], img[import_at + 1], img[import_at + 2], img[import_at + 3]]),
+            1,
+            "import_table follows immediately (no byte_len wrapper)"
+        );
+        let import_len = 4 + (4 + 1 + 1 + 1 + 1 + 4 + 1); // one host row, IFABI std.io.log -> (dyn) -> unit
+        let func_at = import_at + import_len;
+        assert_eq!(u32::from_be_bytes([img[func_at], img[func_at + 1], img[func_at + 2], img[func_at + 3]]), 1);
+        assert_eq!(
+            u64::from_be_bytes([
+                img[func_at + 4],
+                img[func_at + 5],
+                img[func_at + 6],
+                img[func_at + 7],
+                img[func_at + 8],
+                img[func_at + 9],
+                img[func_at + 10],
+                img[func_at + 11]
+            ]),
+            0,
+            "n_funcs is followed by max_mem_bytes u64 (IFBC.md §1.5)"
+        );
+        let code_at = func_at + 4 + 8 + 48;
+        let code_len =
+            u32::from_be_bytes([img[code_at], img[code_at + 1], img[code_at + 2], img[code_at + 3]]) as usize;
+        // the region holds the stream padded up to a 4-byte boundary (D.1), which is what `encode`
+        // writes and what the loader reads as `code_len`
+        let padded = (m.code.len() + 3) / 4 * 4;
+        assert_eq!(code_len, padded, "code opens with its own byte length");
+        assert_eq!(code_len % 4, 0);
+        let lines_at = code_at + 4 + code_len;
+        assert_eq!(
+            u32::from_be_bytes([img[lines_at], img[lines_at + 1], img[lines_at + 2], img[lines_at + 3]]) as usize,
+            m.lines.len()
+        );
+        // the whole image is accounted for: nothing is left over, which is what `TrailingBytes` guards
+        let rest = img.len() - lines_at;
+        assert_eq!(
+            rest,
+            4 + 8 * m.lines.len() + 4 + 16 + 4 + m.strings.entries().iter().map(|s| 4 + s.len()).sum::<usize>()
+        );
+        assert_eq!(rest + lines_at, img.len());
+    }
+
+    /// D-38 (a): the first 18 rows are the scalar codes, so a `u8` signature code and a `u32` type
+    /// index address one space, and re-interning a scalar kind never appends a row.
+    #[test]
+    fn scalar_rows_are_seeded_and_type_indices_equal_scalar_codes() {
+        let mut m = IfbcModule::new_unit("CPY-313", 1, "u", "s").unwrap();
+        assert_eq!(m.types.len(), N_SCALAR_ROWS);
+        for k in 0..N_SCALAR_ROWS {
+            assert_eq!(m.types[k].kind, k as u32, "row #{k} must *be* scalar code {k}");
+            assert_eq!(m.type_name(k as u32).unwrap(), sig_kind(k as u8).unwrap().suffix());
+        }
+        assert_eq!(m.intern_type(TyKind::Int, "i64", NONE32, NONE32), TyKind::Int as u32);
+        assert_eq!(m.intern_type(TyKind::Dyn, "dyn", NONE32, NONE32), TyKind::Dyn as u32);
+        assert_eq!(m.types.len(), N_SCALAR_ROWS, "a scalar kind never grows the table");
+        // an extended kind gets its own row past the block, and folds to `dyn` as a signature code
+        let elem = TyKind::Int as u32;
+        let lst = m.intern_type(TyKind::List, "list", elem, NONE32);
+        assert_eq!(lst as usize, N_SCALAR_ROWS);
+        assert_eq!(TyKind::List.sig_code(), TyKind::Dyn as u8);
+        assert_eq!(TyKind::Int.sig_code(), 7, "i64 is SIG_I64 = 7 in infy_ifbc.c's SIG_* enum");
+        assert_eq!(TyKind::U64.sig_code(), 11);
+        assert_eq!(TyKind::Float.sig_code(), 13, "f64 is SIG_F64 = 13");
+        assert_eq!(TyKind::Dyn.dyn_tag(), Some(11), "DY_INSTANCE: the boxed dynamic value");
+        assert_eq!(TyKind::Int.dyn_tag(), Some(1), "DY_INT survived the renumbering");
+    }
+
+    #[test]
+    fn import_rows_store_scalar_codes_and_the_sig_digest() {
+        let mut m = IfbcModule::new_unit("CPY-313", 1, "u", "s").unwrap();
+        let mut hosts = HostSigTable::new();
+        hosts.register(HostSig::new("x.range", &[TyKind::Usize, TyKind::List], TyKind::List));
+        let idx = m.intern_host(&hosts, "x.range").expect("row");
+        let e = &m.imports[idx as usize];
+        // usize(31) and list(18) are outside §2's closed set: on the IFABI wire both are a boxed dyn.
+        assert_eq!(e.params, vec![TyKind::Dyn.sig_code(), TyKind::Dyn.sig_code()]);
+        assert_eq!(e.ret_sig, TyKind::Dyn.sig_code());
+        assert_eq!(e.kind, ImportKind::Host);
+        assert_eq!(e.flags & IMP_SIGNED, IMP_SIGNED, "the row only exists after the IFABI check");
+        assert_eq!(e.sig_text(), "(dyn, dyn) -> dyn");
+        assert_eq!(e.sig_hash, HostSig::hash_text("(dyn, dyn) -> dyn"), "digest covers the wire form");
+    }
+
+    /// D-38 (b)/(c)/(d)/(e)/(f)/(g)/(h): one table the two sides can diff line by line.
+    #[test]
+    fn opcode_bytes_and_operand_counts_are_the_d38_table() {
+        assert_eq!(Op::GuardNonzero.byte(), 0x27);
+        assert_eq!(Op::GuardShift.byte(), 0x2F);
+        assert_eq!(Op::GuardNonzero.arity(), 0, "D-38 (c): guards carry no type operand");
+        assert_eq!(Op::GuardShift.arity(), 0);
+        assert_eq!(Op::Ldg.byte(), 0x0E, "D-38 (i): 0x0C/0x0D are freed for the guards' old bytes");
+        assert_eq!(Op::Stg.byte(), 0x0F);
+        assert_eq!(Op::Push.arity(), 2, "D-38 (d): push k,ty");
+        assert_eq!(Op::Ldw.arity(), 2, "D-38 (e): ldw i,ty");
+        assert_eq!(Op::BoxDyn.arity(), 0, "D-38 (f): boxing is the identity");
+        assert_eq!(Op::FieldOff.arity(), 2, "D-38 (g): field_off ty,field");
+        assert_eq!(Op::TypeOfIdx.arity(), 1, "D-38 addendum: D.9's column drops the index it needs");
+        assert_eq!(Op::NewFrame.arity(), 1);
+        assert_eq!(Op::Switch.arity(), 1);
+        assert!(Op::Switch.is_variable_width(), "D-38 (h): the case table is inline");
+        // the D.3 family block: 0x20..0x36 with operand 0 = type index
+        for (op, byte) in [
+            (Op::Add, 0x20u8),
+            (Op::Sub, 0x21),
+            (Op::Mul, 0x22),
+            (Op::Div, 0x23),
+            (Op::Rem, 0x24),
+            (Op::Neg, 0x25),
+            (Op::Abs, 0x26),
+            (Op::And, 0x28),
+            (Op::Or, 0x29),
+            (Op::Xor, 0x2A),
+            (Op::Not, 0x2B),
+            (Op::Shl, 0x2C),
+            (Op::Shr, 0x2D),
+            (Op::ShrA, 0x2E),
+            (Op::CmpLt, 0x30),
+            (Op::CmpLe, 0x31),
+            (Op::CmpGt, 0x32),
+            (Op::CmpGe, 0x33),
+            (Op::CmpEq, 0x34),
+            (Op::CmpNe, 0x35),
+            (Op::Cmp, 0x36),
+        ] {
+            assert_eq!(op.byte(), byte, "{} keeps D.3's family byte", op.base());
+            assert_eq!(op.arity(), 1, "{} carries its type in operand 0", op.base());
+        }
+        // every defined byte round-trips through the table
+        for b in 0..=255u8 {
+            if let Some(op) = Op::from_byte(b) {
+                assert_eq!(op.byte(), b);
+            }
+        }
+        // the sample's guard really sits at 0x27 in the emitted stream
+        let m = sample();
+        assert_eq!(m.code[find_instr(&m, Op::GuardNonzero)], 0x27);
+    }
+
+    /// D-38 (h) + D-39: `switch n, [targets]` encodes as `1 + 4*(1+n)` bytes, decodes as ONE
+    /// instruction (the cases are never mistaken for code), and its targets take part in the
+    /// linearity check like any other jump.
+    ///
+    /// Layout (three cases): `0 push.b` · `5 ldl` · `10 switch[3]` · `27 nop` · `28 ret`, so the
+    /// boundaries are `{0, 5, 10, 27, 28}` and every case lands on one of them with the same height.
+    #[test]
+    fn switch_is_variable_width_inline_and_linear() {
+        let mut m = IfbcModule::new_unit("CPY-313", 1, "u", "s.py").unwrap();
+        let (off, len, ms) = build_into(
+            &mut m,
+            1,
+            &[
+                (Op::PushB, vec![1]),
+                (Op::Ldl, vec![0]),
+                (Op::Switch, vec![27, 27, 28]),
+                (Op::Nop, vec![]),
+                (Op::Ret, vec![]),
+            ],
+        );
+        m.push_func("u", off, len, 1, ms, &[], TyKind::Int, 0, F_ENTRY);
+        m.seal();
+        let d = decode(&m.encode()).expect("the switch image decodes");
+        let instrs = instructions_of(&d, 0).unwrap();
+        let widths: Vec<usize> = instrs.iter().map(|(_, i)| i.width()).collect();
+        assert_eq!(
+            widths,
+            vec![5, 5, 1 + 4 * 4, 1, 1],
+            "switch with 3 cases is 17 bytes: opcode + count + inline table"
+        );
+        let sw = instrs.iter().find(|(_, i)| i.op == Op::Switch).expect("switch");
+        assert_eq!(switch_targets(&d, sw.0, &sw.1), vec![27, 27, 28]);
+        assert_eq!(len, 29, "5 + 5 + 17 + 1 + 1");
+        assert_eq!(d.code.len(), 32, "the code region is zero-padded to a multiple of 4 (D.1)");
+        assert!(r_codes(&d).is_empty(), "a legal switch verifies clean: {:?}", r_reports(&d));
+        // and the disassembly prints the table, so a reviewer can read the jump targets
+        let hx = |v: u32| format!("{v:#06x}");
+        let want = format!("switch 3 [{}, {}, {}]", hx(27), hx(27), hx(28));
+        assert!(d.disassemble().contains(&want), "{want} missing from\n{}", d.disassemble());
+    }
+
+    #[test]
+    fn a_switch_target_off_a_boundary_is_r0704() {
+        // `push.b`@0(5) · `ldl`@5(5) · `switch[2]`@10(13) · `nop`@23(1) · `ret`@24(1); the case 14
+        // sits inside the switch's own table, so it is not an instruction boundary.
+        let m = one_func(
+            1,
+            &[
+                (Op::PushB, vec![1]),
+                (Op::Ldl, vec![0]),
+                (Op::Switch, vec![14, 23]),
+                (Op::Nop, vec![]),
+                (Op::Ret, vec![]),
+            ],
+            TyKind::Int,
+        );
+        assert!(r_codes(&m).contains(&"R-0704"), "{:?}", r_reports(&m));
+    }
+
+    #[test]
+    fn an_absurd_switch_count_is_refused_at_emit_time() {
+        let mut b = CodeBuilder::new(0);
+        b.set_locals(1);
+        let targets = vec![0u32; (MAX_SWITCH_CASES + 1) as usize];
+        let err = b.switch(&targets, None).expect_err("beyond the loader's cap must be refused");
+        match err {
+            IfbcEncodeErr::SwitchCaseCountTooLarge { given } => {
+                assert_eq!(given, MAX_SWITCH_CASES as usize + 1)
+            }
+            other => panic!("wrong refusal: {other}"),
+        }
+        // exactly at the cap it is emitted, and the table is part of the instruction
+        let at_cap = vec![0u32; MAX_SWITCH_CASES as usize];
+        let off = b.switch(&at_cap, None).expect("at the cap");
+        assert_eq!(b.offset() - off, 1 + 4 + 4 * MAX_SWITCH_CASES as u32);
+    }
+
+    /// D-38 (a): `func_table` is 48 bytes/record and the unit budget round-trips.
+    #[test]
+    fn func_records_are_48_bytes_and_max_mem_bytes_round_trips() {
+        let mut m = one_func(1, &[(Op::PushB, vec![1]), (Op::Ret, vec![])], TyKind::Int);
+        m.max_mem_bytes = 1 << 40;
+        m.seal();
+        let img = m.encode();
+        // 47 header + (4 + 18*32) types + (4 + 0) imports -> func_table count
+        let func_at = HEADER_LEN + 4 + N_SCALAR_ROWS * 32 + 4;
+        assert_eq!(u64::from_be_bytes(img[func_at + 4..func_at + 12].try_into().unwrap()), 1 << 40);
+        let d = decode(&img).expect("decodes");
+        assert_eq!(d.max_mem_bytes, 1 << 40);
+        let f = &d.funcs[0];
+        assert_eq!(f.nargs, 0);
+        assert_eq!(f.ret_sig, TyKind::Int.sig_code() as u32, "ret_sig is a scalar code, not a row index");
+        assert_eq!(f.ret_arity, 1);
+        assert_eq!(f.flags, F_ENTRY);
+        assert_eq!(f.frame_kind, 0);
+        assert!(f.max_stack >= 1, "the builder tracked the pushed value: {}", f.max_stack);
+        // the record really is 48 bytes: the code region starts right after count + budget + 1 row
+        let code_at = func_at + 4 + 8 + 48;
+        assert_eq!(
+            u32::from_be_bytes(img[code_at..code_at + 4].try_into().unwrap()) as usize,
+            d.code.len()
+        );
+    }
+
+    /// D-38 (a) put `max_stack` on the wire; item 2 then means the same thing it does in C: a height
+    /// above the declared ceiling is R-0705, and the pair (too small / declared enough) is the test.
+    #[test]
+    fn a_height_above_the_declared_max_stack_is_r0705() {
+        let body = [
+            (Op::PushB, vec![1u32]),
+            (Op::PushB, vec![2]),
+            (Op::Add, vec![TyKind::Int as u32]),
+            (Op::Ret, vec![]),
+        ];
+        let legal = one_func(1, &body, TyKind::Int);
+        assert!(r_codes(&legal).is_empty(), "{:?}", r_reports(&legal));
+        assert_eq!(legal.funcs[0].max_stack, 2, "two pushes before the binary op peaks at 2");
+
+        let mut tight = one_func(1, &body, TyKind::Int);
+        tight.funcs[0].max_stack = 1;
+        tight.seal();
+        assert!(r_codes(&tight).contains(&"R-0705"), "{:?}", r_reports(&tight));
+    }
+
+    /// D-38 (e): the `ldw` annotation is a *static* one, and only the three wide scalars exist.
+    /// The pair is legal `i64`(7) vs illegal `bool`(2), which also proves the operand is read.
+    #[test]
+    fn ldw_annotation_must_be_i64_u64_or_f64() {
+        let legal = one_func(
+            1,
+            &[(Op::Ldw, vec![0, TyKind::Int as u32]), (Op::Ret, vec![])],
+            TyKind::Int,
+        );
+        assert!(r_codes(&legal).is_empty(), "{:?}", r_reports(&legal));
+        let wrong = one_func(
+            1,
+            &[(Op::Ldw, vec![0, TyKind::Bool as u32]), (Op::Ret, vec![])],
+            TyKind::Int,
+        );
+        assert!(r_codes(&wrong).contains(&"R-0706"), "{:?}", r_reports(&wrong));
+    }
+
+    /// D-38 (g) + §5's extras: `field_off ty,field` needs a `#[repr(C)]` row (else R-0713) and an
+    /// in-range field index (else R-0706). The three-way pair pins both.
+    #[test]
+    fn field_off_needs_repr_c_and_an_in_range_field_index() {
+        let mk = |repr_c: bool, field: u32| -> IfbcModule {
+            let mut m = IfbcModule::new_unit("CPY-313", 1, "u", "s.py").unwrap();
+            let st = m.intern_type(TyKind::Instance, "S", NONE32, NONE32);
+            if repr_c {
+                m.set_type_repr_c(st);
+            }
+            m.add_type_field(st, "a", 0, TyKind::Int as u32);
+            m.add_type_field(st, "b", 8, TyKind::Int as u32);
+            let (off, len, ms) =
+                build_into(&mut m, 1, &[(Op::FieldOff, vec![st, field]), (Op::Ret, vec![])]);
+            m.push_func("u", off, len, 1, ms, &[], TyKind::Int, 0, F_ENTRY);
+            m.seal();
+            m
+        };
+        let ok = mk(true, 1);
+        assert!(r_codes(&ok).is_empty(), "{:?}", r_reports(&ok));
+        let not_c = mk(false, 1);
+        assert!(r_codes(&not_c).contains(&"R-0713"), "{:?}", r_reports(&not_c));
+        let too_far = mk(true, 2);
+        assert!(r_codes(&too_far).contains(&"R-0706"), "{:?}", r_reports(&too_far));
+    }
+
+    /// D-22's adjudication reaches this side too: a load-time "boundary" finding is R-0707, and
+    /// R-0709 belongs only to the run-time arena check. The tailcall frame comparison is the C
+    /// loader's set (locals / max_stack / nargs / ret_arity / frame_kind).
+    #[test]
+    fn a_tailcall_frame_mismatch_is_r0707_never_r0709() {
+        let mut m = IfbcModule::new_unit("CPY-313", 1, "u", "s.py").unwrap();
+        let (o1, l1, s1) = build_into(&mut m, 1, &[(Op::PushB, vec![1]), (Op::Ret, vec![])]);
+        m.push_func("callee", o1, l1, 1, s1, &[], TyKind::Int, 0, 0);
+        // the caller declares a different frame size (3 locals against the callee's 1), so the
+        // tailcall is not frame-compatible
+        let (o2, l2, s2) = build_into(&mut m, 3, &[(Op::PushB, vec![1]), (Op::TailCallStat, vec![0])]);
+        m.push_func("caller", o2, l2, 3, s2, &[], TyKind::Int, 0, F_ENTRY);
+        m.seal();
+        let reports = r_reports(&m);
+        assert!(
+            reports.iter().any(|s| s.contains("帧尺寸不兼容")),
+            "the frame comparison itself must fire: {reports:?}"
+        );
+        let codes = r_codes(&m);
+        assert!(codes.contains(&"R-0707"), "{codes:?}");
+        assert!(!codes.contains(&"R-0709"), "R-0709 is the arena code only (D-22): {:?}", codes);
+    }
+
+    /// D-38 (a) put `ret_arity` in the record, so `ret`/`ret.multi` are checked against it here
+    /// exactly as `infy_ifbc.c::check_frame` does. The pair is a 2-tuple returned under a scalar
+    /// declaration against the same code with the declaration fixed.
+    #[test]
+    fn return_shape_must_match_the_declared_ret_arity() {
+        let body = [(Op::PushB, vec![1]), (Op::PushB, vec![2]), (Op::RetMulti, vec![2])];
+        let m = one_func(1, &body, TyKind::Int);
+        assert_eq!(m.funcs[0].ret_arity, 1, "a scalar return declaration");
+        assert!(r_codes(&m).contains(&"R-0707"), "{:?}", r_reports(&m));
+
+        let mut ok = one_func(1, &body, TyKind::Int);
+        ok.funcs[0].ret_arity = 2;
+        ok.seal();
+        assert!(!r_codes(&ok).contains(&"R-0707"), "{:?}", r_reports(&ok));
+    }
+
+    fn find_instr(m: &IfbcModule, op: Op) -> usize {
+        for i in 0..m.funcs.len() {
+            for (off, ins) in instructions_of(m, i).unwrap() {
+                if ins.op == op {
+                    return off as usize;
+                }
+            }
+        }
+        panic!("no {op:?} in the sample")
     }
 
     /// §7.8.1 gives the header `frame_kind` one legal value (0 = single-address stack + local
@@ -3258,12 +4285,12 @@ mod tests {
         );
 
         let mut ok = sample();
-        ok.funcs[0].frame = FRAME_KIND_COROUTINE;
+        ok.funcs[0].frame_kind = FRAME_KIND_COROUTINE as u32;
         ok.seal();
         assert!(matches!(decode(&ok.encode()), Ok(_)), "1 = coroutine is legal per function (D.8)");
 
         let mut bad = sample();
-        bad.funcs[0].frame = FRAME_KIND_COROUTINE + 1;
+        bad.funcs[0].frame_kind = (FRAME_KIND_COROUTINE + 1) as u32;
         bad.seal();
         assert!(
             matches!(decode(&bad.encode()), Err(IfbcDecodeErr::BadFrameKind(2))),
@@ -3290,6 +4317,10 @@ mod tests {
             assert!(d1.contains(want), "missing {want} in\n{d1}");
         }
         assert!(d1.contains("InfyDynTag=1"), "the Int row must show it *is* DY_INT:\n{d1}");
+        // D-38's merged shapes print too, so a reviewer can compare against the C dumper
+        for want in ["nfields=0", "signed=true", "max_stack=", "ret_sig=dyn", "(各区自定界, D-38)"] {
+            assert!(d1.contains(want), "missing {want} in\n{d1}");
+        }
     }
 
     #[test]
@@ -3312,7 +4343,8 @@ mod tests {
         let b = m.intern("first");
         assert_eq!(m.intern("second"), a, "re-interning never moves an entry (§7.3)");
         assert!(b > a);
-        assert_eq!(m.strings.len(), 4);
+        // slots 0/1 are unit/source, then the 18 seeded scalar names, then these two
+        assert_eq!(m.strings.len(), 2 + N_SCALAR_ROWS + 2);
     }
 
 }
