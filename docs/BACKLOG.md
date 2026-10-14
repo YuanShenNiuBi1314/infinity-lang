@@ -357,7 +357,12 @@
       不可满足性判定，本轮只对当前配置求值（**F24**）；panic 的**逐测试隔离**要把内部入口 `infy_rt_catch`
       提升进冻结公共头（ABI 变更 + 四条链同批），本轮按 C4 的"能不动 C 侧就不动"如实实现并记录；
       `#[test]` 函数在普通构建里仍被编译成 C 符号（只是不进运行集），§5.9 没有要求剔除。
-      证据提交：**待本轮末尾回填**（提交号在 `git log` 里是本轮最后一条 `feat(C5)`）。
+      证据提交：**`f706c3d`**（`feat(C5)`）—— 上述 410/0、0/51、`infy test` 的 exit 0/1/3 与逐字节报告、
+      12513/199975 字节与 `build-id 4d8250b5…55ba` 未变、`--verify-reproducible` 0、`gcc -c` 0/0、
+      四条 C 链（32335/0、82/82×2、`-c` 0 告警、两份 stdout 逐字节相同）全部为该提交上的实测复跑，非引用。
+      **该提交已推上 `toolchain`**：本轮第 1 次尝试即 exit 0（`1fc8803..f706c3d`），
+      `gh api …/refs/heads/toolchain` 回查远端 = 本地 HEAD，现算欠账 **0**（本节的做账行提交后又 = 1，
+      下一轮仍只认现算）。
 
 ### 阶段 D：双轨嵌入的真实端到端
 
@@ -588,10 +593,11 @@
 
 > **推送欠账**：只认现算 `git rev-list --count <远端SHA>..HEAD`；远端 SHA 用
 > `gh api repos/YuanShenNiuBi1314/infinity-lang/git/refs/heads/toolchain --jq .object.sha` 回查，`Everything up-to-date` 不算成功。
-> **C5 轮推送结果（本轮现算，别引用旧数）**：见 RUNLOG 的 `cron-11-push` 行；本节在提交后写，数字以那一行为准。
-> 上一轮（C4）第 1 次尝试就 exit 0，再上一轮连败 5 次第 6、7 次成功 ⇒ `github.com:443` 是**间歇**不通而不是坏了：
-> 照协议先推一次、失败再试一次即停，不预先加变体、不循环轰炸；若连败，首个候选是
-> `git -c http.version=HTTP/1.1 push origin HEAD:toolchain`。
+> **C5 轮推送结果（本轮现算，别引用旧数）**：**第 1 次尝试就 exit 0**（`1fc8803..f706c3d`），
+> `gh api …/refs/heads/toolchain` 回查远端 = **`f706c3d50afdf6922eef19563344990ca6429e18`** = 本地 HEAD ⇒
+> **C5 全量已在 `toolchain` 上，欠账现算 0**（本节的做账行提交后又 = 1，下一轮仍只认现算）。
+> C4 轮也是第 1 次就成、C3 轮第 6、7 次才成 ⇒ `github.com:443` 仍是**间歇**不通而不是坏了：照协议先推一次、
+> 失败再试一次即停，不预先加变体、不循环轰炸；若连败，首个候选是 `git -c http.version=HTTP/1.1 push origin HEAD:toolchain`。
 >
 > 已验证事实（**C5 轮全部复跑，非引用**）：`cargo test --offline --lib` **410 passed / 0 failed**
 > （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `pkg` **24** · `sema` 22 · `codegen` **22** ·
