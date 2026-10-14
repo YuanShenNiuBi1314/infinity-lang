@@ -102,10 +102,10 @@ $ gcc -std=c11 -Wall -Wextra -I runtime -c examples/tour/.infy-build/x86_64-pc-w
 （无输出）                                        # exit 0，0 error / 0 warning；这是 BACKLOG C2 的验收命令（BACKLOG §1 C2）
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
       runtime/test_ifbc.c runtime/test_ifbc_stubs.c -o ifbc_tests && ./ifbc_tests
-IFBC harness: 82 asserts, 82 pass, 0 FAIL        # exit 0；B1 轮起 0 编译告警（原 4 条 infy_rt.h 前置引用 = B3 第 4 项，已修）
+IFBC harness: 146 asserts, 146 pass, 0 FAIL      # exit 0，0 编译告警；D4(2) 轮 82 → 146（合并形状 + 间隙指令 + 跨语言夹具）
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
       runtime/infy_rt.c runtime/test_ifbc.c -o ifbc_real && ./ifbc_real
-IFBC harness: 82 asserts, 82 pass, 0 FAIL        # exit 0，0 error / 0 warning；B2 轮真实链生产 infy_rt.c，stdout 与上一行逐字节相同
+IFBC harness: 146 asserts, 146 pass, 0 FAIL      # exit 0，0 error / 0 warning；B2 轮真实链生产 infy_rt.c，stdout 与上一行逐字节相同
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && (cd target/scratch && ./rt_tests)
 32335 assertions, 0 failures                     # exit 0，0 error / 0 warning；链的是生产 infy_rt.c；C3 轮 +32（Rust 写 ↔ C 读的夹具锁 + D-33）
 $ gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c
@@ -141,8 +141,10 @@ $ (cd examples/tour && infy fmt --check)
 B 轨 lowering(`src/btrack.rs`) 尚未收敛；C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（C3 轮复跑 **32335 断言 / 0 失败**，直接链生产 `infy_rt.c`）；
 `src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs` 是 1 行占位文件（`src/artifact.rs` 已于 C3 轮从"不存在"落成 §7.4 容器写入器 + 读取器 + §7.3 build-id，18 项独立单测）（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
 A 轨绑定、`std.net` TLS、`infy lsp` 未实现。
-IFBC 断言（B3 轮 79 → **82**，新增的是 `closure.new` 越出 `func_table` 的拒绝路径）**B2 轮起既链
-`runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，两侧同为 82/82、stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 Rust↔C 双侧交叉验证（D4 阻塞）。
+IFBC 断言（B3 轮 79 → 82，D4(2) 轮 **82 → 146**：合并线格式 + 17 条间隙指令 + Rust 写↔C 读执行的夹具）
+**B2 轮起既链 `runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，两侧同为 146/146、
+stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 Rust↔C 的**逐指令反汇编相等**
+（D4 余项 (3)；"两侧校验结论等价"另被 F26 挡着）。
 
 ## A2 本轮修掉的真实缺陷（每条都有回归测试）
 
@@ -167,10 +169,10 @@ IFBC 断言（B3 轮 79 → **82**，新增的是 `closure.new` 越出 `func_tab
 `lexer`、`formatter`、`rt-core`(C 侧 harness)、`ifbc-rust`(B 轨摄取) 四个并行子任务曾撞到 agent 轮次上限被截断。
 A2 轮收敛了 `formatter` 与词法/语法侧的缺口；`lexer` 的 E-0020 保留字集经核与 §2.4 一致（含
 `use`/`mod`/`union`/`linkage` 这组"保留但本版文法未用"的字）。**仍未收敛**：
-`src/btrack.rs` 的端到端 lowering（D1）。`runtime/test_rt.c`（B1）已于 B1 轮收敛。已完成的 C 侧里程碑不变：`ifbc-vm`(`runtime/test_ifbc.c`) **82** 项断言通过（B3 轮 79 → 82），
+`src/btrack.rs` 的端到端 lowering（D1）。`runtime/test_rt.c`（B1）已于 B1 轮收敛。已完成的 C 侧里程碑不变：`ifbc-vm`(`runtime/test_ifbc.c`) **146** 项断言通过（B3 轮 79 → 82，D4(2) 轮 → 146），
 含六项装载校验、逐字节截断、单字节变异、800 轮 fuzz；`codes`、`infra`(哈希/TOML) 已交付。
 （A3 轮当时的限定"这些项链的是替身不是生产运行时"已于 **B2 轮解除**：同一 harness 现在也链生产
-`runtime/infy_rt.c` 跑通 82/82，见上文 P11。）
+`runtime/infy_rt.c` 跑通 146/146，见上文 P11。）
 
 新发现（未修，已记入 BACKLOG 阶段 D）：Rust 侧 IFBC 编码与 C 侧虚拟机的**操作数个数**不一致 —
 `push`（Rust 2 个：池索引 + 类型；C 表 `nops=1`）、`box.dyn`（Rust 1；C `nops=0`，附录 D.7 与 `runtime/IFBC.md` 也是 0）、
@@ -594,9 +596,44 @@ rt harness **32335 assertions / 0 failures** exit 0、替身链 IFBC **82/82** e
 弹出个数用）与 **F26**（本侧校验拒绝 `call.virt/call.embed/invoke.dynamic`、
 `coro.resume/throw/throw.inf` 的栈效果与 C 的 `sim_delta` 不同 ⇒ 两侧"校验结论等价"不能声称）。
 
-**D4 余项**：(2) C 侧（OPS 表按家族重排、exec 按 kind 分派、push/ldw/field_off 操作数、
-间隙指令补装载+校验+执行+dumper、三表读取器对齐合并形状、82 断言 harness 同批）→
-(3) 同一镜像 Rust 反汇编 == C 反汇编逐指令相等，然后回 D1 的装载验收。
+**D4 余项**：(2) C 侧**已于 D4(2) 轮落地**（提交 `e5555dc`：OPS 表按家族重排、exec 按 kind 分派、
+push/ldw/field_off 操作数、17 条间隙指令补装载+校验+执行+dumper、三表读取器对齐合并形状、
+harness 同批改 82 → 146）→ 剩 (3) 同一镜像 Rust 反汇编 == C 反汇编逐指令相等，然后回 D1 的装载验收。
+
+## D4(2) 轮（2026-10-15）：C 侧对齐唯一线格式，两侧第一次在字节上相遇
+
+改动只在 `runtime/`（`infy_ifbc.c` + `test_ifbc.c` + 新夹具）与 `src/ifbc.rs` 的**测试**；
+Rust 侧的编码器、`btrack.rs`、codegen/artifact 一行未动。
+
+- **线格式**：`OPS[]` 换成 D.3 的家族编号（`guard.nonzero`/`guard.shift` 归位 0x27/0x2F 且 0 操作数，
+  `add..cmp` 一族一字节 + 操作数 0 = `type_table` 行，旧 `add.f64..cmpeq.f64` 与 0x3E/0x3F 让位）；
+  三张表读成合并形状（type 8×u32、import 尾 `sig_hash u32`、func **48 字节**/12×u32）；
+  `push` 1→2 操作数、`ldw` 注解与 `is.dyn`/`cast.dyn` 改按行的 **kind** 判定（后者经
+  `kind_to_dyn_tag` 表，D-38 重编号后 kind 与 `InfyDynTag` 不再数值相等）。
+- **执行**：`fam_path()` 按 kind 选 i64/f64 路径；可执行宽度仍是 i64/f64（其余数值 kind 装载放行、
+  执行 R-0706 = 旧表能力限制的原样迁移，`f32` **拒绝而不是按 double 悄悄算**）。
+- **间隙指令 17 条**全部进 OPS/校验/反汇编；`ldg/stg/import/seq.push/seq.len/map.insert/str.concat/
+  seq.concat/new.tuple/dyn.truthy/dyn.identity` 有执行实现，`import.attr/inst.get/inst.set/seq.iter/
+  seq.next/new.set` **装载通过而执行显式返回 R-0710** —— `InfyDyn` 没有属性表/迭代器/集合载体。
+  实现选择记在偏差 **D-41**，缺口登记为 **F27**。
+- **两侧第一次真相遇**：`runtime/fixtures/ifbc_rust_writer.bin`（1031 字节，Rust 写入器的逐字节固定
+  输出，只有 `INFY_REGENERATE_FIXTURE=1` 才重写）由 `test_ifbc.c::test_rust_writer_fixture` 用生产
+  装载器读回、过六项校验、并**执行**两个函数（`add_one(41) = 42` 走家族字节 + 类型操作数、
+  `pool_str()` 走 `push k,ty`）；Rust 侧 `ifbc::tests::c_loader_fixture_is_exactly_what_the_writer_produces`
+  钉"重新生成 == 夹具"与"构建期校验器对这些字节零 R-码"。这是 C3 轮那套跨语言夹具手法的第二份锁点。
+- **顺手挡住的两个真实错位**（都是"两侧各自演算同一个表达式"的形态）：
+  (1) `MAX_SWITCH_CASES` —— D-40 选择 5 写"取装载器的 `OPS_MAX * 16 = 48`"，而 C 侧那个表达式实际是
+  **64**；Rust 发射上限 48 ⇒ 一个 56 case 的 `switch` 两边对"能不能线性扫描"结论相反。C 侧改成显式
+  `48u`，锁点 = `SC_SWITCH_HUGE`（49 个 case → C 报 R-0704）。
+  (2) `test_ifbc.c` 的 `FDesc` 若用位置初始化把新增的两个 u32 补成 0，那么"读取顺序错一格"照样能装载
+  —— 改为 `FD()` 宏在 `sig_hash` 里打**非零哨兵**（`0x5A5A5A5A`），字段顺序一漂移 flags/frame_kind 就脏。
+- **另补两条 Rust 已有而 C 缺的结构校验**：`type_table.kind > 32`、`import.kind > 2` 都判 R-0703
+  （`decode_types`/`decode_imports` 同判据）。
+- 回归（全为本轮实测）：`cargo test --offline --lib` **424 / 0**（`ifbc` 19 → 20）、`cargo check`
+  0 error / **50 warning**、`infy check|build|test examples/tour` 全 exit 0 且 12513 字节 C11 /
+  199975 字节产物 / `build-id 4d8250b5…55ba` **逐字节未变**、`--verify-reproducible` exit 0、
+  `fmt --check` 仍 exit 2（F6）、四条 C 链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警**、
+  rt harness **32335/0**、替身链 IFBC **146/146**、生产链 **146/146** 且两份 stdout `cmp` 无输出。
 
 ## 仍未实现
 

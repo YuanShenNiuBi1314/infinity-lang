@@ -49,12 +49,13 @@ infy conformance --report   # 未实现：notice + exit 1
 | §1.3 | 领域中立判据（`NFKCCaseFold` 匹配 `domain_terms` 黑名单） | ✅ 4 项 |
 | §8.4 | 节点表编号 | 🟡 7 项（`parser` 编号 1 项 + `sema` 的 `goto` 三条 `E-0301` 越界路径、`start` 链名/锚点、序言不移动编号） |
 | §7.4 / §7.3 | 产物容器：宿主可执行文件 + `INFYART2` 段尾 + `.inf meta/rodata 索引/ifbc/sum`；`build-id` | 🟡 C3 轮落地：`src/artifact.rs` 写 + 读，`infy build` 阶段 [9] 产出 199975 字节容器并 exit 0，`infy artifact info --nodes` 读回自家产物（节点表 6 行 = §8.4 金样），`--verify-reproducible` 两个独立目录字节相同，`build-id` 绑满 §7.3 的九类输入。**仍 🟡**：阶段 [10] 的 sumdb 校验/运行时自校验未做（`.inf sum` 只是 `lock.dirh` 的抄写，tour 无依赖 = 空集）、`.inf ifbc` 恒空（D1）、`ResourceKeys`/`EnvOffsets` 写空集、A 轨 `#[link]` 目标码与 LTO 编排没有；另裁掉一条规范级缺陷 **D-33**（重复段尾扫描范围会否掉每个真产物），偏差表见 **D-32** |
-| §7.8 / 附录 D | IFBC 编码、反汇编、装载期六项校验（`R-0704`…`R-0708`）、UB-019 | 🟡 Rust 侧 19 项 + C 侧 82 断言**各自**通过。**D4(1) 已把 Rust 侧改成 D-38 裁定的唯一线格式**（区段自定界、三表合并形状、`TyKind` 重编号到 `SIG_*`、guard/ldw/box.dyn/field_off/switch 的操作数面，镜像见 `docs/internals/ifbc-encoding-rust.md`）；C 侧仍是它自己那一份（D4 余项 (2)），所以**双侧交叉验证还没做**（D4 余项 (3)），`.inf ifbc` 也仍恒空（D1） |
+| §7.8 / 附录 D | IFBC 编码、反汇编、装载期六项校验（`R-0704`…`R-0708`）、UB-019 | 🟡 **D4(1)+D4(2) 已把两侧改成 D-38 裁定的同一份线格式，并且第一次在字节上相遇**：`runtime/fixtures/ifbc_rust_writer.bin` 是 Rust 写入器的逐字节输出，C 侧用生产装载器读回并**执行**其中函数（Rust 侧 20 项单测 / C 侧 146 断言）。**仍 🟡**：逐指令**反汇编文本**相等没做（D4 余项 (3)）、两侧装载期**校验结论**不等价（F26）、六条间隙指令在 C 侧装载通过而执行显式拒绝（F27 / 偏差 D-41），`.inf ifbc` 也仍恒空（D1） |
 | §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ⬜ `src/host.rs` 是占位文件 —— **未实现**（偏移表本身已由 `src/hir.rs::env_table` 落成并有金样） |
-| 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32335 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 82 断言 B2 轮起也链生产 `infy_rt.c`（同为 82/82，输出逐字节相同）。仍不等于 §12 合规：外部用例为 0，双侧交叉验证受 D4 阻塞 |
+| 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32335 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 146 断言 B2 轮起也链生产 `infy_rt.c`（同为 146/146，输出逐字节相同）。仍不等于 §12 合规：外部用例为 0，逐指令交叉验证是 D4 余项 (3) |
 
-`cargo test --offline --lib` 目前 **423 passed / 0 failed**（`cargo check --offline --lib` 0 error / 50 warning；
-D4(1) 轮把 `ifbc` 从 6 项抬到 **19** 项，并删掉 `CodeBuilder` 的一个死字段，告警 −1）。
+`cargo test --offline --lib` 目前 **424 passed / 0 failed**（`cargo check --offline --lib` 0 error / 50 warning；
+D4(1) 轮把 `ifbc` 从 6 项抬到 **19** 项，并删掉 `CodeBuilder` 的一个死字段，告警 −1；D4(2) 轮再加 1 项 =
+`ifbc` **20** 项，钉的是"Rust 写入器的字节 == 已提交夹具"且"构建期校验器对这些字节零 R-码"）。
 "绿灯"只表示已写测试的模块自洽：A4 轮之后 `sema`(22) 与 `pkg`(24，C5 轮 +5) 已不再是零单测，C2 轮之后 `codegen` 也不再是
 （**22** 项 = 19 + C5 轮的 3 项 harness 断言，锁 §4.1/§4.8 布局自检、§4.9/§7.2 检查永不关、§4.11 `?`、§3.12 `match`、
 §4.7.4 清理序、§8.4 节点表、§8.2 `goto` 转移控制、§5.3 调用解析、§5.9 测试 harness、§7.3 字节稳定），
@@ -67,8 +68,9 @@ C 侧另有两份独立 harness，**两份都直接链生产 `runtime/infy_rt.c`
 **32335 assertions / 0 failures**（B1 轮收敛，`-Wall -Wextra` 零告警；C3 轮起其中 27 项是把 **Rust 写入器**的
 逐字节夹具 `runtime/fixtures/artifact_rust_writer.bin` 交给生产读取器 `infy_art_read_file` = Rust 写 ↔ C 读）；
 `runtime/test_ifbc.c` →
-**82 asserts, 82 pass, 0 FAIL**（B2 轮真实链接，零告警；同一 harness 链 `test_ifbc_stubs.c` 替身也同为 82/82，
-两份输出逐字节相同）。
+**146 asserts, 146 pass, 0 FAIL**（B2 轮真实链接、D4(2) 轮对齐 D-38 的唯一线格式后 82 → 146，零告警；
+同一 harness 链 `test_ifbc_stubs.c` 替身也同为 146/146，两份输出逐字节相同；新增的一份是把 Rust 侧的
+字节夹具 `runtime/fixtures/ifbc_rust_writer.bin` 交给**生产装载器**读回并执行 = Rust 写 ↔ C 读+跑）。
 以上都只说明"已写用例自洽"，**不等于 §12 合规**（外部用例仍为 0）。
 
 明确未实现（不使用即报错，不做静默降级）：`src/atrack.rs`（A 轨绑定）、

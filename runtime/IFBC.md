@@ -22,13 +22,14 @@ bounds‑checks **every** read against the remaining image size; a short/truncat
 rejected with **R‑0703** (the umbrella load‑failure code). Arbitrary bytes are hostile input: the
 loader returns a code, it does not read or write out of bounds.
 
-> **Status of §1.2/§1.3/§1.5 and §3.1 while D4 is being implemented.** Deviation **D-38** fixed one
-> merged wire format for both sides, and **D4(1) has already landed it on the Rust side**
-> (`src/ifbc.rs`, plus its mirror `docs/internals/ifbc-encoding-rust.md`). The C code below still
-> reads the shapes as documented here — `payload_a/payload_b` and `sig_hash` (import), `sig_str`
-> (func), and the family‑byte opcode table are what **D4(2)** adds. Until then the two sides do not
-> exchange a byte (`.inf ifbc` is still empty), so this is a tracked divergence, not a live
-> mismatch. `§2` above is *not* pending: that table was already the loader's own `SIG_*` enum.
+> **D4(2) has landed (2026-10-15, commit `e5555dc`).** §1.2/§1.3/§1.5 and §3 below now describe the
+> one merged wire format deviation **D-38** adjudicated, which the Rust side (`src/ifbc.rs`, mirrored
+> in `docs/internals/ifbc-encoding-rust.md`) already wrote. The two sides have met on bytes since
+> then: `runtime/fixtures/ifbc_rust_writer.bin` is the Rust encoder's committed output and
+> `runtime/test_ifbc.c::test_rust_writer_fixture` loads **and executes** it with this loader. What is
+> still open is D4(3) — comparing the two disassemblers *instruction by instruction* on the same
+> image (this file's `infy_ifbc_dump` and `ifbc::disassemble` render the same shapes but not the same
+> text), and D1, which is what would fill `.inf ifbc` in a real artifact.
 
 ### 1.1 header (47 bytes, fixed by §7.8.1 / runtime‑abi.md §9)
 
@@ -47,26 +48,36 @@ loader returns a code, it does not read or write out of bounds.
 u32 n_types                     # capped at 2^20; else R-0703
 n_types × {
    u32 name_str                 # string_pool index (diagnostic only, not validated)
-   u32 kind                    # 0=prim 1=struct 2=enum 3=tuple 4=ref 5=dyn
+   u32 kind                    # D-38's unified space: SIG_* (0..17, see §2) then K_* (18..32)
    u32 flags                   # bit0 = #[repr(C)] (required by field_off, see 5.3)
    u32 size
    u32 align
    u32 nfields                 # capped at 2^20
+   u32 payload_a              # list/tuple element, dict key — read and ignored here
+   u32 payload_b              # dict value / generic argument   — read and ignored here
    nfields × { u32 name_str, u32 off, u32 ty }   # ty indexes type_table
 }
 ```
-`type_id` = the 0‑based index of the record. `size_of.idx` / `align_of.idx` / `typeof.idx` /
-`is.dyn` / `cast.dyn` operands are `type_id`s and are bounds‑checked against `n_types` (R‑0706).
+`type_id` = the 0-based index of the record. `size_of.idx` / `align_of.idx` / `typeof.idx` /
+`is.dyn` / `cast.dyn` / every D.3 family operand is a `type_id` and is bounds-checked against
+`n_types` (R-0706); `is.dyn`/`cast.dyn` additionally need a row whose **kind** has a dyn-visible tag
+(R-0710) — the kind is no longer numerically equal to an `InfyDynTag` (D-38 renumbered it), so the
+loader maps it through `kind_to_dyn_tag`. A `kind` above 32 is a structural failure (R-0703), which
+is what `src/ifbc.rs::decode_types` does too. Producers seed rows `0..17` as the scalar kinds so
+**type index == scalar code** there (`seed_scalar_rows` in Rust, `N_SCALAR_ROWS` in the harness); the
+seeded rows carry `size = align = 0` by design (D-40 choice 1), so a producer that wants
+`size_of.idx` to mean something fills them itself.
 
 ### 1.3 import_table
 ```
 u32 n_imports                   # capped at 2^20
 n_imports × {
    u32 name_str
-   u8  kind                    # 0=host  1=embed  2=event
+   u8  kind                    # 0=host  1=embed  2=event  (anything else = R-0703)
    u8  nparams
    u8  ret_sig                 # a scalar code from §2
    u8  flags                   # bit0 = "IFABI-signed" (see 5.5)
+   u32 sig_hash                # D-38's trailing digest: validation 5's fast comparison value
    nparams × u8 param_sig      # scalar codes from §2
 }
 ```
@@ -84,19 +95,25 @@ code_len × byte                 # the instruction stream (see §3); function wi
 ```
 u32 n_funcs                     # must == header.func_count, else R-0703
 u64 max_mem_bytes               # §7.9 per-unit arena budget; 0 = no limit → R-0709 at run time
-n_funcs × {                      # 40-byte fixed record
+n_funcs × {                     # 48-byte fixed record (D-38 (a): twelve u32)
    u32 code_off                 # global offset into code
    u32 code_len                 # must satisfy code_off+code_len <= code_len(section)
-   u32 locals                  # local-window slot count (ldl/stl/ldw/move.out bound)
+   u32 locals                  # local-window slot count (ldl/stl/ldw/move.out and ldg/stg bound)
    u32 max_stack               # declared operand-stack ceiling (height check)
    u32 nargs
    u32 ret_arity               # 0=unit, 1=scalar, n=tuple (ret / ret.multi match)
    u32 ret_sig                 # scalar code (§2), diagnostic
    u32 name_str
-   u32 flags                   # bit0 = has_return
-   u32 frame_kind               # 0=stack  1=coroutine  (yield legality, R-0707; >1 rejected at load, deviation D-23)
+   u32 sig_str                 # string_pool index of the canonical signature text (`infy doc`)
+   u32 sig_hash                # digest of that text: validation 5's fast path
+   u32 flags                   # bit0 = has_return / F_ENTRY on the Rust side (same bit set, D-38)
+   u32 frame_kind              # 0=stack  1=coroutine  (yield legality, R-0707; >1 rejected at load, deviation D-23)
 }
 ```
+The VM reads the ten fields it always used; `sig_str`/`sig_hash` are for the producer-side tools and
+the dumper. Because the record is fixed-width, a reader that skipped the two new slots would address
+`flags` where `sig_str` is — `test_ifbc.c`'s `FD()` macro therefore stamps `sig_hash` with a
+non-zero sentinel, so a field-order drift fails the harness instead of loading a corrupt record.
 `func_idx` = 0‑based index. Closures store a pointer to their `InfyIfbcFunc` record; the runtime
 recovers `func_idx` as `ptr - funcs`, so the `clo.fn` field in the frozen `InfyDyn` union needs no
 extra slot.
@@ -142,8 +159,9 @@ so a signature byte and a `type_table` index in `0..=17` address one space.
 bytes, 14 = ptr, 15 = dyn` with `16/17` reserved, i.e. it dropped `u16`/`u32` — that table did not
 match the enum the loader validates against. Corrected against `infy_ifbc.c`, as **D-38** pinned.)
 
-(For `ldw` the annotation operand must be one of `i64(7)/u64(11)/f64(13)` — the three the loader
-accepts at `check_type`; else R‑0706.)
+(For `ldw` the annotation operand is a `type_table` row whose **kind** must be `i64`(7) / `u64`(11) /
+`f64`(13) — the three wide scalars the loader accepts at `check_type`; else R‑0706. Because rows
+`0..17` are seeded so index == kind, a producer normally writes the code itself.)
 
 ## 3. Instruction encoding
 
@@ -157,13 +175,21 @@ ranges; these byte values are fixed here and shared by verifier / interpreter / 
 
 * `dup / dup2 / swap` (D.2 row `0x06`) → **`dup`=0x06, `dup2`=0x0A, `swap`=0x0B**.
 * `pop`=0x07, `ldnull`=0x08, `ld.frame`=0x09 are pinned by D.2 (and `ldnull`@0x08 by UB‑019 tests).
-* `guard.nonzero` / `guard.shift` (named in D.3, never given a byte) → **0x0C, 0x0D**.
-* D.3 says every type suffix is a distinct opcode. The full cross‑product (~20 ops × ~10 widths)
-  does **not** fit the 32‑slot `0x20–0x3F` block — a genuine spec hole. This impl allocates every
-  supported `(op,type)` to a distinct byte in `0x20–0x3F` for the two widths B‑track lowering
-  actually produces (**i64** and **f64**). Other widths (`u8/u16/u32/u64/i8/i16/i32/f32`) and the
-  float `abs/cmp/cmpne/cmple/cmpge` are **not** assigned; their bytes are reserved and, if present,
-  fail with **R‑0706** (unsupported suffix). This is the documented capability limit.
+* `guard.nonzero` / `guard.shift` → **0x27 / 0x2F with no operand** (D‑38 (c)). Those are D.3's own
+  gaps; the `0x0C`/`0x0D` bytes this loader used for them are unassigned again, and `0x0E`/`0x0F`
+  took the global-window pair (`ldg`/`stg`). D.3's adjacency rule only inspects the previous byte,
+  and the type travels on the guarded instruction's own operand 0.
+* D.3 says every type suffix is a distinct opcode. The full cross-product (~20 ops × ~22 kinds) does
+  **not** fit the 32-slot `0x20–0x3F` block — the same spec hole both sides started from. Since
+  **D-38 (b)** the answer is the family form: **one byte per family, operand 0 = `type_table` row**,
+  and `exec` selects the path from that row's `kind`. The capability limit of the old byte table is
+  migrated, not widened: this VM has one int path (`i64`) and one float path (`f64`), so a family
+  instruction over any other kind loads (the Rust verifier accepts any numeric kind, plus `bool` for
+  `not`) and is refused at execution with **R-0706**. `fam_path()` is that rule in one place.
+* The gap ops D-38 (i) handed to this side (`0x0E/0x0F`, `0x68/0x69`, `0x84..0x87`, `0x8B..0x8F`,
+  `0x92/0x93`, `0xA5/0xA6`) decode, verify and disassemble like any other instruction. Six of them
+  have no carrier in the `InfyDyn` object model (no attribute map, no iterator, no set), so the
+  interpreter refuses them explicitly — see §7 and deviation **D-41**.
 
 ### 3.1 opcode table
 
@@ -172,8 +198,8 @@ ranges; these byte values are fixed here and shared by verifier / interpreter / 
 | 0x00 | `nop` | 0 | | — |
 | 0x01 | `ldl i` | 1 | `i<locals` | push `locals[i]` |
 | 0x02 | `stl i` | 1 | `i<locals` | pop → `locals[i]` |
-| 0x03 | `ldw i,ty` | 2 | `i<locals`, ty∈{9,7,11} | push wide (merged to one slot) |
-| 0x04 | `push k` | 1 | `k<n_strings` | push `string_pool[k]` (DY_STR) |
+| 0x03 | `ldw i,ty` | 2 | `i<locals`, `ty<n_types` and `types[ty].kind` ∈ {i64,u64,f64} | push wide (merged to one slot) |
+| 0x04 | `push k,ty` | 2 | `k<n_strings`, `ty<n_types` *(or* `NONE32`*— annotation only)* | push `string_pool[k]` (DY_STR); the annotation is for validation 3 (D‑38 (d)) |
 | 0x05 | `push.b k` | 1 | | push int (k & 0xFF, sign‑extended byte) |
 | 0x06 | `dup` | 0 | | push copy of TOS |
 | 0x07 | `pop` | 0 | | discard TOS |
@@ -181,42 +207,37 @@ ranges; these byte values are fixed here and shared by verifier / interpreter / 
 | 0x09 | `ld.frame` | 0 | | push frame id (debug) |
 | 0x0A | `dup2` | 0 | | push copies of top two |
 | 0x0B | `swap` | 0 | | swap top two |
-| 0x0C | `guard.nonzero` | 0 | | peek divisor; 0 ⇒ R‑0002 at run |
-| 0x0D | `guard.shift` | 0 | | peek shift count; ∉[0,64) ⇒ R‑0007 |
-| 0x20 | `add.i64` | 0 | | pop2 push1 (checked, R‑0001) |
-| 0x21 | `sub.i64` | 0 | | checked |
-| 0x22 | `mul.i64` | 0 | | checked |
-| 0x23 | `div.i64` | 0 | | **requires preceding `guard.nonzero`** |
-| 0x24 | `rem.i64` | 0 | | **requires preceding `guard.nonzero`** |
-| 0x25 | `neg.i64` | 0 | | pop1 push1 |
-| 0x26 | `abs.i64` | 0 | | pop1 push1 |
-| 0x27 | `and.i64` | 0 | | pop2 push1 |
-| 0x28 | `or.i64` | 0 | | pop2 push1 |
-| 0x29 | `xor.i64` | 0 | | pop2 push1 |
-| 0x2A | `not.i64` | 0 | | pop1 push1 |
-| 0x2B | `shl.i64` | 0 | | **requires preceding `guard.shift`** |
-| 0x2C | `shr.i64` | 0 | | **requires preceding `guard.shift`** (logical) |
-| 0x2D | `shr.a.i64` | 0 | | **requires preceding `guard.shift`** (arithmetic) |
-| 0x2E | `cmplt.i64` | 0 | | pop2 push int |
-| 0x2F | `cmple.i64` | 0 | | |
-| 0x30 | `cmpgt.i64` | 0 | | |
-| 0x31 | `cmpge.i64` | 0 | | |
-| 0x32 | `cmpeq.i64` | 0 | | |
-| 0x33 | `cmpne.i64` | 0 | | |
-| 0x34 | `cmp.i64` | 0 | | three‑state (‑1/0/1) |
-| 0x35 | `add.f64` | 0 | | |
-| 0x36 | `sub.f64` | 0 | | |
-| 0x37 | `mul.f64` | 0 | | |
-| 0x38 | `div.f64` | 0 | | **requires preceding `guard.nonzero`** |
-| 0x39 | `rem.f64` | 0 | | **requires preceding `guard.nonzero`** |
-| 0x3A | `neg.f64` | 0 | | |
-| 0x3B | `cmplt.f64` | 0 | | |
-| 0x3C | `cmpge.f64` | 0 | | |
-| 0x3D | `cmpeq.f64` | 0 | | `nan==nan` ⇒ 0 (false) |
+| 0x0C/0x0D | *(unassigned)* | | D‑38 (c): the `guard.*` bytes that used to sit here moved to D.3's own block | |
+| 0x0E | `ldg i` | 1 | `i<locals` | push `locals[i]` — see D‑41: the "global window" is the frame's local window here |
+| 0x0F | `stg i` | 1 | `i<locals` | pop → `locals[i]` |
+| 0x20 | `add ty` | 1 | `ty` numeric | pop2 push1 (checked, R‑0001) |
+| 0x21 | `sub ty` | 1 | | checked |
+| 0x22 | `mul ty` | 1 | | checked |
+| 0x23 | `div ty` | 1 | | **requires preceding `guard.nonzero`** |
+| 0x24 | `rem ty` | 1 | | **requires preceding `guard.nonzero`** |
+| 0x25 | `neg ty` | 1 | | pop1 push1 |
+| 0x26 | `abs ty` | 1 | | pop1 push1 |
+| 0x27 | `guard.nonzero` | **0** | | peek divisor; 0 ⇒ R‑0002 at run |
+| 0x28 | `and ty` | 1 | | pop2 push1 (no float path) |
+| 0x29 | `or ty` | 1 | | pop2 push1 (no float path) |
+| 0x2A | `xor ty` | 1 | | pop2 push1 (no float path) |
+| 0x2B | `not ty` | 1 | numeric *or* `bool` | pop1 push1, bitwise (no float path) |
+| 0x2C | `shl ty` | 1 | | **requires preceding `guard.shift`** (no float path) |
+| 0x2D | `shr ty` | 1 | | **requires preceding `guard.shift`** (logical; no float path) |
+| 0x2E | `shr.a ty` | 1 | | **requires preceding `guard.shift`** (arithmetic; no float path) |
+| 0x2F | `guard.shift` | **0** | | peek shift count; ∉[0,64) ⇒ R‑0007 |
+| 0x30 | `cmplt ty` | 1 | | pop2 push int |
+| 0x31 | `cmple ty` | 1 | | |
+| 0x32 | `cmpgt ty` | 1 | | |
+| 0x33 | `cmpge ty` | 1 | | |
+| 0x34 | `cmpeq ty` | 1 | | `nan==nan` ⇒ 0 (false) |
+| 0x35 | `cmpne ty` | 1 | | |
+| 0x36 | `cmp ty` | 1 | | three‑state (‑1/0/1) |
+| 0x37..0x3F | *(unassigned)* | | D‑38 (b): the old `add.f64`…`cmpeq.f64` bytes 0x35..0x3D and 0x3E/0x3F are gone — the width is now operand 0's `kind` | |
 | 0x40 | `jmp off` | 1 | off = global boundary | — (terminator) |
 | 0x41 | `br off` | 1 | | pop bool; jump if true |
 | 0x42 | `brf off` | 1 | | pop bool; jump if false |
-| 0x43 | `switch n` | 1 | n cases, then `n×u32` case targets inline | pop index; case or fall‑through after table |
+| 0x43 | `switch n` | 1 | `n ≤ 48` (`MAX_SWITCH_CASES`, the same cap `src/ifbc.rs` emits at), then `n×u32` case targets inline | pop index; case or fall‑through after table |
 | 0x44 | `tickloop n` | 1 | per‑loop iteration budget | back‑edge counter; over budget or clock ⇒ R‑0701 |
 | 0x45 | `leave` | 0 | | finally exit marker |
 | 0x46 | `throw.inf k` | 1 | k = string_pool selector | pop payload; exception dispatch |
@@ -229,21 +250,36 @@ ranges; these byte values are fixed here and shared by verifier / interpreter / 
 | 0x65 | `ret.multi n` | 1 | `n==ret_arity` | pop n → tuple |
 | 0x66 | `closure.new code_idx,cap_n` | 2 | `code_idx<func_count` | pop cap_n, push DY_FUNC |
 | 0x67 | `tailcall.stat f` | 1 | `f<func_count` | pop callee args; frame‑size legality (§5.6) |
+| 0x68 | `import idx` | 1 | `idx<n_imports` | δ (0,0): the row is a **load‑time** capability claim (§7.7.2 scan item 3); executing it is the no-op the shared table declares |
+| 0x69 | `import.attr k` | 1 | `k<n_strings` | δ (1,1); **refused at execution** (R‑0710) — no attribute map in `InfyDyn` (D‑41) |
 | 0x80 | `new.str k` | 1 | `k<n_strings` | push owned DY_STR |
-| 0x81 | `new.list ty` | 1 | ty = scalar/type code | push empty DY_LIST |
-| 0x82 | `new.dict kt,vt` | 2 | | push empty DY_DICT (insertion‑ordered) |
+| 0x81 | `new.list ty,count` | 2 | `ty<n_types` | pop `count` values (left to right) → DY_LIST; `count = 0` is the empty container |
+| 0x82 | `new.dict kt,vt,count` | 3 | `kt/vt<n_types` | pop `2*count` as pairs → DY_DICT (insertion‑ordered) |
 | 0x83 | `new.frame f` | 1 | `f<func_count` | push DY_CORO |
+| 0x84 | `seq.push ty` | 1 | `ty<n_types` | pop val, pop container (list/tuple), push container back |
+| 0x85 | `seq.len ty` | 1 | `ty<n_types` | δ (0,1): container stays, its length is pushed above it |
+| 0x86 | `seq.next ty` | 1 | `ty<n_types` | δ (1,2); **refused at execution** (R‑0710) — no iterator carrier |
+| 0x87 | `seq.iter ty` | 1 | `ty<n_types` | δ (1,1); **refused at execution** (R‑0710) — no iterator carrier |
 | 0x88 | `idx.get ty` | 1 | | pop idx,pop cont, push elem (R‑0004/R‑0005) |
 | 0x89 | `idx.set ty` | 1 | | pop val,idx,cont |
 | 0x8A | `slice ty` | 1 | | pop hi,lo,cont, push slice |
+| 0x8B | `inst.get k` | 1 | `k<n_strings` | δ (1,1); **refused at execution** (R‑0710) — no attribute map (D‑41) |
+| 0x8C | `inst.set k` | 1 | `k<n_strings` | δ (2,0); **refused at execution** (R‑0710) — no attribute map |
+| 0x8D | `map.insert ty` | 1 | `ty<n_types` | pop val, key, DY_DICT → insert, push container |
+| 0x8E | `str.concat ty` | 1 | `ty<n_types` | pop two DY_STR/DY_BYTES, push the join as DY_STR |
+| 0x8F | `seq.concat ty` | 1 | `ty<n_types` | pop two DY_LIST/DY_TUPLE, push the concatenation as a new DY_LIST |
 | 0x90 | `ref.inc` | 0 | | rc++ on TOS (peek) |
 | 0x91 | `ref.dec` | 0 | | rc-- on TOS; last strong ref released per §4.7.4 |
+| 0x92 | `new.tuple n` | 1 | | pop `n` values → DY_TUPLE |
+| 0x93 | `new.set ty` | 1 | `ty<n_types` | δ (1 pop = operand 0, 1 push) per the shared table; **refused at execution** (R‑0710) — no set carrier, and the operand shape is the registered defect **F25** |
 | 0x94 | `move.out i` | 1 | `i<locals` | push `locals[i]`, mark moved; later `ldl i` ⇒ R‑0731 |
 | 0xA0 | `tag.get` | 0 | | pop dyn, push DY_INT tag |
-| 0xA1 | `cast.dyn T` | 1 | `T<n_types` | tag compare (needs checkpoint §5.3); mismatch R‑0710 |
-| 0xA2 | `is.dyn T` | 1 | `T<n_types` | pop dyn, push DY_BOOL |
+| 0xA1 | `cast.dyn T` | 1 | `T<n_types`, `types[T].kind` has a dyn tag | tag compare (needs checkpoint §5.3); mismatch R‑0710 |
+| 0xA2 | `is.dyn T` | 1 | same | pop dyn, push DY_INT 0/1 |
 | 0xA3 | `box.dyn` | 0 | | identity (values are already InfyDyn) |
 | 0xA4 | `unbox.dyn` | 0 | | requires a preceding `is.dyn`/`tag.get` (§5.3) |
+| 0xA5 | `dyn.truthy` | 0 | | δ (0,1): value stays, its truthiness is pushed above it |
+| 0xA6 | `dyn.identity` | 0 | | pop two, push DY_BOOL — pointer identity, not `cmpeq` (§4.4 separates them) |
 | 0xA8 | `invoke.dynamic f` | 1 | `f<func_count` else **R‑0712** | pop callee args, push result |
 | 0xC0 | `frame.enter` | 0 | | coroutine‑only (§5.4) |
 | 0xC1 | `yield` | 0 | | **coroutine‑only, else R‑0707** |
@@ -287,9 +323,11 @@ Within a function the checks run in the D.10 order (1→6), then 6b, then the ex
    inside `[code_off,code_off+code_len)` → **R‑0704**.
 2. **Stack height** — fixpoint over basic blocks; entry height 0; a merge reached with two heights,
    or a height outside `[0, max_stack]` → **R‑0705**.
-3. **Operand type vs suffix** — `ldnull` wherever it appears, `ldw` annotation, index ranges,
-   `div`/`rem` not immediately preceded by `guard.nonzero`, `shl`/`shr`/`shr.a` not immediately
-   preceded by `guard.shift` → **R‑0706**.
+3. **Operand type vs suffix** — `ldnull` wherever it appears, `ldw`'s annotation *kind*, every table
+   index range (with `NONE32` skipped as "names no row", the same exception `src/ifbc.rs` applies),
+   each D.3 family's operand‑0 kind being numeric (`bool` additionally for `not`), `div`/`rem` not
+   immediately preceded by `guard.nonzero`, `shl`/`shr`/`shr.a` not immediately preceded by
+   `guard.shift` → **R‑0706**. Which of the accepted kinds this VM can *execute* is `fam_path()`.
 4. **Frame legality** — `yield`/`yield.from`/`frame.enter`/`frame.exit` in a frame whose
    `frame_kind != coroutine`; a `ret`/`ret.multi` arity inconsistent with `ret_arity` → **R‑0707**.
 5. **Host signature** — a `call.host`/`call.embed` target absent from `import_table`, wrong kind,
@@ -336,18 +374,23 @@ IFBC module
   func_count=<u>
   n_types=… n_imports=… n_lines=… n_excs=… n_strings=… code_len=… max_mem_bytes=…
 type_table:
-  [i] kind=… repr_c=… size=… align=… nfields=…
+  [i] kind=<n>(<name>) name=… repr_c=… size=… align=… nfields=…
 import_table:
-  [i] kind=… signed=… ret=… nparams=… (<param codes, comma separated>)
+  [i] kind=… signed=… ret=… nparams=… sig_hash=0x<8hex> (<param codes, comma separated>)
 func_table:
-  [i] code=[0xOFF,0xEND) locals=… max_stack=… nargs=… ret_arity=… ret_sig=… frame_kind=… flags=0x… name=…
+  [i] code=[0xOFF,0xEND) locals=… max_stack=… nargs=… ret_arity=… ret_sig=… frame_kind=… flags=0x… name=… sig_str=… sig_hash=0x<8hex>
 code (disassembly):
   f<i>:
-    0x<off>: <mnemonic> [ <operand hex> … ]     (switch prints n=… and [0x…] case list)
+    0x<off>: <mnemonic> [ <operand hex> … ]     (a D.3 family prints as `add.i64` and its type
+                                                operand is *not* repeated; switch prints n=… and
+                                                the [0x…] case list)
 line_map:      0x<off> -> line <n>
 exception_table:[0xSTART,0xEND) -> 0x<handler> depth=… kind=…
 string_pool:   [i] len=… bytes=<hex bytes>
 ```
+The mnemonic+suffix rule is the one `src/ifbc.rs::Instr::render` uses, so the two disassemblers name
+an instruction the same way even though the surrounding text differs — D4(3) has to reconcile the
+*line* format, not the naming.
 If the container fails to parse, the dump prints `IFBC: parse failed (R-XXXX)` and stops (and does
 not crash on any prefix of a truncated image).
 
@@ -375,13 +418,29 @@ not crash on any prefix of a truncated image).
 * **`InfyDyn` union** has no slot for a coroutine continuation or a `repr(C)` instance: DY_CORO
   stashes a heap control‑block pointer in `v.list.items` and its `func_idx` in `v.list.esz`
   (`u32`); a per‑module `coro_release` hook frees it. DY_INSTANCE holds only its tag.
+* **D‑41 (D4(2)'s implementation choices on this side).** (a) `ldg`/`stg` address the *frame's local
+  window*: both sides validate that operand as a slot (`operand_kinds` → `OperandKind::Slot`, so
+  `i < func.locals`), and this VM has no module‑level store, so there is nothing else the number
+  could address. (b) Six instructions decode, load‑verify and disassemble but are **refused at
+  execution with R‑0710**, because the object model has no carrier for them: `import.attr`,
+  `inst.get`, `inst.set` (no attribute map), `seq.iter`, `seq.next` (no iterator value) and
+  `new.set` (no set — and its operand shape is the registered defect **F25**). They are refused, not
+  reinterpreted: a module that reaches one of them gets a code and no result, which D1 will see as
+  the object model's boundary rather than as a decode error. (c) `import idx` (0x68) is a load‑time
+  claim, so executing it is the δ=(0,0) no‑op the shared table declares. (d) `seq.len` and
+  `dyn.truthy` have δ (0,1): they *peek* and push, which is what makes the height pass and the
+  interpreter agree on the same image. (e) `dyn.identity` is pointer identity, not `cmpeq`.
+  (f) `MAX_SWITCH_CASES` is now the same 48 on both sides — the loader's old `OPS_MAX*16` was 64, so
+  a 56‑case switch would have been scannable here and unemittable there.
 * **Capability limits (honest):** ints are fixed 64‑bit — **no bignum promotion** (Python/Lua
-  integers beyond i64 overflow to R‑0001). Reference **cycles are not collected** (§4.8 forbids a
-  tracing GC) so a `dyn` cycle leaks until exit. **Coroutines are single‑shot**: `coro.resume`
-  runs a body to its first `yield`/`frame.exit` and returns that value; suspend/resume state is
-  not persisted across separate resumes. `tailcall.stat` is validated for frame‑size legality but
-  executed as an ordinary call (no native tail‑frame reuse), so deep tail recursion is bounded by
-  the call‑depth cap. Exception dispatch uses the module `exception_table`; `finally` ordering is
-  limited to the `depth` field and uncaught throws surface their `kind` rather than longjmp. Typed
-  arithmetic/comparison exists only for i64 and f64 (see §3). `call.virt` operand‑stack height is
-  not provable and is not checked.
+  integers beyond i64 overflow to R‑0001).
+* **Family widths this VM executes** are `i64` and `f64` only (§3). Any other numeric kind — and
+  `f32`, which would silently compute at double precision — loads and is refused with R‑0706 at
+  execution. Reference **cycles are not collected** (§4.8 forbids a tracing GC) so a `dyn` cycle
+  leaks until exit. **Coroutines are single‑shot**: `coro.resume` runs a body to its first
+  `yield`/`frame.exit` and returns that value; suspend/resume state is not persisted across separate
+  resumes. `tailcall.stat` is validated for frame‑size legality but executed as an ordinary call (no
+  native tail‑frame reuse), so deep tail recursion is bounded by the call‑depth cap. Exception
+  dispatch uses the module `exception_table`; `finally` ordering is limited to the `depth` field and
+  uncaught throws surface their `kind` rather than longjmp. `call.virt` operand‑stack height is not
+  provable and is not checked.
