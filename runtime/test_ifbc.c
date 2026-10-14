@@ -25,33 +25,51 @@
 extern void infy_ifbc_module_free(InfyIfbcModule* m);
 typedef int (*InfyHostThunk)(InfyDyn** args, uint32_t nargs, InfyDyn** ret, const InfyNodeLoc* at);
 void infy_ifbc_bind_host(InfyIfbcModule* m, uint32_t import_idx, InfyHostThunk fn);
+extern uint64_t infy_dyn_len(const InfyDyn*);   /* the full private-dyn extern block is below */
 
 /* Leak oracle via the frozen public API, so this harness links against BOTH
  * test_ifbc_stubs.c and production infy_rt.c (see InfyMemStats::live_objs). */
 static uint64_t live_objs(void) { return infy_mem_stats().live_objs; }
 
-/* ===== opcode byte values — MUST match infy_ifbc.c's OPS table ===== */
+/* ===== opcode byte values — MUST match infy_ifbc.c's OPS table =====
+ * D-38 (b)/(c): 0x20..0x36 are D.3 FAMILY bytes (operand 0 = type_table row) and guard.* sit at
+ * 0x27/0x2F with no operand; D-38 (i) adds the gap ops the Rust side already emitted. */
 enum {
     OP_NOP = 0x00, OP_LDL = 0x01, OP_STL = 0x02, OP_LDW = 0x03, OP_PUSH = 0x04, OP_PUSHB = 0x05,
     OP_DUP = 0x06, OP_POP = 0x07, OP_LDNULL = 0x08, OP_LDFRAME = 0x09, OP_DUP2 = 0x0A,
-    OP_SWAP = 0x0B, OP_GUARD_NZ = 0x0C, OP_GUARD_SH = 0x0D,
-    OP_ADD_I = 0x20, OP_SUB_I = 0x21, OP_MUL_I = 0x22, OP_DIV_I = 0x23, OP_REM_I = 0x24,
-    OP_NEG_I = 0x25, OP_ABS_I = 0x26, OP_AND_I = 0x27, OP_OR_I = 0x28, OP_XOR_I = 0x29,
-    OP_NOT_I = 0x2A, OP_SHL_I = 0x2B, OP_SHR_I = 0x2C, OP_SHRA_I = 0x2D, OP_GUARD_NZ2 = 0x2F,
-    OP_ADD_F = 0x35,
+    OP_SWAP = 0x0B, OP_LDG = 0x0E, OP_STG = 0x0F,
+    OP_ADD = 0x20, OP_SUB = 0x21, OP_MUL = 0x22, OP_DIV = 0x23, OP_REM = 0x24,
+    OP_NEG = 0x25, OP_ABS = 0x26, OP_GUARD_NZ = 0x27, OP_AND = 0x28, OP_OR = 0x29,
+    OP_XOR = 0x2A, OP_NOT = 0x2B, OP_SHL = 0x2C, OP_SHR = 0x2D, OP_SHRA = 0x2E,
+    OP_GUARD_SH = 0x2F, OP_CMPLT = 0x30, OP_CMPLE = 0x31, OP_CMPGT = 0x32, OP_CMPGE = 0x33,
+    OP_CMPEQ = 0x34, OP_CMPNE = 0x35, OP_CMP = 0x36,
     OP_JMP = 0x40, OP_BR = 0x41, OP_BRF = 0x42, OP_SWITCH = 0x43, OP_TICKLOOP = 0x44,
     OP_LEAVE = 0x45, OP_THROW = 0x46, OP_ENTER_TRY = 0x47,
     OP_CALL_STAT = 0x60, OP_CALL_VIRT = 0x61, OP_CALL_HOST = 0x62, OP_CALL_EMBED = 0x63,
     OP_RET = 0x64, OP_RET_MULTI = 0x65, OP_CLOSURE = 0x66, OP_TAILCALL = 0x67,
+    OP_IMPORT = 0x68, OP_IMPORT_ATTR = 0x69,
     OP_NEW_STR = 0x80, OP_NEW_LIST = 0x81, OP_NEW_DICT = 0x82, OP_NEW_FRAME = 0x83,
-    OP_IDX_GET = 0x88, OP_IDX_SET = 0x89, OP_SLICE = 0x8A, OP_REF_INC = 0x90, OP_REF_DEC = 0x91,
+    OP_SEQ_PUSH = 0x84, OP_SEQ_LEN = 0x85, OP_SEQ_NEXT = 0x86, OP_SEQ_ITER = 0x87,
+    OP_IDX_GET = 0x88, OP_IDX_SET = 0x89, OP_SLICE = 0x8A,
+    OP_INST_GET = 0x8B, OP_INST_SET = 0x8C, OP_MAP_INSERT = 0x8D, OP_STR_CONCAT = 0x8E,
+    OP_SEQ_CONCAT = 0x8F,
+    OP_REF_INC = 0x90, OP_REF_DEC = 0x91, OP_NEW_TUPLE = 0x92, OP_NEW_SET = 0x93,
     OP_MOVE_OUT = 0x94,
     OP_TAG_GET = 0xA0, OP_CAST_DYN = 0xA1, OP_IS_DYN = 0xA2, OP_BOX_DYN = 0xA3, OP_UNBOX = 0xA4,
+    OP_DYN_TRUTHY = 0xA5, OP_DYN_IDENTITY = 0xA6,
     OP_INVOKE_DYN = 0xA8,
     OP_FRAME_ENTER = 0xC0, OP_YIELD = 0xC1, OP_YIELD_FROM = 0xC2, OP_FRAME_EXIT = 0xC3,
     OP_CORO_RESUME = 0xC4, OP_CORO_THROW = 0xC5,
     OP_TYPEOF = 0xE0, OP_SIZE_OF = 0xE1, OP_ALIGN_OF = 0xE2, OP_FIELD_OFF = 0xE3
 };
+
+/* D-38's unified kind space = IFABI scalar codes 0..17 then the extended classes. The harness seeds
+ * rows so that a row index below 18 *is* its kind, exactly as src/ifbc.rs::seed_scalar_rows does. */
+enum { TY_VOID = 0, TY_UNIT, TY_BOOL, TY_CHAR, TY_I8, TY_I16, TY_I32, TY_I64, TY_U8, TY_U16,
+       TY_U32, TY_U64, TY_F32, TY_F64, TY_STR, TY_BYTES, TY_PTR, TY_DYN, TY_LIST = 18,
+       TY_TUPLE, TY_DICT, TY_FUNC, TY_CORO, TY_INSTANCE, TY_REF, TY_BOX, TY_RC, TY_ARC,
+       TY_OPTION, TY_RESULT, TY_NEVER, TY_USIZE = 31, TY_ISIZE = 32,
+       N_SCALAR_ROWS = 18, N_KIND_ROWS = 33 };
 
 /* ===== growable byte buffer ===== */
 typedef struct { uint8_t* b; size_t n, cap; } Buf;
@@ -76,10 +94,19 @@ static size_t c_off(Buf* cb) { return cb->n; }
 static void c0(Buf* cb, uint8_t op) { bu_u8(cb, op); }
 static void c1(Buf* cb, uint8_t op, uint32_t a) { bu_u8(cb, op); bu_u32(cb, a); }
 static void c2(Buf* cb, uint8_t op, uint32_t a, uint32_t b) { bu_u8(cb, op); bu_u32(cb, a); bu_u32(cb, b); }
+static void c3(Buf* cb, uint8_t op, uint32_t a, uint32_t b, uint32_t c) { bu_u8(cb, op); bu_u32(cb, a); bu_u32(cb, b); bu_u32(cb, c); }
 static void cswitch(Buf* cb, uint32_t n, const uint32_t* tgts) { bu_u8(cb, OP_SWITCH); bu_u32(cb, n); for (uint32_t i = 0; i < n; i++) bu_u32(cb, tgts[i]); }
 
 /* ===== image assembly ===== */
-typedef struct { uint32_t code_off, code_len, locals, max_stack, nargs, ret_arity, ret_sig, name, flags, frame_kind; } FDesc;
+/* D-38's func record is twelve u32 in this order. */
+typedef struct { uint32_t code_off, code_len, locals, max_stack, nargs, ret_arity, ret_sig, name,
+                 sig_str, sig_hash, flags, frame_kind; } FDesc;
+/* The scenario literals below predate the merge and pass the ten fields they care about; FD() fills
+ * the two new slots with a non-zero sentinel, so a loader that reads the record in the wrong order
+ * gets a corrupt flags/frame_kind and every test here fails — a positional literal that zero-fills
+ * cannot show that. */
+#define FD(CO, CL, LOCS, STK, NA, RA, RS, NM, FL, FK) \
+    ((FDesc){ CO, CL, LOCS, STK, NA, RA, RS, NM, 0u, 0x5A5A5A5Au, FL, FK })
 typedef struct { uint32_t off, line; } LDesc;
 typedef struct { uint32_t start, end, handler; uint16_t depth, kind; } XDesc;
 
@@ -98,20 +125,24 @@ static void emit_img(Buf* out, const FDesc* funcs, uint32_t nf,
     bu_u32(out, nf);          /* func_count */
     bu_u8(out, 0);            /* frame_kind: single-address stack + local window */
 
-    /* type_table */
+    /* type_table — D-38's merged row: eight u32, then the field triples. Rows below N_SCALAR_ROWS
+     * are seeded so index == kind (the Rust builder does the same), which is what lets a family
+     * operand name `i64` as row 7. */
     bu_u32(out, ntypes);
     for (uint32_t i = 0; i < ntypes; i++) {
         bu_u32(out, 0);                 /* name_str */
-        bu_u32(out, 1);                 /* kind: struct */
+        bu_u32(out, i < N_KIND_ROWS ? i : TY_ISIZE); /* kind: row index == kind for the seeded rows */
         bu_u32(out, type_reprc ? 1u : 0u); /* flags bit0 = repr(C) */
         bu_u32(out, 16);                /* size */
         bu_u32(out, 8);                 /* align */
         bu_u32(out, 2);                 /* nfields */
+        bu_u32(out, 0);                 /* payload_a (list/tuple element, dict key) — C ignores it */
+        bu_u32(out, 0);                 /* payload_b (dict value / generic argument) */
         bu_u32(out, 0); bu_u32(out, 0);  bu_u32(out, 0); /* field0: name,off,ty */
         bu_u32(out, 0); bu_u32(out, 8);  bu_u32(out, 0); /* field1: name,off,ty */
     }
 
-    /* import_table */
+    /* import_table — the C row plus D-38's trailing sig_hash u32, then the param codes */
     bu_u32(out, nimports);
     for (uint32_t i = 0; i < nimports; i++) {
         bu_u32(out, 0);                 /* name_str */
@@ -119,18 +150,21 @@ static void emit_img(Buf* out, const FDesc* funcs, uint32_t nf,
         bu_u8(out, 2);                  /* nparams */
         bu_u8(out, 7);                  /* ret_sig = I64 */
         bu_u8(out, import_signed ? 1u : 0u); /* flags bit0 = IFABI-signed */
+        bu_u32(out, 0xDEADBEEFu);       /* sig_hash */
         bu_u8(out, 7);                  /* param0 = I64 */
         bu_u8(out, 7);                  /* param1 = I64 */
     }
 
-    /* func_table */
+    /* func_table — 48 bytes per row (twelve u32) */
     bu_u32(out, nf);
     bu_u64(out, 0);            /* max_mem_bytes (no runtime budget in tests) */
     for (uint32_t i = 0; i < nf; i++) {
         const FDesc* f = &funcs[i];
         bu_u32(out, f->code_off); bu_u32(out, f->code_len); bu_u32(out, f->locals);
         bu_u32(out, f->max_stack); bu_u32(out, f->nargs); bu_u32(out, f->ret_arity);
-        bu_u32(out, f->ret_sig); bu_u32(out, f->name); bu_u32(out, f->flags); bu_u32(out, f->frame_kind);
+        bu_u32(out, f->ret_sig); bu_u32(out, f->name);
+        bu_u32(out, f->sig_str); bu_u32(out, f->sig_hash);
+        bu_u32(out, f->flags); bu_u32(out, f->frame_kind);
     }
 
     /* code */
@@ -156,7 +190,12 @@ typedef enum {
     SC_VALID = 0, SC_NO_MAP, SC_LDNULL, SC_LDNULL_MID, SC_DIV_NOGUARD, SC_SHL_NOGUARD,
     SC_YIELD_NORMAL, SC_UNBOX_NOIS, SC_INVOKE_BAD, SC_FIELDOFF_BAD, SC_JUMP_MID,
     SC_STACK_DIVERGE, SC_HOST_BAD, SC_TAILCALL_BAD, SC_TICKET, SC_ALL_ERRORS,
-    SC_CLOSURE_OK, SC_CLOSURE_BAD, SC_THROW_OK, SC_OBJ_OK, SC_SWITCH_OK
+    SC_CLOSURE_OK, SC_CLOSURE_BAD, SC_THROW_OK, SC_OBJ_OK, SC_SWITCH_OK,
+    /* D4(2): the merged wire format and the gap ops */
+    SC_GAP_LIST, SC_GAP_DICT, SC_GAP_TUPLE, SC_GAP_STRCAT, SC_GAP_SEQCONCAT,
+    SC_GAP_TRUTHY, SC_GAP_IDENTITY, SC_GAP_WINDOW,
+    SC_FAMILY_BADKIND, SC_ISDYN_NO_TAG, SC_PUSH_OK, SC_LIST_COUNT_SHORT, SC_SWITCH_HUGE,
+    SC_REFUSED_ITER, SC_OLD_GUARD_BYTES, SC_GUARD_OK
 } Scenario;
 
 /* assemble one scenario's image into `out` (caller frees). */
@@ -165,7 +204,7 @@ static void build_img(Scenario s, Buf* out) {
     FDesc funcs[4]; uint32_t nf = 1;
     LDesc lines[32]; uint32_t nl = 0;
     XDesc excs[4]; uint32_t nx = 0;
-    uint32_t ntypes = 1, nimports = 1;
+    uint32_t ntypes = N_SCALAR_ROWS, nimports = 1;
     int type_reprc = 1, import_signed = 1;
     memset(funcs, 0, sizeof funcs);
 
@@ -174,64 +213,64 @@ static void build_img(Scenario s, Buf* out) {
             size_t o0 = c_off(&cb); (void)o0;
             c1(&cb, OP_LDL, 0);
             c1(&cb, OP_LDL, 1);
-            c0(&cb, OP_ADD_I);
+            c1(&cb, OP_ADD, TY_I64);        /* D-38 (b): the family byte + the i64 row */
             c0(&cb, OP_RET);
             size_t cl = c_off(&cb);
-            funcs[0] = (FDesc){0, (uint32_t)cl, 2, 2, 2, 1, 7, 0, 1, 0};
-            lines[0] = (LDesc){0, 10}; lines[1] = (LDesc){5, 10}; lines[2] = (LDesc){10, 11}; lines[3] = (LDesc){11, 12}; nl = 4;
+            funcs[0] = FD(0, (uint32_t)cl, 2, 2, 2, 1, 7, 0, 1, 0);
+            lines[0] = (LDesc){0, 10}; lines[1] = (LDesc){5, 10}; lines[2] = (LDesc){10, 11}; lines[3] = (LDesc){15, 12}; nl = 4;
             break;
         }
         case SC_NO_MAP: {
-            c1(&cb, OP_LDL, 0); c1(&cb, OP_LDL, 1); c0(&cb, OP_ADD_I); c0(&cb, OP_RET);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 2, 2, 2, 1, 7, 0, 1, 0};
+            c1(&cb, OP_LDL, 0); c1(&cb, OP_LDL, 1); c1(&cb, OP_ADD, TY_I64); c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 2, 2, 2, 1, 7, 0, 1, 0);
             nl = 0; /* intentionally empty -> W-0705 (non-blocking) */
             break;
         }
         case SC_LDNULL: { /* ldnull first */
             c0(&cb, OP_LDNULL); c0(&cb, OP_POP);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 2, 0, 0, 0, 0, 0, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 2, 0, 0, 0, 0, 0, 0);
             break;
         }
         case SC_LDNULL_MID: { /* ldnull after real instructions */
             c1(&cb, OP_PUSHB, 1); c0(&cb, OP_LDNULL); c0(&cb, OP_POP); c0(&cb, OP_POP);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 4, 0, 0, 0, 0, 0, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 0, 0, 0, 0, 0);
             break;
         }
         case SC_DIV_NOGUARD: {
-            c1(&cb, OP_PUSHB, 3); c1(&cb, OP_PUSHB, 4); c0(&cb, OP_DIV_I); c0(&cb, OP_RET);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0};
+            c1(&cb, OP_PUSHB, 3); c1(&cb, OP_PUSHB, 4); c1(&cb, OP_DIV, TY_I64); c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
             break;
         }
         case SC_SHL_NOGUARD: {
-            c1(&cb, OP_PUSHB, 3); c1(&cb, OP_PUSHB, 2); c0(&cb, OP_SHL_I); c0(&cb, OP_RET);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0};
+            c1(&cb, OP_PUSHB, 3); c1(&cb, OP_PUSHB, 2); c1(&cb, OP_SHL, TY_I64); c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
             break;
         }
         case SC_YIELD_NORMAL: {
             c1(&cb, OP_PUSHB, 7); c0(&cb, OP_YIELD); c0(&cb, OP_RET);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
             break;
         }
         case SC_UNBOX_NOIS: {
             c1(&cb, OP_PUSHB, 1); c0(&cb, OP_UNBOX); c0(&cb, OP_RET);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
             break;
         }
         case SC_INVOKE_BAD: { /* invoke.dynamic to func index 999 (>= func_count) */
             c1(&cb, OP_PUSHB, 1); c1(&cb, OP_INVOKE_DYN, 999); c0(&cb, OP_RET);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
             break;
         }
         case SC_FIELDOFF_BAD: { /* field_off on a non-repr(C) type */
             type_reprc = 0;
             c2(&cb, OP_FIELD_OFF, 0, 0); c0(&cb, OP_RET);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 2, 0, 1, 7, 0, 1, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 2, 0, 1, 7, 0, 1, 0);
             break;
         }
         case SC_JUMP_MID: { /* jmp to offset 1 (mid push.b) */
             c1(&cb, OP_PUSHB, 5); /* [0,5) */
             c1(&cb, OP_JMP, 1);   /* target 1 -> not a boundary */
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 4, 0, 0, 0, 0, 0, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 0, 0, 0, 0, 0);
             break;
         }
         case SC_STACK_DIVERGE: {
@@ -243,13 +282,13 @@ static void build_img(Scenario s, Buf* out) {
             c1(&cb, OP_PUSHB, 2);
             c1(&cb, OP_PUSHB, 3);
             c0(&cb, OP_RET);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 2, 0, 1, 7, 0, 1, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 2, 0, 1, 7, 0, 1, 0);
             break;
         }
         case SC_HOST_BAD: { /* call.host to an import that is not IFABI-signed */
             import_signed = 0;
             c1(&cb, OP_PUSHB, 1); c1(&cb, OP_PUSHB, 2); c1(&cb, OP_CALL_HOST, 0); c0(&cb, OP_RET);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
             break;
         }
         case SC_TAILCALL_BAD: { /* tailcall to a frame-size-incompatible function */
@@ -261,15 +300,15 @@ static void build_img(Scenario s, Buf* out) {
             bu_raw(&cb, cb0.b, cb0.n);
             uint32_t off1 = (uint32_t)cb.n;
             bu_raw(&cb, cb1.b, cb1.n);
-            funcs[0] = (FDesc){0, l0, 2, 1, 0, 1, 7, 0, 1, 0};   /* locals 2 */
-            funcs[1] = (FDesc){off1, l1, 1, 2, 0, 1, 7, 0, 1, 0}; /* locals 1 -> mismatch */
+            funcs[0] = FD(0, l0, 2, 1, 0, 1, 7, 0, 1, 0);   /* locals 2 */
+            funcs[1] = FD(off1, l1, 1, 2, 0, 1, 7, 0, 1, 0); /* locals 1 -> mismatch */
             bu_free(&cb0); bu_free(&cb1);
             break;
         }
         case SC_TICKET: { /* tickloop 3 then jmp back to itself: infinite without budget */
             c1(&cb, OP_TICKLOOP, 3);
             c1(&cb, OP_JMP, 0);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 2, 0, 0, 0, 0, 0, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 2, 0, 0, 0, 0, 0, 0);
             break;
         }
         case SC_ALL_ERRORS: { /* func0 ldnull (R-0706), func1 yield-normal (R-0707) */
@@ -279,8 +318,8 @@ static void build_img(Scenario s, Buf* out) {
             c1(&cbb, OP_PUSHB, 1); c0(&cbb, OP_YIELD); c0(&cbb, OP_POP);
             uint32_t la = (uint32_t)cba.n, lb = (uint32_t)cbb.n;
             bu_raw(&cb, cba.b, cba.n); uint32_t offb = (uint32_t)cb.n; bu_raw(&cb, cbb.b, cbb.n);
-            funcs[0] = (FDesc){0, la, 0, 4, 0, 0, 0, 0, 0, 0};
-            funcs[1] = (FDesc){offb, lb, 0, 4, 0, 0, 0, 0, 0, 0};
+            funcs[0] = FD(0, la, 0, 4, 0, 0, 0, 0, 0, 0);
+            funcs[1] = FD(offb, lb, 0, 4, 0, 0, 0, 0, 0, 0);
             bu_free(&cba); bu_free(&cbb);
             break;
         }
@@ -296,8 +335,8 @@ static void build_img(Scenario s, Buf* out) {
             c0(&cbB, OP_RET);
             uint32_t lA = (uint32_t)cbA.n, lB = (uint32_t)cbB.n;
             bu_raw(&cb, cbA.b, cbA.n); uint32_t offB = (uint32_t)cb.n; bu_raw(&cb, cbB.b, cbB.n);
-            funcs[0] = (FDesc){0, lA, 0, 8, 0, 1, 7, 0, 1, 0};
-            funcs[1] = (FDesc){offB, lB, 0, 8, 0, 1, 7, 0, 1, 0};
+            funcs[0] = FD(0, lA, 0, 8, 0, 1, 7, 0, 1, 0);
+            funcs[1] = FD(offB, lB, 0, 8, 0, 1, 7, 0, 1, 0);
             bu_free(&cbA); bu_free(&cbB);
             break;
         }
@@ -312,8 +351,8 @@ static void build_img(Scenario s, Buf* out) {
             c0(&cbB, OP_RET);
             uint32_t lA = (uint32_t)cbA.n, lB = (uint32_t)cbB.n;
             bu_raw(&cb, cbA.b, cbA.n); uint32_t offB = (uint32_t)cb.n; bu_raw(&cb, cbB.b, cbB.n);
-            funcs[0] = (FDesc){0, lA, 0, 8, 0, 1, 7, 0, 1, 0};
-            funcs[1] = (FDesc){offB, lB, 0, 8, 0, 1, 7, 0, 1, 0};
+            funcs[0] = FD(0, lA, 0, 8, 0, 1, 7, 0, 1, 0);
+            funcs[1] = FD(offB, lB, 0, 8, 0, 1, 7, 0, 1, 0);
             bu_free(&cbA); bu_free(&cbB);
             break;
         }
@@ -323,16 +362,130 @@ static void build_img(Scenario s, Buf* out) {
             c1(&cb, OP_PUSHB, 42);  /* 10..14 handler pushes 42 */
             c0(&cb, OP_RET);        /* 15     return 42 */
             excs[0] = (XDesc){5, 10, 10, 0, 0}; nx = 1;
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
             break;
         }
-        case SC_OBJ_OK: { /* new.list; push two ints; idx.get; add; ret */
-            c0(&cb, OP_NEW_LIST);      /* h->1 */
-            c1(&cb, OP_PUSHB, 7);      /* h->2 */
-            /* push into list: reuse idx.set? our list build needs set at index; use seq via idx.set on grown list.
-               Simpler: new.list then use host? Just verify load+exec of new.list + ret the list. */
-            c0(&cb, OP_RET);           /* returns the list (h->0) */
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0};
+        case SC_OBJ_OK: { /* new.list ty,count with count 0 is the empty container C already built */
+            c2(&cb, OP_NEW_LIST, TY_I64, 0);   /* h->1 */
+            c1(&cb, OP_PUSHB, 7);              /* h->2 */
+            c0(&cb, OP_RET);                   /* returns the int (h->1) */
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        /* ---- D4(2): the merged constructor forms and the gap ops, all executed ---- */
+        case SC_GAP_LIST: {   /* [7,8] then seq.push(9) -> seq.len -> 3 */
+            c1(&cb, OP_PUSHB, 7);              /* 0  h1 */
+            c1(&cb, OP_PUSHB, 8);              /* 5  h2 */
+            c2(&cb, OP_NEW_LIST, TY_I64, 2);   /* 10 h1 */
+            c1(&cb, OP_PUSHB, 9);              /* 19 h2 */
+            c1(&cb, OP_SEQ_PUSH, TY_I64);      /* 24 h1 */
+            c1(&cb, OP_SEQ_LEN, TY_I64);       /* 29 h2 (container stays, length on top) */
+            c0(&cb, OP_SWAP);                  /* 34 h2 */
+            c0(&cb, OP_POP);                   /* 35 h1 (drops the container) */
+            c0(&cb, OP_RET);                   /* 36 h0 */
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 2, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_GAP_DICT: {   /* {1:2} then map.insert(3,4) -> length 2 */
+            ntypes = N_KIND_ROWS;                /* the operand names the `dict` row */
+            c1(&cb, OP_PUSHB, 1);
+            c1(&cb, OP_PUSHB, 2);
+            c3(&cb, OP_NEW_DICT, TY_I64, TY_I64, 1);   /* h1 */
+            c1(&cb, OP_PUSHB, 3);
+            c1(&cb, OP_PUSHB, 4);
+            c1(&cb, OP_MAP_INSERT, TY_DICT);           /* h1 */
+            c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 3, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_GAP_TUPLE: {  /* new.tuple 2 */
+            c1(&cb, OP_PUSHB, 1);
+            c1(&cb, OP_PUSHB, 2);
+            c1(&cb, OP_NEW_TUPLE, 2);
+            c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 2, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_GAP_STRCAT: { /* push k,ty twice then str.concat -> "ss" */
+            c2(&cb, OP_PUSH, 0, TY_STR);
+            c2(&cb, OP_PUSH, 0, TY_STR);
+            c1(&cb, OP_STR_CONCAT, TY_STR);
+            c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 2, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_GAP_SEQCONCAT: { /* [1] ++ [2,3] -> len 3 */
+            ntypes = N_KIND_ROWS;                /* the operands name the `list` row */
+            c1(&cb, OP_PUSHB, 1);
+            c2(&cb, OP_NEW_LIST, TY_I64, 1);
+            c1(&cb, OP_PUSHB, 2);
+            c1(&cb, OP_PUSHB, 3);
+            c2(&cb, OP_NEW_LIST, TY_I64, 2);
+            c1(&cb, OP_SEQ_CONCAT, TY_LIST);
+            c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 3, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_GAP_TRUTHY: { /* push.b 0; dyn.truthy -> bool false under the int */
+            c1(&cb, OP_PUSHB, 0);
+            c0(&cb, OP_DYN_TRUTHY);
+            c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 2, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_GAP_IDENTITY: { /* dup then dyn.identity -> same box is the same value */
+            c1(&cb, OP_PUSHB, 5);
+            c0(&cb, OP_DUP);
+            c0(&cb, OP_DYN_IDENTITY);
+            c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 2, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_GAP_WINDOW: { /* import 0 (capability marker) + stg/ldg on the window */
+            c1(&cb, OP_IMPORT, 0);
+            c1(&cb, OP_PUSHB, 7);
+            c1(&cb, OP_STG, 0);
+            c1(&cb, OP_LDG, 0);
+            c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 1, 1, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_PUSH_OK: { /* push k,ty still executes as the pool constant alone (D-38 (d)) */
+            c2(&cb, OP_PUSH, 0, TY_STR);
+            c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 1, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_FAMILY_BADKIND: { /* add whose type row is `void` — not a numeric suffix (R-0706) */
+            c1(&cb, OP_PUSHB, 1); c1(&cb, OP_PUSHB, 2); c1(&cb, OP_ADD, TY_VOID); c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_ISDYN_NO_TAG: { /* is.dyn on a kind the dyn model cannot show -> R-0710 */
+            c1(&cb, OP_PUSHB, 1); c1(&cb, OP_IS_DYN, TY_VOID); c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_LIST_COUNT_SHORT: { /* new.list count 3 with one value on the stack -> R-0705 */
+            c1(&cb, OP_PUSHB, 1); c2(&cb, OP_NEW_LIST, TY_I64, 3); c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_SWITCH_HUGE: { /* 49 cases: over the shared MAX_SWITCH_CASES, not scannable */
+            c1(&cb, OP_PUSHB, 0);
+            uint32_t t[49];
+            for (uint32_t i = 0; i < 49; i++) t[i] = 0;
+            cswitch(&cb, 49, t);
+            c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_REFUSED_ITER: { /* seq.iter: loads, then the interpreter refuses it (D-41) */
+            ntypes = N_KIND_ROWS;
+            c2(&cb, OP_NEW_LIST, TY_I64, 0);     /* h1 */
+            c1(&cb, OP_SEQ_ITER, TY_LIST);       /* h1 (1 pop, 1 push) */
+            c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 1, 0, 1, 7, 0, 1, 0);
             break;
         }
         case SC_SWITCH_OK: { /* switch whose case table is an inline data island */
@@ -343,12 +496,27 @@ static void build_img(Scenario s, Buf* out) {
             c0(&cb, OP_NOP);                 /* 14: landing pad */
             c1(&cb, OP_PUSHB, 42);           /* 15 */
             c0(&cb, OP_RET);                 /* 20 */
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_GUARD_OK: { /* 0x27 guard.nonzero immediately before div: legal, and it executes */
+            c1(&cb, OP_PUSHB, 12);
+            c1(&cb, OP_PUSHB, 4);
+            c0(&cb, OP_GUARD_NZ);
+            c1(&cb, OP_DIV, TY_I64);
+            c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 2, 0, 1, 7, 0, 1, 0);
+            break;
+        }
+        case SC_OLD_GUARD_BYTES: { /* 0x0C/0x0D are unassigned now that guard.* moved to D.3's bytes */
+            bu_u8(&cb, 0x0C);
+            c0(&cb, OP_RET);
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 1, 0, 1, 7, 0, 1, 0);
             break;
         }
         default: {
             c0(&cb, OP_NOP);
-            funcs[0] = (FDesc){0, (uint32_t)c_off(&cb), 0, 4, 0, 0, 0, 0, 0, 0};
+            funcs[0] = FD(0, (uint32_t)c_off(&cb), 0, 4, 0, 0, 0, 0, 0, 0);
             break;
         }
     }
@@ -563,6 +731,99 @@ static void test_exec_paths(void) {
     CHECK(live_objs() == base, "(x) exec paths leak nothing");
 }
 
+/* ===== D4(2): the gap ops and the merged constructor forms, executed for real ===== */
+static int run_scenario_value(Scenario s, InfyDyn** out) {
+    Buf img; bu_init(&img); build_img(s, &img);
+    InfyIfbcModule* m = 0;
+    int rc = infy_ifbc_load(img.b, img.n, &m, 0, 0);
+    bu_free(&img);
+    if (rc) return rc;
+    InfyDyn* ret = 0;
+    int irc = infy_ifbc_invoke(m, 0, 0, 0, &ret, 0, infy_current_node_loc());
+    infy_ifbc_module_free(m);
+    if (irc) { if (ret) infy_dyn_decr(ret); return irc; }
+    *out = ret;
+    return 0;
+}
+
+static void test_gap_ops_exec(void) {
+    struct { Scenario s; const char* nm; InfyDynTag tag; int64_t num; uint64_t len; } t[] = {
+        { SC_GAP_LIST,      "(gap) list literals + seq.push + seq.len == 3",  DY_INT,   3, 0 },
+        { SC_GAP_DICT,      "(gap) new.dict + map.insert keeps 2 pairs",      DY_DICT,  0, 2 },
+        { SC_GAP_TUPLE,     "(gap) new.tuple 2 builds a 2-slot tuple",        DY_TUPLE, 0, 2 },
+        { SC_GAP_STRCAT,    "(gap) str.concat joins the two pool strings",    DY_STR,   0, 2 },
+        { SC_GAP_SEQCONCAT, "(gap) seq.concat joins [1] and [2,3]",           DY_LIST,  0, 3 },
+        { SC_GAP_TRUTHY,    "(gap) dyn.truthy of 0 is false",                 DY_BOOL,  0, 0 },
+        { SC_GAP_IDENTITY,  "(gap) dyn.identity of a dup is the same box",    DY_BOOL,  1, 0 },
+        { SC_GAP_WINDOW,    "(gap) import + stg/ldg round-trip the window",   DY_INT,   7, 0 },
+        { SC_PUSH_OK,       "(gap) push k,ty executes the pool constant",     DY_STR,   0, 1 },
+        { SC_GUARD_OK,      "(family) guard.nonzero at 0x27 then div = 12/4", DY_INT,   3, 0 },
+    };
+    uint64_t base = live_objs();
+    for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
+        InfyDyn* v = 0;
+        int rc = run_scenario_value(t[i].s, &v);
+        CHECK(rc == 0 && v, t[i].nm);
+        if (v) {
+            CHECK(v->tag == t[i].tag, "  value carries the expected dyn tag");
+            if (t[i].tag == DY_INT || t[i].tag == DY_BOOL) CHECK(v->v.i == t[i].num, "  expected value");
+            else {
+                uint64_t n = (t[i].tag == DY_STR) ? v->v.s.n : infy_dyn_len(v);
+                CHECK(n == t[i].len, "  expected container length");
+            }
+            infy_dyn_decr(v);
+        }
+    }
+    CHECK(live_objs() == base, "(gap) the gap-op runs leak nothing");
+}
+
+/* ===== D4(2) / D-41: ops the object model cannot carry load, then are refused explicitly ===== */
+static void test_model_refusal_is_explicit(void) {
+    InfyDyn* v = 0;
+    int rc = run_scenario_value(SC_REFUSED_ITER, &v);
+    CHECK(rc == R_DYN_TAG, "(refuse) seq.iter loads but is refused at execution with R-0710");
+    CHECK(v == 0, "(refuse) a refusal delivers no value");
+    /* it must LOAD: the capability scan (§7.7.2) reads these bytes, only execution declines */
+    Buf img; bu_init(&img); build_img(SC_REFUSED_ITER, &img);
+    InfyIfbcModule* m = 0;
+    CHECK(infy_ifbc_load(img.b, img.n, &m, 0, 0) == 0 && m, "(refuse) the module still passes all six validations");
+    if (m) infy_ifbc_module_free(m);
+    bu_free(&img);
+}
+
+/* ===== D4(2): the new operand-shape rejections ===== */
+static void test_merged_rejections(void) {
+    struct { Scenario s; int code; const char* nm; } t[] = {
+        { SC_FAMILY_BADKIND,    R_IFBC_TYPE,      "(shape) add whose type row is void -> R-0706" },
+        { SC_ISDYN_NO_TAG,      R_DYN_TAG,        "(shape) is.dyn on a kind with no dyn tag -> R-0710" },
+        { SC_LIST_COUNT_SHORT,  R_IFBC_STACK,     "(shape) new.list count 3 with one value -> R-0705" },
+        { SC_SWITCH_HUGE,       R_IFBC_NONLINEAR, "(shape) 49 switch cases exceed the shared cap -> R-0704" },
+        { SC_OLD_GUARD_BYTES,   R_IFBC_TYPE,      "(shape) the old 0x0C guard byte is unknown now -> R-0706" },
+    };
+    for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
+        uint64_t base = live_objs();
+        InfyIfbcModule* m = (InfyIfbcModule*)0x1;
+        int rc = load_scenario(t[i].s, &m, 0, 0);
+        CHECK(rc == t[i].code, t[i].nm);
+        CHECK(m == 0, "  rejected module left no handle");
+        CHECK(live_objs() == base, "  rejection frees the image copy");
+    }
+}
+
+/* ===== D4(2): the dumper prints the merged tables and the family suffixes ===== */
+static void test_dump_merged_format(void) {
+    Buf img; bu_init(&img); build_img(SC_GAP_DICT, &img);
+    FILE* f = mem_stream();
+    infy_ifbc_dump(img.b, img.n, f);
+    long n = 0; char* txt = slurp(f, &n);
+    CHECK(strstr(txt, "kind=7(i64)") != 0, "(dump) type rows print the D-38 kind name");
+    CHECK(strstr(txt, "sig_hash=0xDEADBEEF") != 0, "(dump) import rows print the trailing digest");
+    CHECK(strstr(txt, "sig_str=0 sig_hash=0x5A5A5A5A") != 0, "(dump) func rows print the 48-byte record's new fields");
+    CHECK(strstr(txt, "new.dict") != 0, "(dump) new.dict disassembles");
+    CHECK(strstr(txt, "map.insert") != 0, "(dump) the gap ops disassemble");
+    free(txt); fclose(f); bu_free(&img);
+}
+
 /* ===== (m) object model: list/dict/tuple/str, refcounts reach zero, no leaks ===== */
 extern InfyDyn* infy_dyn_list_new(void);
 extern InfyDyn* infy_dyn_tuple_new(void);
@@ -749,6 +1010,59 @@ static void test_hostile(void) {
     CHECK(live_objs() == base, "(fuzz) no leak across hostile loads");
 }
 
+/* ===== D4(2)/(3): one image, two readers — the bytes src/ifbc.rs wrote, loaded and executed here =====
+ * `runtime/fixtures/ifbc_rust_writer.bin` is the Rust encoder's committed output (the same手法 as
+ * C3's artifact fixture). If the two sides drift on the merged wire format this fails here, not in
+ * a document: the loader has to accept it, the disassembler has to read the same shapes, and the
+ * interpreter has to run both functions.
+ * The path is module-relative like test_rt.c's: run this binary from target/scratch. */
+static void test_rust_writer_fixture(void) {
+    uint64_t base = live_objs();
+    FILE* f = fopen("../../runtime/fixtures/ifbc_rust_writer.bin", "rb");
+    CHECK(f != 0, "(xlang) the Rust writer's fixture is present (run from target/scratch)");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t* img = (uint8_t*)malloc((size_t)sz);
+    size_t rd = fread(img, 1, (size_t)sz, f);
+    fclose(f);
+    CHECK(rd == (size_t)sz, "(xlang) fixture read fully");
+
+    FILE* rep = mem_stream();
+    InfyIfbcModule* m = 0;
+    int rc = infy_ifbc_load(img, (uint64_t)sz, &m, 1, rep);
+    CHECK(rc == 0 && m != 0, "(xlang) the C loader accepts the Rust image (all six validations)");
+    if (rc) { long n = 0; char* t = slurp(rep, &n); fprintf(stderr, "load rc=%d report:\n%s\n", rc, t); free(t); }
+    if (m) {
+        /* f0 = add_one(a) = a + 1: the family byte with its i64 type operand. */
+        InfyDyn* arg = infy_dyn_int(41);
+        InfyDyn* args[1] = { arg };
+        InfyDyn* ret = 0;
+        int irc = infy_ifbc_invoke(m, 0, args, 1, &ret, 0, infy_current_node_loc());
+        CHECK(irc == 0 && ret && ret->tag == DY_INT && ret->v.i == 42,
+              "(xlang) add.i64 produced by Rust executes to 41 + 1 = 42");
+        if (ret) infy_dyn_decr(ret);
+        infy_dyn_decr(arg);
+        /* f1 = pool_str(): the two-operand `push k,ty` (D-38 (d)). */
+        ret = 0;
+        irc = infy_ifbc_invoke(m, 1, 0, 0, &ret, 0, infy_current_node_loc());
+        CHECK(irc == 0 && ret && ret->tag == DY_STR && ret->v.s.n == 1 && ret->v.s.p[0] == '1',
+              "(xlang) push k,ty delivers the pool constant");
+        if (ret) infy_dyn_decr(ret);
+        infy_ifbc_module_free(m);
+    }
+    FILE* d = mem_stream();
+    infy_ifbc_dump(img, (uint64_t)sz, d);
+    long dn = 0; char* dt = slurp(d, &dn);
+    CHECK(strstr(dt, "n_types=18") != 0, "(xlang) the 18 seeded scalar rows are visible");
+    CHECK(strstr(dt, "kind=7(i64)") != 0, "(xlang) row 7 reads as i64 on this side too");
+    CHECK(strstr(dt, "add.i64") != 0, "(xlang) the family operand prints as a suffix");
+    CHECK(strstr(dt, "sig_hash=0x") != 0, "(xlang) the merged func/import records disassemble");
+    free(dt); fclose(d); fclose(rep); free(img);
+    CHECK(live_objs() == base, "(xlang) loading, running and dumping the Rust image leaks nothing");
+}
+
 int main(void) {
     test_valid_add();
     test_six_validations();
@@ -762,6 +1076,11 @@ int main(void) {
     test_dump_determinism();
     test_linemap_warning();
     test_exec_paths();
+    test_gap_ops_exec();
+    test_model_refusal_is_explicit();
+    test_merged_rejections();
+    test_dump_merged_format();
+    test_rust_writer_fixture();
     test_object_model();
     test_truncation_sweep();
     test_byte_mutation_sweep();

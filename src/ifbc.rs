@@ -3882,9 +3882,51 @@ mod tests {
             .collect()
     }
 
+    /// D4(2)'s cross-language lock: the module whose bytes are committed as
+    /// `runtime/fixtures/ifbc_rust_writer.bin`. It exercises exactly the shapes D-38 merged — a
+    /// family byte with its type operand, a two-operand `push k,ty`, the 48-byte func record and
+    /// the 18 seeded scalar rows — and `runtime/test_ifbc.c` loads *and executes* those bytes with
+    /// the production loader/interpreter (the same手法 as C3's artifact fixture).
+    fn c_loader_fixture_module() -> IfbcModule {
+        let mut m = IfbcModule::new_unit("CPY-313", 1, "u", "s.py").unwrap();
+        let k_one = m.intern("1");
+        let (off0, len0, ms0) = build_into(
+            &mut m,
+            1,
+            &[(Op::Ldl, vec![0]), (Op::PushB, vec![1]), (Op::Add, vec![7]), (Op::Ret, vec![])],
+        );
+        m.push_func("add_one", off0, len0, 1, ms0, &[TyKind::Int], TyKind::Int, 0, F_ENTRY);
+        let (off1, len1, ms1) =
+            build_into(&mut m, 0, &[(Op::Push, vec![k_one, 14]), (Op::Ret, vec![])]);
+        m.push_func("pool_str", off1, len1, 0, ms1, &[], TyKind::Str, 0, 0);
+        m.seal();
+        m
+    }
+
+    /// Two sides, one image: this writes the bytes, `runtime/test_ifbc.c::test_rust_writer_fixture`
+    /// hands the same file to `infy_ifbc_load` + `infy_ifbc_invoke`. Only
+    /// `INFY_REGENERATE_FIXTURE=1` rewrites the file, so a wire-format drift fails one side or the
+    /// other instead of silently moving the goalposts.
     #[test]
-    fn encode_decode_encode_is_idempotent() {
-        let m = sample();
+    fn c_loader_fixture_is_exactly_what_the_writer_produces() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/runtime/fixtures/ifbc_rust_writer.bin");
+        let m = c_loader_fixture_module();
+        let bytes = m.encode();
+        if std::env::var("INFY_REGENERATE_FIXTURE").is_ok() {
+            std::fs::write(path, &bytes).expect("explicit fixture regeneration");
+        }
+        let on_disk = std::fs::read(path)
+            .unwrap_or_else(|e| panic!("{} 不在仓库里（{e}）—— 用 INFY_REGENERATE_FIXTURE=1 生成一次", path));
+        assert_eq!(on_disk, bytes, "IFBC 写入器输出与已提交夹具不再逐字节相同（D-38 线格式漂移）");
+        // The C loader rejects the whole module on any finding, so the fixture has to be clean here
+        // too — build-time verifier and runtime loader must reach the same verdict on these bytes.
+        assert!(r_codes(&m).is_empty(), "the fixture draws a load-time violation: {:?}", r_reports(&m));
+        assert_eq!(m.types.len(), N_SCALAR_ROWS);
+        assert_eq!(m.funcs.len(), 2);
+    }
+
+    #[test]
+    fn encode_decode_encode_is_idempotent() {        let m = sample();
         let a = m.encode();
         let d = decode(&a).expect("decode");
         let b = d.encode();
