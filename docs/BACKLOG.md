@@ -382,6 +382,19 @@
       裁决 D4 时要把这两层（指令流 + 函数表）一起定，否则 D2 的双侧读法仍然对不上。
       验收：以附录 D 为唯一权威逐条判定哪侧改（`push k` 的类型操作数若保留，必须同时进 D.2 与 C 表），
       再让 D2 的双侧反汇编逐指令相等测试通过；结论与选择写进 `docs/spec-deviations.md`。
+      **D-38 轮（2026-10-14）状态 = 裁决完毕、实现未动**。全面审计发现范围比上面写的更大（三层：
+      容器包装有无 / `type_table`·`import_table`·`func_table` 记录形态 / 指令模型家族 vs 具体字节 ——
+      算术块 `0x20..0x3F` 两侧字节语义整体错位，且 `guard` 字节、`field_off` 操作数、区段包装都不同；
+      两侧从未交换过一字节，因为 `.inf ifbc` 恒空，所以从未现形）。裁决与新发现规范矛盾已写入
+      `docs/spec-deviations.md` **D-38/D-39**（提交 `b422629`），逐项钉死哪侧改什么。
+      **D4 余项（按 D-38 机械执行，无需再审计）**：
+      (1) Rust 侧 —— 删区包装、三表改合并形状、`TyKind` 重编号到 `SIG_*`（前 18 行自动置标量行）、
+          guard/box.dyn 去操作数、ldw/field_off 补操作数、switch 解禁（`1+4(1+n)` 宽度进边界表与线性扫描）；
+      (2) C 侧 —— OPS 表按 D.3 家族编号重排（`guard`→0x27/0x2F）、exec 按操作数 0 的 kind 分派、
+          push 增类型操作数、间隙指令（`ldg/stg/import/seq.*/inst.*/map.insert/*concat/new.tuple/new.set/
+          dyn.truthy/dyn.identity`）补装载+校验+执行+dumper、三表读取器对齐合并形状、82 断言 harness 同批改；
+      (3) 交叉验证 —— 同一镜像 Rust 反汇编 == C 反汇编逐指令相等（D2 的第一批断言），再回 D1 的装载验收。
+      实施顺序 (1)→(2)→(3)：任何一侧先对齐都能独立跑自己的测试，交叉验证要求两侧都在。
 
 ### 阶段 E：§12 合规套件（这是唯一能声称"兼容"的东西）
 
@@ -544,19 +557,24 @@
 
 ## 2. 当前指针
 
-> **下一轮第一件事：取 D1**（§1 里第一个 `[ ]`：`src/btrack.rs` 收敛 —— CPython 探测 → 能力扫描 → lowering → IFBC）。
-> D1 的验收原文：`@py` 的 tour 片段产出可被 `infy_ifbc.c` 装载的模块；`eval` 触发 `E-0711`；未映射 opcode 触发
-> `E-0712` 并点名具体项；声明 `py = "3.13"` 而本机是 3.14 触发 `E-0713`。
+> **下一轮第一件事：D4 的实现段**（裁决已在 D-38 落定，提交 `b422629`；按 D4 条目的余项 (1)→(2)→(3)
+> 机械执行，先 Rust 侧对齐）。D1 与 D2 被 D4 的实现阻塞（BACKLOG D1 的验收要求 C 虚拟机装载 Rust 产出的
+> 镜像，两侧线格式未对齐前该验收不可能成立）；D4 实现完成后紧接着做 D1（`src/btrack.rs` 收敛，
+> 4476 行 / 75 个 `pub fn` / 0 项单测的截断模块，**收敛而不是重写**：先 grep 调用点 + 一次性探针）。
 > D1 轮接活要点：
+> (1) **CPython 本机可用：`python` = 3.14.6**（D-38 轮实测）。D1 验收的"声明 `py = "3.13"` 而本机是 3.14
+>     触发 `E-0713`"这一条今天就有真环境可测；`btrack.rs` 的 `find_python`/`run_python_probe`/`CapTable`/
+>     `capability_scan`/`lower_named`/`ifbc::verify` 都在文件里，缺的是接线与测试，不是功能骨架。
+> (1b) **`src/ifbc.rs` 的 `TyKind`/区包装/switch 拒绝在 D4(1) 里都会被动**，`btrack.rs` 的 lowering
+>     调用点（`family()`/`push_pool()`/`guard_*(&[ty])`/`box_dyn(&[ty])` 等）要同批改 —— D4(1) 动手前
+>     先 `grep -n "Op::\|family(\|push_pool" src/btrack.rs`（79 处 `Op::`）估连动面。
 > (1) **`src/btrack.rs` 不是占位，是 4476 行 / 75 个 `pub fn` / 0 项单测的截断模块**（`atrack.rs`、`host.rs`、
 >     `doc.rs`、`conformance.rs` 才是 1 行占位）。截断模块的正确做法是**收敛而不是重写**：先跑一次性探针打印
 >     `@py` 片段进出的中间形态（探测 JSON → `CodeObj` → 能力扫描 → lowering 指令流），再定位缺口。
 >     该模块此前失败的那次撞到 agent 最大轮次（150），本轮要么提高 maxTurns 要么把 D1 拆成"探测+能力扫描"与
 >     "lowering+IFBC"两条增量。
-> (2) **D4 在 D1/D2 之前必须先裁，且范围比"操作数个数"大**：`push` Rust 2 vs C 1、`box.dyn` 1 vs 0、
->     `guard.nonzero`/`guard.shift` 1 vs 0、`ldw` 1 vs 2（字节宽度 `1 + 4*nops`，任一条都让两侧对同一镜像错位），
->     加上 `func_table` 记录 Rust 36 字节/条 vs C 40 字节/条（字段集也不同）。**别在裁之前把两侧布局动齐**——
->     以附录 D 为唯一权威逐条判哪侧改，结论进 `docs/spec-deviations.md`。
+> (2) **D4 已裁决（D-38），不要再审计、不要再选边**：任何与"哪侧改"有关的疑问一律回 D-38 的 (a)–(i)
+>     执行；发现的形状缺口若 D-38 未覆盖，先补 D-38 再动代码，不许两侧各自即兴。
 > (3) **`.inf ifbc` 目前恒为空**（`src/artifact.rs` 写 0 个 B 轨模块），D1 产出真字节码后 `infy build` 的段 blob
 >     会变，C3 轮钉住的 `199975 字节`/`build-id 4d8250b5…55ba`/`blob 738` 三处数字会一起动 —— 那是**预期变化**，
 >     要同步改 `docs/status.md`、`docs/coverage.md`、`README.md` 与本节，别留旧声称。
