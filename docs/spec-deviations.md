@@ -528,3 +528,108 @@ harness_refuses_tests_it_cannot_call_or_judge, bench_functions_enter_the_suite_o
 2. `discover_into` 直接用 `read_dir` 的顺序，而该顺序决定 `FileId` 编号、进而决定发射的 C 文本与
    build-id —— §7.3 的可复现承诺因此依赖文件系统。现在 `files`/`subdirs` 都按名字排序。
    锁点 = `pkg::tests::discover_orders_files_by_name`。
+
+## D-38 D4 裁决：Rust↔C 的 IFBC 在**三层**都不一致，容器/表形态以 C 侧文档为基准、指令模型以附录 D 的家族编号为基准
+
+**现象（D4 轮的全面审计，范围大于 BACKLOG 原描述的四条操作数差异）**：Rust（`src/ifbc.rs`）与 C
+（`runtime/infy_ifbc.c` + `runtime/IFBC.md`）各自实现了同一句 §7.8.1 容器式，但两边**从未交换过一字节**
+（`.inf ifbc` 恒空 = D1 未落地的直接后果），因此差异直到静态审计才现形，且不止 BACKLOG 列的那几条：
+
+1. **容器层**：Rust 给每个区加 `byte_len:u32 || body` 包装（`src/ifbc.rs:16-21` 自称"规范洞"）；
+   C 侧按 `IFBC.md` §1"各区自定界（前导 `u32 count` / `code` 前导 `u32 byte_len`）"顺序扫描，
+   **没有也不需要一个外层 len**（`code` 的长度就是它自己的前导 u32，Rust 注释里"不加包就分不出 code 与
+   line_map"的理由不成立）。`docs/internals/runtime-abi.md` §9 抄的是 C 侧形态。
+2. **表形态层**：
+   - `type_table`：Rust 每行 `{kind u8, name u32, a u32, b u32}`（kind 用**自家 `TyKind` 0..29**），
+     C 每行 `{name_str,kind,flags,size,align,nfields}×u32 + nfields×{u32×3}`（kind 是 D.9 布局语义）；
+   - `import_table`：Rust `{name,kind(ifbc 自有枚举),ifabi u16,ret_ty,params:Vec<u32>,sig_hash}`，
+     C `{name_str,kind u8,nparams u8,ret_sig u8,flags u8,psigs:nparams×u8}`；
+   - `func_table`：Rust 36 字节/条（8×u32 + frame/flags + u16），C 40 字节/条（10×u32），
+     且 C 在 `n_funcs` 后多一个 `u64 max_mem_bytes`（§7.9 的单元级配额，规范有据，Rust 没有）；
+   - 区段顺序：Rust `… func_table | code | line_map | exception_table …`，C `… import | func | code |
+     line_map | exception …` —— 规范 §7.8.1 的式子是 `header|type|import|func|code|line|exc|pool`，
+     两边其实都合规，差异只在包装与记录形态。
+3. **指令层**：D.3 给每个**家族**编号（`0x20 add`…），并要求类型后缀是"独立 opcode"；32 槽装不下
+   家族×宽度全集，两侧从同一规范洞出发选了相反的路 —— Rust 走"家族字节 + 操作数 0 = 类型索引"
+   （`DEV-IFBC-1`），C 走"具体字节表（i64/f64 各占一字节）+ 0 操作数"。连带四条 BACKLOG 点名的差异
+   （`push` 2vs1、`box.dyn` 1vs0、`guard.*` 1vs0、`ldw` 1vs2），以及 Rust 未察觉的更大冲突：
+   **算术块 0x20..0x3F 的字节语义整体错位**、`guard.nonzero/shift` 字节（Rust 0x27/0x2F vs C 0x0C/0x0D）、
+   `field_off idx`（D.9 记 1 操作数，C 实现 2 = `ty,field`，Rust 1）。
+
+**规范级新发现（登记为 D-39）**：§7.8.1 line 1235 把"**固定宽度指令**"列为规范性要求，而 D.4 的
+`0x43 switch n, [targets]` 与"每个基本块入口栈高度唯一"（line 1254）的语义**必需**内联变长目标表
+（C 按 `1+4(1+n)` 解码，`IFBC.md` §3 称其"长度静态可算"）；line 1233 自己写的 `0..3 个 u32 operand`
+同样与 D.4 冲突。以 D.4 为准（具体表随附录 D 发布，line 32/2300；§7.8.2 只是主干），"固定宽度"读作
+"**长度静态可算**"。锁定点随实现落地（Rust 侧 switch 解禁 + C 侧既有解码器的边界表）。
+
+**裁决（唯一线格式 = 合并形态，两侧各自向它对齐；本节是文档裁决，两侧实现是 D4 余项）**：
+- (a) **容器与表形态以 C 侧文档形状为基准**（`runtime/IFBC.md` §1 + `runtime-abi.md` §9 + 冻结头的
+  既有约定），Rust 删区包装、表记录改为下述合并形状：
+  - `type_table`：`n u32` + 每行 `{name_str u32, kind u32, flags u32, size u32, align u32,
+    nfields u32, payload_a u32, payload_b u32}` + `nfields×{name_str,off,ty}×u32`。
+    `kind` 的取值空间统一到 **IFABI §2 标量码**（`infy_ifbc.c:54` 的 `SIG_*`：void0 unit1 bool2
+    char3 i8 4 i16 5 i32 6 i64 7 u8 8 u16 9 u32 10 u64 11 f32 12 f64 13 str14 bytes15 ptr16 dyn17），
+    Rust 的 `TyKind` 重编号对齐，扩展 kind 从 18 起
+    （list/tuple/dict/func/coro/instance/ref/box/rc/arc/option/result/never/usize/isize）；
+    `payload_a/b` 收 Rust 的 list/dict 元素与泛型实参（C 侧忽略，非新语义），`flags` bit0 = `#[repr(C)]`
+    （D.9 的 `field_off` 判据，有据）。前 **18** 行由构建器自动置为标量行，令"类型索引 0..17 == 标量码"
+    恒成立 —— 这是让 C 的 `psigs:u8` 与 Rust 的 `params:Vec<u32>` 能引用同一空间的前提。
+  - `import_table`：C 形状 + 尾部 `sig_hash u32`，即每行 `{name_str u32, kind u8, nparams u8,
+    ret_sig u8, flags u8, sig_hash u32, psigs:nparams×u8}`。`kind` 取值统一为 **host=0 embed=1 event=2**
+    （D.5 的 `call.host idx`/`call.embed idx` 与 §7.6 的 event 中转都需要它；Rust 的
+    `ImportKind::{PyModule,Infib,Entry}` 折叠掉 —— 源语言在 header `lang_tag` 里，`entry` 由
+    `FuncEntry.flags` 的 `F_ENTRY` 表达，二者都不需要 import 行）。`ret_sig/psigs` 是标量码（= 前 18 行
+    的类型索引），`sig_hash` 是校验项 5 的快速比对值，文本仍可由 `name_str`+标量码重建。
+  - `func_table`：**48 字节/条** = `{code_off, code_len, locals, max_stack, nargs, ret_arity, ret_sig,
+    name_str, sig_str, sig_hash, flags u32, frame_kind u32}`；`n_funcs u32` 之后接
+    `max_mem_bytes u64`（C 已有，Rust 新增模块字段）。`sig_str` = 签名文本的池索引（`infy doc` 与
+    诊断需要，文本是真相、`sig_hash` 是快路径），`ret_sig` = 标量码。C 读取自身形状的 10 个字段的
+    **子集**，无需改动语义；Rust 的 `arity/ret_ty/sig` 分别并入 `nargs/ret_sig/sig_str`。
+  - `line_map`/`exception_table`/`string_pool`：两侧已经逐字节一致，未合并。
+- (b) **指令模型以附录 D 的家族编号为基准**（D.3 的字节就是家族首字节），C 侧向 Rust 侧对齐：
+  `0x20 add / 0x21 sub / 0x22 mul / 0x23 div / 0x24 rem / 0x25 neg / 0x26 abs / 0x27 guard.nonzero /
+  0x28 and / 0x29 or / 0x2a xor / 0x2b not / 0x2c shl / 0x2d shr / 0x2e shr.a / 0x2f guard.shift /
+  0x30 cmplt / 0x31 cmple / 0x32 cmpgt / 0x33 cmpge / 0x34 cmpeq / 0x35 cmpne / 0x36 cmp`，
+  **操作数 0 = 类型索引**，C 的 `exec` 按 `types[ty].kind` 选 i64/f64 路径、其余 kind → `R-0706`
+  （原"具体字节表"的能力限制原样迁移为"家族 + kind 检查"，表达力不减）。C 的
+  `add.f64..cmpeq.f64`（0x35..0x3D）与 `0x3E/0x3F` 让位给家族编号。读法依据：D.3 的"无后缀版本非法 /
+  运行时不看类型"禁止的是**运行期按值的类型重新解释语义**（无类型化模式），家族字节 + 编译期类型索引仍是
+  静态定型的指令，校验项 3 逐条静态查 kind —— 这正是 D.3 校验栏（"div/rem 必须紧邻 guard.nonzero"、
+  "shl/shr 必须紧邻 guard.shift"）在字节面上唯一可校验的形态。
+- (c) `guard.nonzero`/`guard.shift` = **0 操作数**、字节 0x27/0x2F（D.3 的邻接校验只看前一字节，类型由
+  被守护指令自己的操作数 0 携带）。Rust 去掉 `ty` 操作数，C 的 0x0C/0x0D 迁入。
+- (d) `push k,ty` = **2 操作数**（D.2 的 `push k` 只推 `string_pool[k]` 内联常量；B 轨常量带类型，
+  `IFBC.md` 的 `push`（DY_STR）单操作数装不下 int/float/bytes 常量。类型索引不新增字节面，与 (b) 同理。
+  C 增操作数，Rust 保持）。
+- (e) `ldw i,ty` = **2 操作数**（D.2 的校验栏要求类型注解可校验，注解必须在字节面上；C 的执行本来就不读
+  它，其语义钉死为"静态类型注解，不参与执行"。Rust 补第二操作数，字节沿用 C 的 0x03）。
+- (f) `box.dyn` = **0 操作数**（D.7 的装箱是恒等 —— B 轨值本来就是 `InfyDyn`，类型不需要操作数；
+  Rust 去掉 `ty`，与 C 一致）。`unbox.dyn` 两侧本已一致。
+- (g) `field_off idx` = **2 操作数**（`ty,field`，D.9 只给了 `idx` 一个名字的表漏了字段索引这个必然操作数，
+  C 的校验要用 `types[ty].nfields` 与 `fields[f].off`；Rust 补第 2 操作数，规范漏项随 D-39 一并记录）。
+- (h) `switch` 按 D.4 为**变长内联表**：`switch n` 后随 `n×u32` 目标，长度 `1+4(1+n)` 静态可算；
+  Rust 的 `SwitchNotSupported` 拒绝解禁（校验器与线性扫描按此宽度处理），落点 = Rust 侧新增边界跳过。
+- (i) 间隙操作（Rust 已有、C 未实现，字节沿用 Rust 的 D 间隙分配：`0x0E ldg/0x0F stg` —— 注意 Rust
+  现用 0x0C/0x0D，随 (c) 一并迁走、`0x68 import/0x69 import.attr`、`0x84..0x87 seq.*`、
+  `0x8B..0x8F inst.get/inst.set/map.insert/str.concat/seq.concat`、`0x92 new.tuple/0x93 new.set`、
+  `0xA5 dyn.truthy/0xA6 dyn.identity`）**由 C 侧补实现**：§7.7.6 明言"B 轨的代价在对象模型"，
+  而 §7.7.2 的能力扫描（`IMPORT_NAME` 等）必需这些指令；B 轨没有它们就只能把一切动态形状拒之门外。
+  Rust 的 `DEV-IFBC-6/7/12` 字节分配由本裁决转正为唯一表。
+**未裁决事项（不许被当已完成）**：两侧实现均未动 —— 本条只是把"哪侧改什么"钉死。D4 余项 =
+按 (a) 改 Rust（容器+三表编解码+`TyKind` 重编号+lowering 调用点）、按 (b)–(i) 改 C
+（OPS 表/exec/校验/dumper/82 断言 harness 同批改）、双侧交叉验证（同一镜像 Rust 反汇编 == C 反汇编，
+逐指令）与 D1 的装载验收。**`.inf ifbc` 恒空（D1）期间两侧永不在同一字节上相遇，本条不引入回归面。**
+
+## D-39 规范自身的两处指令面矛盾（D-38 审计时发现）：`switch` 的变长表 vs "固定宽度"规范性句；D.9 `field_off idx` 漏操作数
+
+**(a) "固定宽度指令"与 D.4 冲突**：§7.8.1 line 1233 写指令编码为"1 字节 opcode + **0..3 个 u32
+operand**（固定宽度…）"，line 1235 更把"**固定宽度指令**"列为规范性要求（理由：校验器 O(n) 单遍、
+不回溯）；但 D.4 的 `0x43 switch n, [targets]` 必需一个**内联的 n 项目标表** —— 若硬塞进 0..3 操作数，
+`switch` 最多 2 个 case，规范样例级别的 `match` 都编不出来；若目标表放指令流外，D.4 的写法
+（targets 紧跟 `n`）与"跳转目标必须落在指令边界"（D.1 校验项 1）就互相拆台。
+裁决 = 以 D.4 为准（line 32/2300 承诺"完整表随附录 D 发布"，附录 D 是指令面的权威；§7.8.1 的"固定宽度"
+读作"**长度静态可算**"，switch 占 `1+4(1+n)` 字节，仍是单遍前向扫描，规范性理由不被破坏）。
+C 侧已如此实现（`insn_boundaries`/`OPS[OP_SWITCH].special = SP_SWITCH`），Rust 侧本轮解禁（此前
+`CodeBuilder::emit` 对 `Switch` 直接报 `SwitchNotSupported`，是"以拒绝冒充合规"的形态）。
+同族的 D.9 `0xe3 field_off idx`：字段索引是这个指令的**必然操作数**（校验与执行都要 `types[ty].nfields`
+和 `fields[f].off`），D.9 的助记符列漏了它 —— 以 C 的 2 操作数形态（`ty,field`）为准，Rust 补齐。
