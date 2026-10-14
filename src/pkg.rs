@@ -19,9 +19,13 @@ pub const MANIFEST_NAME: &str = "MODULE.infy.toml";
 pub const LOCK_NAME: &str = "MODULE.infy.lock";
 pub const TOOLCHAIN_NAME: &str = "TOOLCHAIN.infy.toml";
 
-/// §2.2: the closed set of build-constraint names, before module `features` are added.
+/// §2.2: the closed set of build-constraint names, before module `features` are added. `ignore`
+/// and `test` are missing from the spec's own list (line 96) but used by its examples — §2.2's
+/// `//infy:build ignore` and §14.7's `//infy:build test` — so they are admitted here; `test` is the
+/// §5.9 test-build scope, the only constraint whose value depends on which command is running.
 pub const BASE_CONSTRAINTS: &[&str] = &[
-    "windows", "linux", "macos", "x86_64", "aarch64", "msvc", "gnu", "a_track", "b_track", "debug", "release",
+    "windows", "linux", "macos", "x86_64", "aarch64", "msvc", "gnu", "a_track", "b_track", "debug",
+    "release", "ignore", "test",
 ];
 
 /// §5.1 R3: a directory name that can appear in an import path.
@@ -541,12 +545,17 @@ fn discover_into(
         }
     }
     let _ = has_manifest_here;
+    // §7.3: `read_dir` hands entries in arbitrary order, and this order decides `FileId` numbering
+    // downstream (so it leaks into the emitted C text and the build-id). Sort both lists by name.
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    subdirs.sort_by(|a, b| a.0.cmp(&b.0));
     // A directory with no `.infy` files contributes no package but its children may.
     if !files.is_empty() {
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let dir_name = rel_str.rsplit('/').next().unwrap_or("root").to_string();
         let mut pkg_files = Vec::new();
         let mut names: BTreeMap<String, ()> = BTreeMap::new();
+        let mut nontest_declares_test_pkg = false;
         for (name, path) in &files {
             let text = std::fs::read_to_string(path).unwrap_or_default();
             if text.is_empty() {
@@ -558,8 +567,18 @@ fn discover_into(
                 continue;
             }
             let pkg_name = declared_package(&text).unwrap_or_else(|| dir_name.clone());
-            // §5.1 R1: package clause must equal the directory's last segment (cmd/* entry files
-            // may omit it and inherit the directory name, §3.1).
+            let is_test = name.ends_with("_test.infy");
+            // §5.1 R1: the package clause must equal the directory's last segment. §5.9 adds the
+            // two shapes a test file may use instead: `package <dir>_test` living beside
+            // `package <dir>`, and §14.1/§14.7's `tests/build_test.infy` = `package build_test`,
+            // where the file stem names the package.
+            let stem = name.strip_suffix(".infy").unwrap_or(name.as_str());
+            let r1_ok = pkg_name == dir_name
+                || rel_str.is_empty()
+                || (is_test && (pkg_name == format!("{dir_name}_test") || pkg_name == stem));
+            if pkg_name == format!("{dir_name}_test") && !is_test {
+                nontest_declares_test_pkg = true;
+            }
             if declared_package(&text).is_none() && !rel_str.starts_with("cmd/") {
                 handler.emit(
                     Diagnostic::new("E-0501", Phase::Name, 0, Position { line: 1, column: 1 })
@@ -568,33 +587,47 @@ fn discover_into(
                         .help(format!("补一行 `package {dir_name}`")),
                 );
             }
-            if pkg_name != dir_name && !(rel_str.is_empty()) {
+            if !r1_ok {
                 handler.emit(
                     Diagnostic::new("E-0501", Phase::Name, 0, Position { line: 1, column: 1 })
                         .titled(format!("包名与目录不符：`package {pkg_name}` 位于 `{rel_str}/`"))
-                        .note("一个目录 = 一个包，包名必须等于目录末段名（§5.1 R1）")
+                        .note("一个目录 = 一个包，包名必须等于目录末段名；测试文件另有两种形态 `\
+                               package {dir_name}_test` 或 `package <文件名主干>`（§5.1 R1 + §5.9）")
                         .help(format!("改为 `package {dir_name}`")),
                 );
             }
-            if names.insert(pkg_name.clone(), ()).is_some() {
-                // §5.1 R2: two package names in one directory is not allowed.
-                continue;
-            }
+            names.insert(pkg_name.clone(), ());
             pkg_files.push(PackageFile {
                 abs: path.clone(),
                 display: display_of(module_root, path),
                 name: name.clone(),
-                is_test: name.ends_with("_test.infy"),
+                is_test,
                 constraint: build_constraint_of(&text),
             });
         }
-        if pkg_files.len() != files.len() {
-            // duplicate package names: report once per directory
-            handler.emit(
-                Diagnostic::new("E-0501", Phase::Name, 0, Position { line: 1, column: 1 })
-                    .titled(format!("`{rel_str}/` 内存在两个包名"))
-                    .note("同一目录内不得同时存在两个包名（§5.1 R2）"),
-            );
+        // §5.1 R2: one directory = one package. The only pair §5.9 allows is `package <dir>` next
+        // to `package <dir>_test`, and the `_test` half may only be contributed by `_test.infy`
+        // files. (The check is on the *set* of names — several files of the same package sharing a
+        // directory is §14.1's `mod.infy` + `cache.infy`, not a violation.)
+        if !rel_str.is_empty() {
+            let distinct: Vec<&String> = names.keys().collect();
+            let test_pair = format!("{dir_name}_test");
+            let legal_pair = distinct.len() == 2
+                && distinct.iter().any(|n| **n == dir_name)
+                && distinct.iter().any(|n| **n == test_pair)
+                && !nontest_declares_test_pkg;
+            if distinct.len() > 1 && !legal_pair {
+                handler.emit(
+                    Diagnostic::new("E-0501", Phase::Name, 0, Position { line: 1, column: 1 })
+                        .titled(format!(
+                            "`{rel_str}/` 内存在 {} 个包名：{}",
+                            distinct.len(),
+                            distinct.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ")
+                        ))
+                        .note("同一目录内不得同时存在两个包名（§5.1 R2）；例外只有 `package <目录>` 与 \
+                               `package <目录>_test` 并存（§5.9）"),
+                );
+            }
         }
         let is_test_pkg = rel_str.starts_with("tests/") || pkg_files.iter().all(|f| f.is_test);
         let internal_under = internal_parent(&rel_str);
@@ -671,15 +704,32 @@ pub fn build_constraint_of(text: &str) -> Option<String> {
 
 // ---------------------------------------------------------------- §2.2 constraints
 
+/// §2.2 + §5.9: the build configuration a file is selected against. `test` is the §5.9 scope: true
+/// only under `infy test`, which is what makes `//infy:build test` mean "test build only" and
+/// `//infy:build !test` mean "not in the test build".
+#[derive(Clone, Debug)]
+pub struct BuildConfig<'a> {
+    pub os: &'a str,
+    pub arch: &'a str,
+    pub abi: &'a str,
+    /// `[features]` names declared by the manifest (§5.2).
+    pub features: &'a [String],
+    pub a_track: bool,
+    pub b_track: bool,
+    /// `[profile]` name (§5.2): `debug` | `release` | `release-small`.
+    pub profile: &'a str,
+    pub test: bool,
+}
+
 /// Evaluate a build-constraint expression against the active build configuration.
-pub fn constraint_matches(expr: &str, os: &str, arch: &str, abi: &str, features: &[String], a_track: bool, b_track: bool, profile: &str) -> Result<bool, String> {
+pub fn constraint_matches(expr: &str, cfg: &BuildConfig) -> Result<bool, String> {
     let toks = constraint_tokens(expr)?;
     let mut p = ConstraintParser { toks, pos: 0 };
     let v = p.or()?;
     if p.pos != p.toks.len() {
         return Err(format!("构建约束有多余内容：`{expr}`"));
     }
-    Ok(eval(&v, os, arch, abi, features, a_track, b_track, profile))
+    Ok(eval(&v, cfg))
 }
 
 #[derive(Clone, Debug)]
@@ -789,25 +839,26 @@ impl ConstraintParser {
     }
 }
 
-fn eval(n: &CNode, os: &str, arch: &str, abi: &str, features: &[String], a_track: bool, b_track: bool, profile: &str) -> bool {
+fn eval(n: &CNode, cfg: &BuildConfig) -> bool {
     match n {
-        CNode::Not(x) => !eval(x, os, arch, abi, features, a_track, b_track, profile),
-        CNode::And(xs) => xs.iter().all(|x| eval(x, os, arch, abi, features, a_track, b_track, profile)),
-        CNode::Or(xs) => xs.iter().any(|x| eval(x, os, arch, abi, features, a_track, b_track, profile)),
+        CNode::Not(x) => !eval(x, cfg),
+        CNode::And(xs) => xs.iter().all(|x| eval(x, cfg)),
+        CNode::Or(xs) => xs.iter().any(|x| eval(x, cfg)),
         CNode::Name(s) => match s.as_str() {
-            "windows" => os == "windows",
-            "linux" => os == "linux",
-            "macos" => os == "macos",
-            "x86_64" => arch == "x86_64",
-            "aarch64" => arch == "aarch64",
-            "msvc" => abi == "msvc",
-            "gnu" => abi == "gnu",
-            "a_track" => a_track,
-            "b_track" => b_track,
-            "debug" => profile == "debug",
-            "release" => profile == "release" || profile == "release-small",
+            "windows" => cfg.os == "windows",
+            "linux" => cfg.os == "linux",
+            "macos" => cfg.os == "macos",
+            "x86_64" => cfg.arch == "x86_64",
+            "aarch64" => cfg.arch == "aarch64",
+            "msvc" => cfg.abi == "msvc",
+            "gnu" => cfg.abi == "gnu",
+            "a_track" => cfg.a_track,
+            "b_track" => cfg.b_track,
+            "debug" => cfg.profile == "debug",
+            "release" => cfg.profile == "release" || cfg.profile == "release-small",
             "ignore" => false,
-            other => features.iter().any(|f| f == other),
+            "test" => cfg.test,
+            other => cfg.features.iter().any(|f| f == other),
         },
     }
 }
@@ -817,13 +868,33 @@ pub fn unknown_constraint_names(expr: &str, features: &[String]) -> Vec<String> 
     let mut out = Vec::new();
     for tok in constraint_tokens(expr).unwrap_or_default() {
         if tok.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') && !tok.is_empty() {
-            let known = BASE_CONSTRAINTS.contains(&tok.as_str()) || tok == "ignore" || features.iter().any(|f| *f == tok);
+            let known = BASE_CONSTRAINTS.contains(&tok.as_str()) || features.iter().any(|f| *f == tok);
             if !known {
                 out.push(tok);
             }
         }
     }
     out
+}
+
+/// §5.9 items 1-2 + §2.2: does this file take part in the build [`BuildConfig`] describes? Two
+/// independent gates, both of which must pass:
+///
+/// * §5.9 — a `*_test.infy` file, or any file of a test-only package (`tests/…`), is out of the
+///   ordinary build and in only for `infy test`;
+/// * §2.2 — the file's own `//infy:build` expression evaluated against the configuration, so
+///   `//infy:build ignore` is out of every build and `//infy:build !test` is out of `infy test`.
+///
+/// `Err` means the constraint text does not parse; the caller reports it, it is never a silent
+/// "include the file anyway" (§7.1: no silent degradation).
+pub fn file_selected(f: &PackageFile, pkg: &Package, cfg: &BuildConfig) -> Result<bool, String> {
+    if (f.is_test || pkg.is_test_pkg) && !cfg.test {
+        return Ok(false);
+    }
+    match &f.constraint {
+        Some(text) => constraint_matches(text, cfg),
+        None => Ok(true),
+    }
 }
 
 // ---------------------------------------------------------------- §5.7 MVS
@@ -1470,5 +1541,158 @@ req github.com/user/decoder 2.0.0\n";
         let mut h = Handler::default();
         Lock::parse("req github.com/u/a 1.5.0\n").check_against_manifest(&m.expect("manifest"), &mut h);
         assert!(h.diags.is_empty(), "{:?}", h.diags.iter().map(|d| d.code.clone()).collect::<Vec<_>>());
+    }
+
+    // ---------------------------------------------------------------- §2.2 / §5.9 build scope
+
+    fn build_cfg<'a>(features: &'a [String], a_track: bool, profile: &'a str, test: bool) -> BuildConfig<'a> {
+        BuildConfig { os: "windows", arch: "x86_64", abi: "gnu", features, a_track, b_track: false, profile, test }
+    }
+
+    /// §2.2's expression grammar evaluated against the configuration — including the two names the
+    /// spec uses but leaves out of its own list (`ignore`, `test`), and a half-written expression,
+    /// which must be an error rather than a silent "include the file anyway".
+    #[test]
+    fn constraint_expression_evaluates_the_build_config() {
+        let none: Vec<String> = Vec::new();
+        let normal = build_cfg(&none, false, "release", false);
+        let testb = build_cfg(&none, false, "release", true);
+        assert_eq!(constraint_matches("windows && x86_64", &normal), Ok(true));
+        assert_eq!(constraint_matches("!(linux, aarch64)", &normal), Ok(true), "§2.2: `,` means `&&`");
+        assert_eq!(constraint_matches("a_track", &normal), Ok(false));
+        assert_eq!(constraint_matches("!a_track", &normal), Ok(true));
+        assert_eq!(constraint_matches("debug", &normal), Ok(false), "`debug` is the [profile] name");
+        assert_eq!(constraint_matches("release", &build_cfg(&none, false, "release-small", false)), Ok(true));
+        assert_eq!(constraint_matches("ignore", &testb), Ok(false), "§2.2: `ignore` is out of every build");
+        assert_eq!(constraint_matches("test", &normal), Ok(false));
+        assert_eq!(constraint_matches("test", &testb), Ok(true), "§14.7: `//infy:build test` is the test build");
+        assert_eq!(constraint_matches("!test", &testb), Ok(false), "and `!test` keeps a file out of it");
+        let gpu = vec!["gpu".to_string()];
+        assert_eq!(constraint_matches("gpu", &build_cfg(&gpu, false, "release", false)), Ok(true), "[features] name");
+        assert_eq!(constraint_matches("gpu", &build_cfg(&none, false, "release", false)), Ok(false));
+        assert!(constraint_matches("linux &&", &normal).is_err(), "incomplete expression must not default to include");
+    }
+
+    /// §5.9 items 1-2: a `*_test.infy` file, and every file of a `tests/…` package, take part only
+    /// in the test build. The file's own `//infy:build` text is a second, independent gate.
+    #[test]
+    fn test_files_enter_only_the_test_build() {
+        let none: Vec<String> = Vec::new();
+        let pick = |name: &str, constraint: Option<&str>, in_tests: bool| -> (bool, bool) {
+            let f = PackageFile {
+                abs: PathBuf::from(name),
+                display: name.to_string(),
+                name: name.to_string(),
+                is_test: name.ends_with("_test.infy"),
+                constraint: constraint.map(|s| s.to_string()),
+            };
+            let p = Package {
+                dir: PathBuf::from("."),
+                rel: if in_tests { "tests".to_string() } else { "core/build".to_string() },
+                name: "build".to_string(),
+                files: vec![f.clone()],
+                internal_under: None,
+                is_test_pkg: in_tests,
+            };
+            (
+                file_selected(&f, &p, &build_cfg(&none, false, "release", false)).expect("no constraint error"),
+                file_selected(&f, &p, &build_cfg(&none, false, "release", true)).expect("no constraint error"),
+            )
+        };
+        assert_eq!(pick("mod.infy", None, false), (true, true), "an ordinary file is in both builds");
+        assert_eq!(pick("mod_test.infy", None, false), (false, true), "§5.9: out of the ordinary build");
+        assert_eq!(pick("report.infy", None, true), (false, true), "§5.9: a `tests/…` package is test-only");
+        assert_eq!(pick("mod.infy", Some("ignore"), false), (false, false), "§2.2 `ignore` wins in both");
+        assert_eq!(pick("mod.infy", Some("!test"), false), (true, false), "§2.2 `!test` gates the test build");
+        assert_eq!(pick("mod_test.infy", Some("linux"), false), (false, false), "both gates must pass");
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("scratch").join(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("scratch dir");
+        d
+    }
+
+    fn write_in(root: &Path, rel: &str, text: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent dir")).expect("mkdir");
+        std::fs::write(p, text).expect("write");
+    }
+
+    fn discover_codes(root: &Path) -> (ModuleGraph, Vec<String>) {
+        let mut h = Handler::default();
+        let g = discover(root, &full(), &mut h);
+        let codes = h
+            .diags
+            .iter()
+            .filter(|d| d.code.starts_with('E'))
+            .map(|d| format!("{} · {}", d.code, d.title))
+            .collect();
+        (g, codes)
+    }
+
+    /// §5.1 R1/R2 read together with §14.1 and §5.9: one directory is one package, but that package
+    /// may be spread over several files (`mod.infy` + `cache.infy` — §14.1's own layout), a
+    /// `_test.infy` file may add `package <dir>_test`, and inside `tests/` the file stem names the
+    /// package (§14.1's `tests/build_test.infy` = `package build_test`). Before C5 the R2 check was
+    /// keyed on the wrong thing — a *repeated* package name was treated as the violation, so one
+    /// file of a legal two-file package was dropped and `E-0501` fired.
+    #[test]
+    fn discover_accepts_the_package_shapes_the_spec_shows() {
+        let root = scratch("pkg-discover-shapes");
+        write_in(&root, "core/build/mod.infy", "package build\n\npub fn a() -> u32 { 1u32 }\n");
+        write_in(&root, "core/build/cache.infy", "package build\n\npub fn b() -> u32 { 2u32 }\n");
+        write_in(&root, "core/build/build_test.infy", "package build_test\n\n#[test]\nfn t() { }\n");
+        write_in(&root, "tests/report_test.infy", "package report_test\n\n#[test]\nfn u() { }\n");
+        let (g, codes) = discover_codes(&root);
+        assert!(codes.is_empty(), "the spec's own shapes must discover clean: {codes:?}");
+        let build = g.packages.iter().find(|p| p.rel == "core/build").expect("core/build package");
+        assert_eq!(build.files.len(), 3, "every file of the package survives, §14.1");
+        assert!(!build.is_test_pkg, "`core/build` is an ordinary package");
+        assert!(build.files.iter().filter(|f| f.is_test).count() == 1, "`build_test.infy` is the test file");
+        let tests = g.packages.iter().find(|p| p.rel == "tests").expect("tests package");
+        assert!(tests.is_test_pkg, "§5.9: `tests/…` is test-only");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// §5.1 R2 is still enforced where §5.9 does not carve an exception: two unrelated package names
+    /// in one directory, or a test file naming something the directory cannot host.
+    #[test]
+    fn discover_reports_genuinely_two_package_directories() {
+        let root = scratch("pkg-discover-two");
+        write_in(&root, "core/build/mod.infy", "package build\n\npub fn a() -> u32 { 1u32 }\n");
+        write_in(&root, "core/build/other.infy", "package other\n\npub fn c() -> u32 { 3u32 }\n");
+        let (_, codes) = discover_codes(&root);
+        assert!(
+            codes.iter().any(|c| c.starts_with("E-0501") && c.contains("2 个包名")),
+            "R2 must name both packages: {codes:?}"
+        );
+        let root2 = scratch("pkg-discover-bogus-test");
+        write_in(&root2, "core/build/wibble_test.infy", "package zzz\n\n#[test]\nfn t() { }\n");
+        let (_, codes2) = discover_codes(&root2);
+        assert!(
+            codes2.iter().any(|c| c.starts_with("E-0501") && c.contains("包名与目录不符")),
+            "a `_test.infy` file may not name an arbitrary package: {codes2:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&root2);
+    }
+
+    /// §7.3: `read_dir` hands entries in arbitrary order, and that order used to leak into the
+    /// package's file list — which decides `FileId` numbering downstream, so the emitted C text and
+    /// the build-id became a function of the filesystem. Files are now sorted by name.
+    #[test]
+    fn discover_orders_files_by_name() {
+        let root = scratch("pkg-discover-order");
+        for (i, n) in ["zeta.infy", "mid.infy", "alpha.infy"].iter().enumerate() {
+            write_in(&root, &format!("core/build/{n}"), &format!("package build\n\npub fn f{i}() -> u32 {{ {}u32 }}\n", i + 1));
+        }
+        let (g, codes) = discover_codes(&root);
+        assert!(codes.is_empty(), "{codes:?}");
+        let p = g.packages.iter().find(|p| p.rel == "core/build").expect("core/build package");
+        let names: Vec<String> = p.files.iter().map(|f| f.name.clone()).collect();
+        assert_eq!(names, vec!["alpha.infy".to_string(), "mid.infy".to_string(), "zeta.infy".to_string()], "§7.3: name order, not readdir order");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

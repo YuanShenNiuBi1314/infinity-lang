@@ -7,9 +7,10 @@
 //! What this build actually does end to end: the front end — stages [1]–[5] of §7.1 — over a whole
 //! module, stages [7]–[9] (`hir` lowering + C11 codegen + link + the §7.4 container) behind
 //! `infy build`, `infy run` = the same pipeline into a temporary directory plus execution
-//! (§13.4), plus `init`, `fmt`, `expand`, `mod tidy`, `toolchain probe|list` and
-//! `artifact info|sections`. `infy test`/`doc`/`ifbc …`/`lib pack` still report that the
-//! stage behind them is open work rather than pretending to succeed (see `docs/status.md`).
+//! (§13.4), `infy test` = the §5.9 test build plus the generated `#[test]` harness, plus `init`,
+//! `fmt`, `expand`, `mod tidy`, `toolchain probe|list` and `artifact info|sections`.
+//! `infy doc`/`ifbc …`/`lib pack` still report that the stage behind them is open work rather than
+//! pretending to succeed (see `docs/status.md`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -63,13 +64,15 @@ pub fn run(args: &[String]) -> i32 {
         "artifact" => artifact_cmd(&positional, &rest),
         "clean" => clean_cmd(flag("--cache")),
         "run" => run_cmd(&positional, &rest),
-        "test" | "bench" | "doc" | "lib" | "ifbc" | "ingest" | "conformance" | "lsp" | "pack" | "unpack" | "install" | "sumdb" | "database" => {
+        "test" => test_cmd(&positional, &rest),
+        "bench" | "doc" | "lib" | "ifbc" | "ingest" | "conformance" | "lsp" | "pack" | "unpack" | "install" | "sumdb" | "database" => {
             eprintln!(
                 "notice: `infy {cmd}` is not implemented in this build — stages [7]-[9] are wired \
-                 (`infy build`, `infy run`), but this command still needs its own stage: `test` = \
-                 the §5.9 `#[test]` harness (BACKLOG C5), `ifbc`/`ingest` = the B-track bytecode \
-                 path (D1/D2), `doc`/`lib`/`conformance`/`lsp`/… = see docs/status.md. Commands \
-                that do work: check, build, run, fmt, expand, init, mod tidy, toolchain, target, \
+                 (`infy build`, `infy run`) and `infy test` runs the §5.9 `#[test]` harness, but \
+                 this command still needs its own stage: `ifbc`/`ingest` = the B-track bytecode \
+                 path (D1/D2), `bench` = §13.4 has no such subcommand (it is `infy test --bench`), \
+                 `doc`/`lib`/`conformance`/`lsp`/… = see docs/status.md. Commands \
+                that do work: check, build, run, test, fmt, expand, init, mod tidy, toolchain, target, \
                  artifact info."
             );
             exit::GENERIC
@@ -93,6 +96,7 @@ fn usage() -> String {
         ("check [--strict] [--diag-json f] [--deadlock]", "stages [1]-[5], emits no code, needs no cc (§9.4)"),
         ("build [--target T] [--cc P] [--reproducible] [--verify-reproducible]", "stages [1]-[9]: codegen, link, §7.4 container"),
         ("run [mod] [--target T] [--cc P]", "stages [1]-[9] into a temporary directory, then executes the artifact (§13.4)"),
+        ("test [mod] [--bench] [--target T] [--cc P]", "§5.9 test build (`*_test.infy` + `tests/…` in scope) + run the `#[test]` harness (§13.4)"),
         ("fmt [-w] [--check]", "official formatting, byte-unique (§9.5)"),
         ("expand [--macro name] [--stage all|macro|derive]", "auditable macro/derive output (§6.8)"),
         ("mod tidy|why|verify|upgrade|vendor", "dependency resolution, MVS (§5.7)"),
@@ -101,7 +105,7 @@ fn usage() -> String {
         ("artifact info|sections <file> [--nodes]", ".inf meta and segment layout (§7.4)"),
         ("lib pack|verify|dump|diff", ".infib containers (§13.2) — not implemented yet"),
         ("ifbc dump|verify", "IFBC segment inspection (§7.8.4) — not implemented yet"),
-        ("test / bench / doc / conformance / ingest / sumdb / lsp", "not implemented yet"),
+        ("bench / doc / conformance / ingest / sumdb / lsp", "not implemented yet (`--cov` is refused outright: no instrumentation stage)"),
         ("clean [--cache]", "remove build output (§5.10)"),
         ("-V, --version", "language, tool, IFABI and IFBC versions"),
     ] {
@@ -121,6 +125,8 @@ pub struct Loaded {
     pub files: BTreeMap<FileId, ParsedFile>,
     /// file → package path
     pub file_pkg: BTreeMap<FileId, String>,
+    /// §5.9: the build configuration this module was loaded for (the test build sees more files).
+    pub scope: Scope,
     pub handler: Handler,
 }
 
@@ -154,16 +160,91 @@ pub fn find_module_root(path: Option<&str>) -> Option<PathBuf> {
     }
 }
 
+/// §5.9 + §13.4: which build a command is asking for. Only `infy test` sets `test`; that one flag
+/// decides both file selection (`*_test.infy` and `tests/…` are out of the ordinary build) and
+/// what the generated `main` does (run the `#[test]` harness instead of the §7.4 entry).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scope {
+    /// §5.9: the test build.
+    pub test: bool,
+    /// §13.4's `infy test --bench`: run `#[bench]` functions too.
+    pub bench: bool,
+}
+
+/// §2.2: the parts a build constraint tests against a target triple (`arch-vendor-os[-abi]`).
+/// `darwin` is reported as `macos` because `macos` is the name §2.2's closed set uses.
+fn triple_parts(triple: &str) -> (String, String, String) {
+    let segs: Vec<&str> = triple.split('-').collect();
+    let arch = segs.first().copied().unwrap_or("").to_string();
+    let os = match segs.get(2).copied().unwrap_or("") {
+        "darwin" => "macos".to_string(),
+        s => s.to_string(),
+    };
+    (arch, os, segs.get(3).copied().unwrap_or("").to_string())
+}
+
 /// Read, lex and parse every `.infy` file of a module: stages [1] and the package layer of [3].
 pub fn load(root: &Path, handler: &mut Handler) -> Option<Loaded> {
+    load_scoped(root, handler, &Scope::default(), &host_triple())
+}
+
+/// [`load`] for one build configuration: §5.9's test scope plus §2.2's constraint evaluation, so
+/// `infy test` sees `*_test.infy` / `tests/…` and `infy check|build|run` do not.
+pub fn load_scoped(root: &Path, handler: &mut Handler, scope: &Scope, triple: &str) -> Option<Loaded> {
     let text = std::fs::read_to_string(root.join(pkg::MANIFEST_NAME)).ok()?;
     let manifest = pkg::parse_manifest(&text, pkg::MANIFEST_NAME, handler)?;
     let graph = pkg::discover(root, &manifest, handler);
+    let (arch, os, abi) = triple_parts(triple);
+    let features = manifest.feature_names();
+    let cfg = pkg::BuildConfig {
+        os: &os,
+        arch: &arch,
+        abi: &abi,
+        features: &features,
+        a_track: manifest.declares_a_track(),
+        b_track: !manifest.b_track.is_empty(),
+        profile: profile_name(&manifest.profile),
+        test: scope.test,
+    };
     let mut sources = Sources::default();
     let mut files: BTreeMap<FileId, ParsedFile> = BTreeMap::new();
     let mut file_pkg: BTreeMap<FileId, String> = BTreeMap::new();
+    // §2.2: a name outside the closed set plus `[features]` is `E-0012`, checked for **every**
+    // discovered file — including the ones this configuration excludes, or a typo in a constraint
+    // would silently drop the file instead of diagnosing. (`lexer::lex_file_with_features` can also
+    // report it, but only for files that reach the lexer, and twice is worse than once.)
     for package in &graph.packages {
         for f in &package.files {
+            if let Some(text) = &f.constraint {
+                for name in pkg::unknown_constraint_names(text, &features) {
+                    handler.emit(
+                        Diagnostic::new("E-0012", Phase::Lex, 0, Position { line: 1, column: 1 })
+                            .titled(format!("{}: 未知构建约束名 `{name}`", f.display))
+                            .note("§2.2 的封闭集之外，只有 module 清单 `[features]` 里声明的名字可用")
+                            .help("改用封闭集里的名字，或在 `MODULE.infy.toml` 的 `[features]` 声明它"),
+                    );
+                }
+            }
+        }
+    }
+    for package in &graph.packages {
+        for f in &package.files {
+            match pkg::file_selected(f, package, &cfg) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(m) => {
+                    // §2.2 names no code for a constraint expression that does not parse; it is
+                    // reported with the other constraint errors (docs/spec-deviations.md D-37) and
+                    // the file is *not* silently included.
+                    handler.emit(
+                        Diagnostic::new("E-0012", Phase::Lex, 0, Position { line: 1, column: 1 })
+                            .titled(format!("{}: 构建约束表达式无法解析", f.display))
+                            .note(format!("{m}（§2.2 的表达式文法：{}`）", "//infy:build <约束>"))
+                            .help("ident / `!` / 括号 / `&&`|`,` / `||`；约束名限 §2.2 封闭集加 `[features]`"),
+                    );
+                    continue;
+                }
+            }
             let body = match std::fs::read_to_string(&f.abs) {
                 Ok(b) => b,
                 Err(e) => {
@@ -181,7 +262,7 @@ pub fn load(root: &Path, handler: &mut Handler) -> Option<Loaded> {
     let mut lint = handler.lint.clone();
     lint.strict = matches!(manifest.profile.diagnostic_level, crate::pkg::DiagLevel::Strict);
     handler.lint = lint;
-    Some(Loaded { root: root.to_path_buf(), manifest, sources, files, file_pkg, handler: std::mem::take(handler) })
+    Some(Loaded { root: root.to_path_buf(), manifest, sources, files, file_pkg, scope: *scope, handler: std::mem::take(handler) })
 }
 
 /// Run stages [2]–[5] over an already-loaded module and return it with diagnostics filled in.
@@ -340,6 +421,12 @@ fn resolve_entry(l: &mut Loaded, prog: &sema::Program) {
         return;
     }
     if prog.entry.is_none() {
+        // §5.9: the test build's entry is the generated `#[test]` harness, not a chain or `fn
+        // main`, so "the artifact has no entry" is not a diagnosis here — `infy test` on a module
+        // with no `#[test]` function runs zero tests and exits 0 (§13.4: 0 = success).
+        if l.scope.test {
+            return;
+        }
         let has_main = prog.fns.iter().any(|f| f.name == "main" && f.self_ty.is_none());
         if !has_main && prog.chains.is_empty() {
             l.handler.emit(
@@ -397,10 +484,10 @@ fn init(positional: &[String]) -> i32 {
     exit::OK
 }
 
-/// Stages [1]-[5] (§7.1) plus the §9.2 report: shared by `infy check`, `infy build` and
-/// `infy run` so all three agree on what a module is and on the exit code the diagnostics give.
-/// `Err(code)` is the exit code the caller must return without proceeding.
-fn frontend(positional: &[String], rest: &[String]) -> Result<(Loaded, sema::Program, String, i32), i32> {
+/// Stages [1]-[5] (§7.1) plus the §9.2 report: shared by `infy check`, `infy build`, `infy run`
+/// and `infy test` so all four agree on what a module is and on the exit code the diagnostics
+/// give. `Err(code)` is the exit code the caller must return without proceeding.
+fn frontend(positional: &[String], rest: &[String], scope: &Scope) -> Result<(Loaded, sema::Program, String, i32), i32> {
     let root = match pkg_root(positional) {
         Some(r) => r,
         None => {
@@ -412,7 +499,8 @@ fn frontend(positional: &[String], rest: &[String]) -> Result<(Loaded, sema::Pro
     if rest.contains(&"--deadlock".to_string()) {
         handler.lint.deadlock_analysis = true;
     }
-    let mut l = match load(&root, &mut handler) {
+    let triple = flag_value(rest, "--target").unwrap_or_else(host_triple);
+    let mut l = match load_scoped(&root, &mut handler, scope, &triple) {
         Some(l) => l,
         None => {
             let text = handler.render(&handler_empty_sources(&root));
@@ -439,7 +527,7 @@ fn frontend(positional: &[String], rest: &[String]) -> Result<(Loaded, sema::Pro
 }
 
 fn check(positional: &[String], rest: &[String], building: bool) -> i32 {
-    let (l, prog, summary, code) = match frontend(positional, rest) {
+    let (l, prog, summary, code) = match frontend(positional, rest, &Scope::default()) {
         Ok(x) => x,
         Err(c) => return c,
     };
@@ -449,7 +537,7 @@ fn check(positional: &[String], rest: &[String], building: bool) -> i32 {
         println!("check FAILED — {summary}");
     }
     if building && code == exit::OK {
-        return build_c(&l, &prog, rest);
+        return build_c(&l, &prog, rest, "infy build");
     }
     if building {
         eprintln!("error: `infy build` 中止于阶段 [1]-[5]：诊断里有阻断项（§7.1：任一阶段出现 `E-` 即中止后续阶段）");
@@ -470,24 +558,27 @@ pub struct RunOutcome {
 
 /// §13.4: `infy run` = build to a temporary directory, then execute. The stages are the same
 /// [1]-[5] + [7]-[9] that `infy build` runs; only the output directory and the execution differ.
-fn run_module(positional: &[String], rest: &[String]) -> RunOutcome {
+/// `infy test` shares this path with a test [`Scope`] — §5.9/§13.4 define it as "build + execute"
+/// as well, only with a different entry (the `#[test]` harness).
+fn run_module(positional: &[String], rest: &[String], scope: &Scope) -> RunOutcome {
+    let label = if scope.test { "infy test" } else { "infy run" };
     for f in ["--arg", "--feature"] {
         if rest.iter().any(|a| a == f) {
             eprintln!(
-                "error: `infy run {f}` 未实现：§13.4 列了这两个开关，但 {f} 在当前实现里没有任何消费者 \
+                "error: `{label} {f}` 未实现：§13.4 列了这两个开关，但 {f} 在当前实现里没有任何消费者 \
                  （`env` 的字段集合 §4.6 是封闭的、不含参数；`[features]` 也没有从命令行接进 §2.2 的约束求值）。\
                  拒绝而不是静默忽略 —— 见 docs/BACKLOG.md F19。"
             );
             return RunOutcome { code: exit::GENERIC, exe: PathBuf::new(), program_stdout: Vec::new(), program_stderr: Vec::new() };
         }
     }
-    let (l, prog, summary, diag_code) = match frontend(positional, rest) {
+    let (l, prog, summary, diag_code) = match frontend(positional, rest, scope) {
         Ok(x) => x,
         Err(c) => return RunOutcome { code: c, exe: PathBuf::new(), program_stdout: Vec::new(), program_stderr: Vec::new() },
     };
     if diag_code != exit::OK {
         println!("check FAILED — {summary}");
-        eprintln!("error: `infy run` 中止于阶段 [1]-[5]：诊断里有阻断项（§7.1）");
+        eprintln!("error: `{label}` 中止于阶段 [1]-[5]：诊断里有阻断项（§7.1）");
         return RunOutcome { code: diag_code, exe: PathBuf::new(), program_stdout: Vec::new(), program_stderr: Vec::new() };
     }
     println!("check ok — {} file(s), {}", l.files.len(), summary);
@@ -506,7 +597,7 @@ fn run_module(positional: &[String], rest: &[String]) -> RunOutcome {
     // `--verify-reproducible` is a build-time audit, not something `run` promises; two extra
     // link passes would only slow the dev loop down.
     build_args.retain(|a| a != "--verify-reproducible");
-    let code = build_c(&l, &prog, &build_args);
+    let code = build_c(&l, &prog, &build_args, label);
     let exe = work.join(host_file_name(&stem, &triple));
     if code != exit::OK {
         return RunOutcome { code, exe, program_stdout: Vec::new(), program_stderr: Vec::new() };
@@ -533,8 +624,10 @@ fn run_module(positional: &[String], rest: &[String]) -> RunOutcome {
     RunOutcome { code, exe, program_stdout: out.stdout, program_stderr: out.stderr }
 }
 
-fn run_cmd(positional: &[String], rest: &[String]) -> i32 {
-    let out = run_module(positional, rest);
+/// §13.4: `infy run` and `infy test` both forward the program's two streams byte-for-byte and then
+/// print their own status line. §13.4 does not say which stream the tool's line belongs to, so it
+/// goes to stderr and the program's bytes stay undiluted (docs/spec-deviations.md D-35(a)).
+fn forward_program(out: &RunOutcome, label: &str, fail_note: &str) -> i32 {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut so = stdout.lock();
@@ -547,19 +640,48 @@ fn run_cmd(positional: &[String], rest: &[String]) -> i32 {
     drop(se);
     if out.code == exit::OK {
         eprintln!(
-            "run ok — 程序退出码 0（stdout {} 字节 / stderr {} 字节，§13.4）",
+            "{label} ok — 程序退出码 0（stdout {} 字节 / stderr {} 字节，§13.4）",
             out.program_stdout.len(),
             out.program_stderr.len()
         );
     } else if out.program_stderr.is_empty() && out.exe.as_os_str().is_empty() {
-        eprintln!("run FAILED — 退出码 {}", out.code);
+        eprintln!("{label} FAILED — 退出码 {}", out.code);
     } else {
-        eprintln!(
-            "run FAILED — 程序退出码 {}（§13.4：3 = 运行时 panic）",
-            out.code
-        );
+        eprintln!("{label} FAILED — 程序退出码 {}（§13.4{fail_note}）", out.code);
     }
     out.code
+}
+
+fn run_cmd(positional: &[String], rest: &[String]) -> i32 {
+    let out = run_module(positional, rest, &Scope::default());
+    let note = match out.code {
+        exit::RUNTIME => "：3 = 运行时 panic",
+        _ => "",
+    };
+    forward_program(&out, "run", note)
+}
+
+/// §13.4 + §5.9: `infy test [pkg] [--bench] [--cov]` builds the **test** scope — which is the only
+/// build that sees `*_test.infy` and `tests/…` (§5.9 items 1-2) — and runs the generated `#[test]`
+/// harness; the exit code is §13.4's. `--cov` is refused rather than ignored: §12.4 takes coverage
+/// from `-O0` node-table instrumentation that no stage of this build emits (BACKLOG F22).
+fn test_cmd(positional: &[String], rest: &[String]) -> i32 {
+    if rest.iter().any(|a| a == "--cov") {
+        eprintln!(
+            "error: `infy test --cov` 未实现：§12.4 要求覆盖率来自 `-O0` 构建的节点表插桩，而阶段 [7]-[9] \
+             都不产出插桩，`--cov` 在本实现里没有任何消费者。拒绝而不是静默忽略出一个假的覆盖率 —— \
+             见 docs/BACKLOG.md F22。"
+        );
+        return exit::GENERIC;
+    }
+    let scope = Scope { test: true, bench: rest.iter().any(|a| a == "--bench") };
+    let out = run_module(positional, rest, &scope);
+    let note = match out.code {
+        exit::RUNTIME => "：3 = 运行时 panic（某个 `#[test]` 里 panic，harness 之外没有 catch 点 ⇒ 整条套件中止）",
+        exit::GENERIC => "：1 = 一般性失败 = 有测试返回 Err",
+        _ => "",
+    };
+    forward_program(&out, "test", note)
 }
 
 /// Stages [7], [8] and [9] of §7.1: lower to HIR, emit C11, write it under `.infy-build/`, then
@@ -568,7 +690,7 @@ fn run_cmd(positional: &[String], rest: &[String]) -> i32 {
 /// `--cc`/`$CC` select the compiler (default `gcc`); a missing one is `E-0602` (§7.6.2), not a
 /// silent skip. `--verify-reproducible` re-runs stage [9] in two independent build directories and
 /// compares bytes (§7.3 item 3, mismatch → `E-0603`/exit 7).
-fn build_c(l: &Loaded, prog: &sema::Program, rest: &[String]) -> i32 {
+fn build_c(l: &Loaded, prog: &sema::Program, rest: &[String], cmd: &str) -> i32 {
     let triple = match rest.iter().position(|a| a == "--target").and_then(|i| rest.get(i + 1)) {
         Some(t) => t.clone(),
         None => host_triple(),
@@ -612,6 +734,8 @@ fn build_c(l: &Loaded, prog: &sema::Program, rest: &[String]) -> i32 {
         header_include: "infy_rt.h".to_string(),
         overflow_panic: matches!(l.manifest.profile.overflow, pkg::Overflow::Panic),
         module: l.manifest.module_path.clone(),
+        test_harness: l.scope.test,
+        bench: l.scope.bench,
     };
     let text = match codegen::emit(prog, &hc, &files, &l.sources, &cfg) {
         Ok(t) => t,
@@ -620,7 +744,7 @@ fn build_c(l: &Loaded, prog: &sema::Program, rest: &[String]) -> i32 {
                 eprintln!("{}", e.render());
             }
             eprintln!(
-                "error: `infy build` 中止于阶段 [8]：codegen 覆盖了 §14 导览子集，上述构造在范围之外（拒绝而不是生成近似代码，见 docs/BACKLOG.md C2）"
+                "error: `{cmd}` 中止于阶段 [8]：codegen 覆盖了 §14 导览子集，上述构造在范围之外（拒绝而不是生成近似代码，见 docs/BACKLOG.md C2）"
             );
             return exit::TOOLCHAIN;
         }
@@ -800,12 +924,20 @@ fn host_file_name(stem: &str, triple: &str) -> String {
 
 /// §5.4/§5.8: one dirhash per package, packages in path order (§7.3 names the dirhash set as a
 /// build-id input, so the order itself is part of the identity).
+/// §5.8 item 1: the dirhash covers the module's **全部文件**. It therefore cannot be derived from the
+/// selected file set — §5.9 keeps `*_test.infy` out of a build, but those files are still part of
+/// what a published module is, and a hash that depends on which command ran would break §7.3 too.
+/// So this re-discovers the tree instead of reading `Loaded::files`.
 fn package_dirhashes(l: &Loaded) -> Vec<String> {
+    let mut throwaway = Handler::default();
+    let graph = pkg::discover(&l.root, &l.manifest, &mut throwaway);
     let mut by_pkg: BTreeMap<String, Vec<(String, Vec<u8>)>> = BTreeMap::new();
-    for id in l.files.keys().copied() {
-        let Some(sf) = l.sources.get(id) else { continue };
-        let pkg = l.file_pkg.get(&id).cloned().unwrap_or_default();
-        by_pkg.entry(pkg).or_default().push((sf.display_path.clone(), sf.text.clone().into_bytes()));
+    for package in &graph.packages {
+        let pkg = package.import_path(&l.manifest.module_path);
+        for f in &package.files {
+            let body = std::fs::read(&f.abs).unwrap_or_default();
+            by_pkg.entry(pkg.clone()).or_default().push((f.display.clone(), body));
+        }
     }
     by_pkg.values_mut().map(|files| pkg::dirhash(files)).collect()
 }
@@ -1418,9 +1550,11 @@ mod tests {
 
     #[test]
     fn unimplemented_commands_say_so_and_exit_1() {
-        // no fake success: §13.4 exit 1 = generic failure, and the message names the missing stage
+        // no fake success: §13.4 exit 1 = generic failure, and the message names the missing stage.
+        // `infy test` left this list in the C5 round (§5.9 harness); `infy bench` stayed, because
+        // §13.4 has no `bench` subcommand at all — it is `infy test --bench`.
         assert_eq!(run(&argv(&["build"])), exit::GENERIC);
-        assert_eq!(run(&argv(&["test"])), exit::GENERIC);
+        assert_eq!(run(&argv(&["bench"])), exit::GENERIC);
         assert_eq!(run(&argv(&["doc"])), exit::GENERIC);
     }
 
@@ -1450,7 +1584,7 @@ mod tests {
     fn run_executes_the_tour_and_exits_zero() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples").join("tour");
         let p = root.to_string_lossy().to_string();
-        let out = run_module(&[p], &[]);
+        let out = run_module(&[p], &[], &Scope::default());
         assert_eq!(out.code, exit::OK, "infy run examples/tour: {:?}", String::from_utf8_lossy(&out.program_stderr));
         assert_eq!(String::from_utf8_lossy(&out.program_stdout), TOUR_EXPECTED_STDOUT);
         assert_eq!(String::from_utf8_lossy(&out.program_stderr), TOUR_EXPECTED_STDERR);
@@ -1479,7 +1613,7 @@ mod tests {
              fn tick() -> u32 {\n    let a: u32 = 4294967295u32;\n    a + 1u32\n}\n",
         )
         .expect("source");
-        let out = run_module(&[dir.to_string_lossy().to_string()], &[]);
+        let out = run_module(&[dir.to_string_lossy().to_string()], &[], &Scope::default());
         let err = String::from_utf8_lossy(&out.program_stderr).replace("\r\n", "\n");
         assert_eq!(out.code, exit::RUNTIME, "stderr was: {err}");
         assert_eq!(String::from_utf8_lossy(&out.program_stdout), PANIC_EXPECTED_STDOUT);
@@ -1488,6 +1622,196 @@ mod tests {
         assert!(err.contains("(node_idx 0)"), "§12.4: the report carries the node: {err}");
     }
 
+
+    // ---------------------------------------------------------------- §5.9 `infy test`
+
+    /// §5.9/§13.4: `infy test`'s expected strings, read off the real processes in
+    /// `docs/RUNLOG.md` cron-11 rather than written first. The harness is generated C writing in
+    /// text mode, so the report is compared after `\r\n` → `\n` (same convention as the `run`
+    /// tests' §9.2 comparison).
+    const TEST_GREEN_REPORT: &str = "test example/ctest/cmd/ctest::calls_work ... ok\n\
+                                     test example/ctest/cmd/ctest::result_ok ... ok\n\
+                                     test result: 2 passed, 0 failed, 2 total\n";
+    const TEST_RED_REPORT: &str = "test example/ctest/cmd/ctest::a_ok ... ok\n\
+                                   test example/ctest/cmd/ctest::b_err ... FAILED\n\
+                                   test result: 1 passed, 1 failed, 2 total\n";
+    const TEST_NO_TESTS_REPORT: &str = "test result: 0 passed, 0 failed, 0 total\n";
+
+    /// A scratch module for `infy test`: one ordinary package plus §5.9's `mod_test.infy`, whose
+    /// import path is `example/ctest/cmd/ctest`. `fn main` is there so the *ordinary* build of the
+    /// same module is a legal §7.4 artifact and the test build is the only thing under test.
+    fn ctest_module(name: &str, sources: &[(&str, &str)]) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("scratch").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cmd").join("ctest")).expect("scratch module dir");
+        std::fs::write(
+            dir.join(pkg::MANIFEST_NAME),
+            "[module]\npath    = \"example/ctest\"\nversion = \"0.1.0\"\ninfy    = \"2.0\"\n\n\
+             [profile]\noverflow = \"panic\"\nopt_level = 0\n\n[[bin]]\nname = \"ctest\"\npath = \"cmd/ctest\"\n",
+        )
+        .expect("manifest");
+        for (rel, text) in sources {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().expect("parent dir")).expect("source dir");
+            std::fs::write(&p, text).expect("source");
+        }
+        dir
+    }
+
+    const CTEST_MOD: &str = "package ctest\n\nfn main() { }\n\npub fn double(x: u32) -> u32 { x + x }\n\nfn work() { }\n";
+
+    /// §5.9 items 1-2 read against the file set: the `mod_test.infy` file is in the test build and
+    /// out of `infy check|build|run`. Asserted on `Loaded` directly, because the `run`/`check`
+    /// paths print the same count and must agree with it.
+    #[test]
+    fn test_files_are_out_of_the_ordinary_build() {
+        let dir = ctest_module("cli-test-scope", &[("cmd/ctest/mod.infy", CTEST_MOD), ("cmd/ctest/mod_test.infy", "package ctest\n\n#[test]\nfn one() { work(); }\n")]);
+        let mut h = Handler::default();
+        let normal = load(&dir, &mut h).expect("the module loads");
+        assert_eq!(normal.files.len(), 1, "§5.9: `*_test.infy` is not in the ordinary build");
+        assert!(normal.handler.diags.iter().all(|d| d.code != "E-0501"), "one package over two files is legal (§5.1 R2), got {:?}", normal.handler.diags.iter().map(|d| d.code.clone()).collect::<Vec<_>>());
+        let mut h2 = Handler::default();
+        let scoped = load_scoped(&dir, &mut h2, &Scope { test: true, bench: false }, &host_triple()).expect("test build loads");
+        assert_eq!(scoped.files.len(), 2, "§5.9: `infy test` compiles the test file");
+        assert_eq!(scoped.scope.test, true, "the scope is recorded on the module");
+    }
+
+    /// §5.8 item 1 + §7.3: the dirhash is over the module's **whole** file set, so it must not move
+    /// with the build scope. §5.9 keeps `*_test.infy` out of the ordinary build, but the file is
+    /// still part of what gets published — and a hash that depended on which command ran would make
+    /// the build-id depend on it too.
+    #[test]
+    fn dirhash_covers_files_the_build_excludes() {
+        let dir = ctest_module("cli-test-dirhash", &[("cmd/ctest/mod.infy", CTEST_MOD), ("cmd/ctest/mod_test.infy", "package ctest\n\n#[test]\nfn one() { work(); }\n")]);
+        let mut h = Handler::default();
+        let normal = load(&dir, &mut h).expect("ordinary build loads");
+        let mut h2 = Handler::default();
+        let scoped = load_scoped(&dir, &mut h2, &Scope { test: true, bench: false }, &host_triple()).expect("test build loads");
+        assert_eq!(normal.files.len(), 1, "the test file is out of the ordinary build");
+        assert_eq!(scoped.files.len(), 2, "and in for `infy test`");
+        assert_eq!(package_dirhashes(&normal), package_dirhashes(&scoped), "§5.8: same hashes for both scopes");
+        assert_eq!(package_dirhashes(&normal).len(), 1, "one package in this module");
+    }
+
+    /// §2.2's constraint expression is a second, independent gate on the file set, and it is
+    /// checked for every file — including excluded ones, so an unknown name diagnoses instead of
+    /// quietly dropping the file. `//infy:build ignore` stays out of both builds, which is what lets
+    /// a draft that cannot type-check sit in the tree.
+    #[test]
+    fn build_constraints_gate_the_file_set_from_the_cli() {
+        let dir = ctest_module(
+            "cli-test-constraints",
+            &[
+                ("cmd/ctest/mod.infy", CTEST_MOD),
+                ("cmd/ctest/draft.infy", "//infy:build ignore\n\npackage ctest\n\npub fn never(x: NoSuch) -> u32 { x }\n"),
+                ("cmd/ctest/gated.infy", "//infy:build test\n\npackage ctest\n\n#[test]\nfn gated() { work(); }\n"),
+            ],
+        );
+        let mut h = Handler::default();
+        let normal = load(&dir, &mut h).expect("loads");
+        assert_eq!(normal.files.len(), 1, "§2.2: `ignore` is out of every build; `test` is out of this one");
+        assert!(!normal.handler.diags.iter().any(|d| d.code.starts_with('E')), "{:?}", normal.handler.diags.iter().map(|d| d.code.clone()).collect::<Vec<_>>());
+        let mut h2 = Handler::default();
+        let scoped = load_scoped(&dir, &mut h2, &Scope { test: true, bench: false }, &host_triple()).expect("loads");
+        assert_eq!(scoped.files.len(), 2, "§2.2: `//infy:build test` is in only for `infy test`");
+        assert!(!scoped.handler.diags.iter().any(|d| d.code.starts_with('E')), "{:?}", scoped.handler.diags.iter().map(|d| d.code.clone()).collect::<Vec<_>>());
+
+        let dir2 = ctest_module(
+            "cli-test-badconstraint",
+            &[
+                ("cmd/ctest/mod.infy", CTEST_MOD),
+                ("cmd/ctest/odd.infy", "//infy:build riscv\n\npackage ctest\n\npub fn q() -> u32 { 1u32 }\n"),
+            ],
+        );
+        let mut h3 = Handler::default();
+        let l3 = load(&dir2, &mut h3).expect("loads");
+        assert!(
+            l3.handler.diags.iter().any(|d| d.code == "E-0012" && d.title.contains("riscv")),
+            "§2.2: an unknown constraint name must be diagnosed, not silently excluded: {:?}",
+            l3.handler.diags.iter().map(|d| d.code.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// §5.9 + §13.4: every test passes ⇒ exit 0, and the harness's own report is forwarded
+    /// byte-for-byte on stdout (the program's stream stays undiluted, D-35(a)). Empty program
+    /// stderr is itself an assertion, as in the `run` tests: an artifact the runtime cannot read,
+    /// or a profile it refuses, prints there.
+    #[test]
+    fn test_build_runs_the_harness_and_exits_zero() {
+        let dir = ctest_module(
+            "cli-test-green",
+            &[
+                ("cmd/ctest/mod.infy", CTEST_MOD),
+                (
+                    "cmd/ctest/mod_test.infy",
+                    "package ctest\n\n#[test]\nfn calls_work() { work(); }\n\n#[test]\nfn result_ok() -> Result<u32, u32> { Ok(double(1u32)) }\n",
+                ),
+            ],
+        );
+        let out = run_module(&[dir.to_string_lossy().to_string()], &[], &Scope { test: true, bench: false });
+        assert_eq!(out.code, exit::OK, "program stderr: {}", String::from_utf8_lossy(&out.program_stderr));
+        assert_eq!(String::from_utf8_lossy(&out.program_stdout).replace("\r\n", "\n"), TEST_GREEN_REPORT);
+        assert!(out.program_stderr.is_empty(), "§7.4/§9.2: no container or policy complaint, got {:?}", String::from_utf8_lossy(&out.program_stderr));
+    }
+
+    /// §13.4: a test that returns `Err` is a *general failure* (1), not a runtime panic (3) — and
+    /// the suite still runs the remaining tests, so the report names both verdicts.
+    #[test]
+    fn a_failing_test_is_exit_1_not_a_panic() {
+        let dir = ctest_module(
+            "cli-test-red",
+            &[
+                ("cmd/ctest/mod.infy", CTEST_MOD),
+                (
+                    "cmd/ctest/mod_test.infy",
+                    "package ctest\n\n#[test]\nfn a_ok() -> Result<u32, u32> { Ok(double(1u32)) }\n\n#[test]\nfn b_err() -> Result<u32, u32> { Err(7u32) }\n",
+                ),
+            ],
+        );
+        let out = run_module(&[dir.to_string_lossy().to_string()], &[], &Scope { test: true, bench: false });
+        assert_eq!(out.code, exit::GENERIC, "§13.4: 1 = a test failed");
+        assert_eq!(String::from_utf8_lossy(&out.program_stdout).replace("\r\n", "\n"), TEST_RED_REPORT);
+    }
+
+    /// §13.4's 3 = runtime panic, and the C4 lesson repeated: a panic is only visible by *running*
+    /// the artifact. `overflow = "panic"` (§4.4) turns `u32::MAX + 1` inside a `#[test]` into
+    /// `R-0001`; §4.16 has no catch point outside a focus, so the suite stops — the test that sorts
+    /// after the panicking one must not appear in the report, and the §9.2 bytes are forwarded.
+    #[test]
+    fn a_panic_inside_a_test_is_exit_3_and_stops_the_suite() {
+        let dir = ctest_module(
+            "cli-test-panic",
+            &[
+                ("cmd/ctest/mod.infy", CTEST_MOD),
+                (
+                    "cmd/ctest/mod_test.infy",
+                    "#![infy_version = \"2.0\"]\n\npackage ctest\n\n#[test]\nfn a_first() { work(); }\n\n#[test]\nfn m_boom() -> Result<u32, u32> {\n    let a: u32 = 4294967295u32;\n    Ok(a + 1u32)\n}\n\n#[test]\nfn z_after() { work(); }\n",
+                ),
+            ],
+        );
+        let out = run_module(&[dir.to_string_lossy().to_string()], &[], &Scope { test: true, bench: false });
+        assert_eq!(out.code, exit::RUNTIME, "§13.4: 3 = 运行时 panic");
+        let so = String::from_utf8_lossy(&out.program_stdout).replace("\r\n", "\n");
+        assert!(so.contains("test example/ctest/cmd/ctest::a_first ... ok\n"), "the suite ran up to the panic: {so}");
+        assert!(!so.contains("z_after"), "the tests after the panicking one must not run, and the summary must not be printed: {so}");
+        let err = String::from_utf8_lossy(&out.program_stderr).replace("\r\n", "\n");
+        assert!(err.starts_with(PANIC_EXPECTED_LINE), "§9.2 report first: {err}");
+        assert!(err.contains("infy_add_u32 overflowed"), "the note names the operation: {err}");
+    }
+
+    /// §13.4: `--cov` has no consumer (no stage emits §12.4's `-O0` node-table instrumentation), so
+    /// it is refused before any compilation happens. A module with no `#[test]` function is *not*
+    /// an error: zero tests run and §13.4's 0 comes back — the harness never starts the §7.4 entry,
+    /// which the byte-exact report proves (the tour's chain would otherwise print nothing and the
+    /// summary would still be the only line).
+    #[test]
+    fn test_refuses_cov_and_runs_zero_tests_where_there_are_none() {
+        assert_eq!(run(&argv(&["test", "--cov", "examples/tour"])), exit::GENERIC);
+        let out = run_module(&["examples/tour".to_string()], &[], &Scope { test: true, bench: false });
+        assert_eq!(out.code, exit::OK, "no `#[test]` function is success, program stderr: {}", String::from_utf8_lossy(&out.program_stderr));
+        assert_eq!(String::from_utf8_lossy(&out.program_stdout).replace("\r\n", "\n"), TEST_NO_TESTS_REPORT);
+        assert!(out.program_stderr.is_empty(), "the artifact loaded and its policy came from `.inf meta`: {:?}", String::from_utf8_lossy(&out.program_stderr));
+    }
 
     #[test]
     fn internal_visibility_rule_matches_the_spec_example() {

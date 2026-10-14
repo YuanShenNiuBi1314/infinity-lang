@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 395 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 410 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
 Finished `dev` profile  (51 warnings，全部为 unused/dead code，见 BACKLOG F2)
 $ infy check examples/tour
@@ -59,6 +59,37 @@ runtime[R-0001]: 整数溢出（`overflow=panic`）                     # §9.2 
 run FAILED — 程序退出码 3（§13.4：3 = 运行时 panic）
 $ echo $?
 3                                                                # §13.4 的 3；两条都由 cli::tests 断言
+$ infy test examples/tour                                        # C5 轮起：测试构建 + 跑 #[test] harness
+check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)
+codegen ok — 12681 byte(s) … (stages [7]-[8]; 1 chain(s), 6 node(s))   # 测试构建的 C11 比普通构建多 168 字节
+artifact ok — … 写到 %TEMP%\infy-run-<pid>-<n>\ci.exe（…）
+test result: 0 passed, 0 failed, 0 total                         # 程序的 stdout（tour 里没有 #[test]）
+test ok — 程序退出码 0（stdout 42 字节 / stderr 0 字节，§13.4）    # 这行在 stderr；exit 0
+$ infy test <全绿的合成 module：void 测试 + 返回 Ok 的 Result 测试>   # 见 P18
+test example/ctest/cmd/ctest::calls_work ... ok
+test example/ctest/cmd/ctest::result_ok ... ok
+test result: 2 passed, 0 failed, 2 total                          # 程序 stdout 139 字节逐字节（\r\n 归一后）
+$ echo $?
+0
+$ infy test <有测试返回 Err 的 module>                             # 见 P19
+test example/ctest/cmd/ctest::a_ok ... ok
+test example/ctest/cmd/ctest::b_err ... FAILED
+test result: 1 passed, 1 failed, 2 total
+test FAILED — 程序退出码 1（§13.4：1 = 一般性失败 = 有测试返回 Err）
+$ echo $?
+1
+$ infy test <#[test] 里 u32::MAX+1 的 module>                      # panic 在焦点之外没有 catch 点 ⇒ 套件中止
+test example/ctest/cmd/ctest::a_first ... ok
+test example/ctest/cmd/ctest::m_boom ... runtime[R-0001]: 整数溢出（`overflow=panic`）
+  = note: infy_add_u32 overflowed (§4.4: overflow="panic", §4.9 UB-003)
+test FAILED — 程序退出码 3（§13.4：3 = 运行时 panic（某个 `#[test]` 里 panic…整条套件中止））
+$ echo $?
+3                                                                # z_after 不在报告里、总结行也没打 —— 断言的是次序
+$ infy test --cov <mod>                                          # §12.4 的插桩没有阶段产出（F22）
+error: `infy test --cov` 未实现：…                                # exit 1，不静默忽略也不假报数字
+$ infy check target/scratch/cli-test-green; infy test target/scratch/cli-test-green | head -1
+check ok — 1 file(s), 0 error(s), 0 warning(s), 0 notice(s)       # §5.9：mod_test.infy 不进普通构建
+check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)       # 同一 module，infy test 看得见它
 $ infy build examples/tour --verify-reproducible
 verify-reproducible ok — 两个独立构建目录产物字节相同（199975 字节）            # exit 0，§7.3 第 3 项
 $ infy build examples/tour --cc /no/such/cc
@@ -83,18 +114,19 @@ $ (cd examples/tour && infy fmt --check)
 2 file(s) are not canonical                        # exit 2，见下文"导览源码不是格式化不动点"
 ```
 
-395 项按模块（`cargo test --offline --lib -- --list` 分组计数，合计 395）：
-`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `codegen` **19** · `artifact` 18 · `sema` 22 ·
-`pkg` 19 · `hir` 20 · `toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `cli` **9** · `parser` 8 · `base64` 7 ·
-`ifbc` 6 · `stdlib` 4 · `diag` 2。
+410 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 410）：
+`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `pkg` **24** · `sema` 22 · `codegen` **22** ·
+`hir` 20 · `artifact` 18 · `toml` 15 · `cli` **16** · `borrow` 15 · `sha256` 12 · `codes` 9 · `parser` 8 ·
+`base64` 7 · `ifbc` 6 · `stdlib` 4 · `diag` 2。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
   借用检查（`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006`/`E-0121` 正反例）、哈希与 base64 与 TOML 往返、
   `infy` CLI 自身、IFBC Rust 侧编码/解码/反汇编：都有上表的测试。
 - **仍没有一项独立单测**：`btrack.rs`（§7.7 B 轨）。它的证据目前只有"对 `examples/tour` 跑完 §7.1 阶段 [1]–[5] 且 exit 0"这一条端到端。
-  `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成独立单测模块（C4 轮 **19** 项，新增的是 `goto` 必须转移控制那条例），`hir.rs` 的 20 项锁阶段 [7]，
-  `artifact.rs`（§7.1 阶段 [9] / §7.3 / §7.4）在 C3 轮新建并直接带 18 项单测 + 一份被 C 侧读取器消费的逐字节夹具。
+  `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成独立单测模块（C4 轮 **19** 项 = `goto` 必须转移控制那一条；C5 轮 **22** 项 = §5.9 测试 harness 的 3 条），`hir.rs` 的 20 项锁阶段 [7]，
+  `artifact.rs`（§7.1 阶段 [9] / §7.3 / §7.4）在 C3 轮新建并直接带 18 项单测 + 一份被 C 侧读取器消费的逐字节夹具，
+  `cli.rs` 从 C4 轮的 9 项到 C5 轮的 **16** 项（`infy test` 的三条端到端 + §5.9/§2.2 的文件选择两条 + §5.8 dirhash 不随构建范围变的一条 + `--cov` 拒绝）。
 - 先前记为"§9.2 字节级金样"实际是 1 条规范样例逐字节 + 1 条 caret 行规则（`diag` 2 项）；
   `goto` 的三条 `E-0301` 越界路径与 `E-0121` 在 A4 轮之前无测试（**A4 轮已补**，见下）。
 
@@ -102,8 +134,10 @@ $ (cd examples/tour && infy fmt --check)
 `infy build` **自 C3 轮起跑完 §7.1 阶段 [1]–[9]**：前端 → HIR → C11 → 用 A 轨 `cc` 链成宿主镜像 →
 追加 §7.4 段容器与 64 字节段尾，`infy artifact info` 读得回自己刚产出的文件（P4/P13/P14），故 exit **0**。
 阶段 [10]（sumdb 校验与运行时自校验比对）仍**未做**，`.inf sum` 只是把 `MODULE.infy.lock` 的 dirhash 清单抄进容器；
-`test`/`doc`/`lib pack`/`ifbc dump`/`conformance` 仍显式报"未实现"（exit 1）；**`run` 自 C4 轮起真执行**（§13.4 的
-开发态 = [7]-[9] 建到临时目录 + 立即执行，退出码按 §13.4，见下文 C4 一节）；
+`doc`/`lib pack`/`ifbc dump`/`conformance`/`bench` 仍显式报"未实现"（exit 1）；**`run` 自 C4 轮起真执行**（§13.4 的
+开发态 = [7]-[9] 建到临时目录 + 立即执行，退出码按 §13.4，见下文 C4 一节）；**`test` 自 C5 轮起真执行**（§5.9 的
+测试构建 + 生成的 `#[test]` harness，退出码 0/1/3 按 §13.4，见下文 C5 一节；`bench` 留在未实现里是因为 §13.4
+根本没有这个子命令，它是 `infy test --bench`）；
 B 轨 lowering(`src/btrack.rs`) 尚未收敛；C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（C3 轮复跑 **32335 断言 / 0 失败**，直接链生产 `infy_rt.c`）；
 `src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs` 是 1 行占位文件（`src/artifact.rs` 已于 C3 轮从"不存在"落成 §7.4 容器写入器 + 读取器 + §7.3 build-id，18 项独立单测）（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
 A 轨绑定、`std.net` TLS、`infy lsp` 未实现。
@@ -427,13 +461,77 @@ stdout，§7.7.1 第 4 项又把 B 轨 `print()` 判给日志汇（`infy_log` �
 `--arg K=V` / `--feature f` 没有任何消费者 → **显式 exit 1**（`cli::tests::run_refuses_flags_it_cannot_honour`，
 见 D-35(c) 与 F19(b)），没有静默忽略；`infy run` 不向程序传 argv（§13.4 未定义该通道）；
 运行时按 §9.2 尝试读源行时用的是 module 相对路径，CWD 不在 module 根就恒打 `<source unavailable>` → **F20**；
-`#[test]` 的执行 = C5。
+`#[test]` 的执行 = C5（**已于 C5 轮落地**，见下文 C5 一节）。
+
+## C5 · `infy test`：§5.9 的测试构建 + 生成的 `#[test]` harness（本轮）
+
+**做完了什么**：`infy test [pkg] [--bench]` = 阶段 [1]-[5]（**测试构建**：`*_test.infy` 与 `tests/…` 只在这里入选）
+→ [7] HIR → [8] 发射**以 harness 为 `main`** 的 C11 → [9] 链接 + §7.4 容器 → 建到临时目录 → 执行 → 程序的
+stdout/stderr 逐字节转发 → 退出码按 §13.4。三条实测：全绿套件 **exit 0**（程序 stdout 139 字节逐字节 =
+两行 `… ok` + `test result: 2 passed, 0 failed, 2 total`）、有测试返回 `Err` **exit 1**（`1 passed, 1 failed, 2 total`，
+**套件不中断**）、`#[test]` 里 `u32::MAX+1`（`overflow="panic"`）**exit 3**（§9.2 首行逐字节转发在 stderr）。
+`infy test examples/tour` → **exit 0**，程序 stdout 恰为 `test result: 0 passed, 0 failed, 0 total`
+（42 字节）：没有 `#[test]` 不是失败，而这一行同时**反证 harness 没调 `infy_runtime_start`** —— tour 的
+`Pipeline` 一个节点都没跑（否则会多出程序的输出且退出码来自调度器）。测试构建的生成 C11 = **12681 字节**
+（比普通构建的 12513 多 168 字节，差值就是 harness driver）。
+
+**§5.9 那两句"不进普通构建"此前从未接线**（本轮最大的发现）：`pkg::PackageFile.is_test`、
+`Package.is_test_pkg`、`PackageFile.constraint` 三个字段早就由 `discover()` 填好，
+`pkg::constraint_matches()` 也早就存在，但**全仓库零调用点** —— 也就是说 `infy check|build|run` 一直在把
+`*_test.infy` 编进普通构建，而 §2.2 的 `//infy:build` 完全没生效；`lexer::lex_file_with_features()`
+（唯一会发 `E-0012` 的词法入口）同样是死代码，"未知约束名"在 CLI 上从不触发。本轮接成
+`pkg::BuildConfig` + `pkg::file_selected`（两道门：§5.9 的测试范围 + §2.2 的约束求值，都要过），
+并**把未知名检查放在选择之前、对每个 discovered 文件做** —— 否则 `//infy:build riscv` 会让文件被静默排除，
+把拼错的约束名变成"这个文件从来没存在过"。实测：同一 module 上 `infy check` = 1 file / `infy test` = 2 files；
+`//infy:build ignore` 的类型不合法草稿在任何构建都不入选（所以它躺在树里也不破坏绿灯）；
+`//infy:build riscv` → `E-0012`。
+
+**顺带修掉两个真实缺陷**（都是一次性探针/新能力揪出来的，各带回归测试）：
+1. **§5.1 R2 的判据写在反的地方**：`if names.insert(pkg_name).is_some() { continue; }` 把"**同名**的第二个文件"
+   当作违规 —— 于是 §14.1 自己的 `mod.infy` + `cache.infy`（同一 package 两个文件）会被**静默丢掉一个文件**，
+   并假报 `E-0501 内存在两个包名`。探针实测：合法 module 上 `infy check` **exit 2**。改为对"不同包名的集合"判定，
+   并只允许 §5.9 明写的 `{<目录>, <目录>_test}` 并存（`pkg::tests::discover_accepts_the_package_shapes_the_spec_shows`）。
+2. **`read_dir` 的顺序漏进了产物**：`discover_into` 按 `read_dir` 给的顺序建 `Package`/`PackageFile`，
+   而该顺序在 `cli::load` 里决定 `FileId` 编号，进而决定发射的 C 文本与 §7.3 的 build-id —— 可复现承诺依赖文件系统。
+   现在 `files`/`subdirs` 按名字排序（`pkg::tests::discover_orders_files_by_name`）。
+3. **接线时差点引入的第三处（已挡）**：`cli::package_dirhashes` 的内容来自 `Loaded::files`，而 `Loaded::files`
+   一旦按 §5.9 过滤，§5.8 第 1 项的"module 的**全部文件**"就跟着命令变 —— 同一个 module 在
+   `infy build` 与 `infy test` 下会算出不同的 dirhash，并顺着 §7.3 把 build-id 也变成构建范围的函数。
+   改为**从 `pkg::discover` 重新取全树并逐文件读字节**（`cli::tests::dirhash_covers_files_the_build_excludes`
+   成对断言：普通构建 1 file / 测试构建 2 file，而两者的 dirhash 逐一相等）。
+
+**规范未定 → 选定实现**：偏差 **D-36**（harness 替换 §7.4 入口、`E-0600` 在 test 构建跳过、只认 `()` 与
+`Result<…>` 两种判据且其它签名**拒绝而不是猜**、panic 因 §4.16 焦点之外无 catch 点而**中止整条套件**、
+报告由生成的 C `fputs` 到自己的 **stdout**（§7.7.1 第 4 项管的是 INFY 的 `print()`，不是编译器生成的 harness）、
+`--cov` 显式拒绝、test 产物的 `.inf meta` 入口字段仍写 §7.4 那一档）与 **D-37**（§2.2 的封闭集漏了它自己用到的
+`ignore`/`test` 两个名字、约束表达式解析失败借用 `E-0012` 且绝不因解析失败而收录文件、§5.1 R1 为
+`package <dir>_test` 与 `tests/` 的文件主干开例外）。
+`lexer::known_constraint_names()` 改为直接返回 `pkg::BASE_CONSTRAINTS`（此前是两份手抄清单，同族问题见 D-32 的"第二份真相"）。
+
+**回归全部复跑**（C 侧本轮零改动：没动 `.c`/`.h`，四条链仍按纪律复跑、并在改动后重跑一次）：
+`cargo test --offline --lib` **410 passed / 0 failed**（基线 395，+5 `pkg` +3 `codegen` +7 `cli`）、
+`cargo check --offline --lib` 0 error / **51 warning**（未新增）、`infy check examples/tour` exit 0、
+`infy build examples/tour` exit 0（**生成的 C11 仍 12513 字节、产物仍 199975 字节、`build-id 4d8250b5…55ba`**
+⇒ 非 test 路径逐字节未变）、`--verify-reproducible` exit 0、`infy run examples/tour` exit 0（0/0 字节）、
+`infy artifact info --nodes` exit 0、`gcc -std=c11 -Wall -Wextra -I runtime -c <ci.c>` exit 0（0/0）、
+`(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决）；`gcc -c runtime/infy_rt.c` **0 warning**、
+rt harness **32335 / 0**（在 `target/scratch` 里跑）、替身链 IFBC **82/82**、生产链 IFBC **82/82** 且两份 stdout `cmp` 无输出。
+
+**明确未做**（不用假成功掩盖）：`std/test`（§14.7 的 `test::assert_eq`/`Bench`/`b.iter()`）在 §10 的 std 签名表里
+**一条都没有** ⇒ 规范自己的测试样例仍过不了 `infy check`，本轮不代规范发明签名 → **F21**（`--bench` 对有参数的
+`#[bench]` 报 exit 6 并在消息里点名本条；不带 `--bench` 时该函数不进运行集）；`--cov` 的 §12.4 节点表插桩
+没有阶段产出 → **F22**；test 产物的容器入口字段与实际执行的 harness 不符（冻结容器只有 `ENTRY_MAIN`/链两档）→ **F23**；
+`W-0003`（约束恒假）要的是静态不可满足性判定，本轮只对当前配置求值 → **F24**；panic 的**逐测试隔离**要把
+`infy_rt_internal.h` 的 `infy_rt_catch` 提升进冻结公共头（ABI 变更 + 四条链同批），本轮不动 C 侧；
+`#[test]` 函数在普通构建里仍被编译成 C 符号（只是不进运行集），§5.9 没要求剔除。
 
 ## 仍未实现
 
-`test`/`doc`/`lib pack`/`ifbc dump`/`conformance`/`lsp`（exit 1）目前明确返回"未实现"而不是假成功
+`doc`/`lib pack`/`ifbc dump`/`conformance`/`lsp`/`bench`（exit 1）目前明确返回"未实现"而不是假成功
 （`infy build` 自 C3 轮起 exit **0**：阶段 [1]–[9] 全通，产物容器可被 `infy artifact info` 与 C 侧运行时读回；
-**`infy run` 自 C4 轮起 exit **0/3** 真执行**，见上文 C4 一节）；
+**`infy run` 自 C4 轮起 exit 0/3 真执行**，见上文 C4 一节；**`infy test` 自 C5 轮起 exit 0/1/3 真执行**，
+见上文 C5 一节。`bench` 留在这一列是因为 §13.4 根本没有 `infy bench`，它是 `infy test --bench`；
+`infy test --cov` 同样显式 exit 1 —— §12.4 的 `-O0` 节点表插桩没有任何阶段产出，F22）；
 A 轨绑定生成（`src/atrack.rs`）、§11 `HostApi`（`src/host.rs`）、§12 合规用例集（`src/conformance.rs`）、
 `infy doc`（`src/doc.rs`）同样未实现 —— 这四个文件当前是 1 行占位。
 HIR（`src/hir.rs`）于 C1 轮落成**声明层**；**语句/表达式级 IFIR 仍没有独立表示**（C2 是 AST→C 直接发射），

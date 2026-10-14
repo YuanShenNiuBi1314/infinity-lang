@@ -429,3 +429,102 @@ NUL（只有跨 A 轨边界才是 `R-0003`/UB-007）。若后端照发 `infy_str
 `cli::tests::run_forwards_the_program_streams_and_a_runtime_panic_maps_to_exit_3`（§13.4 的 3 与
 §9.2 报告首行 `runtime[R-0001]: 整数溢出（\`overflow=panic\`）`）、
 `cli::tests::run_refuses_flags_it_cannot_honour`。
+
+## D-36 §5.9 的 `infy test` 有四处规范没写：入口怎么被替换、"通过"怎么判、panic 把套件带到哪、harness 往哪打
+
+§5.9 只给了三行（测试文件不进普通构建、`package foo_test` 只能经 `infy test` 编译、
+"`#[test]`/`#[bench]` 标记 + `infy test` = build + 执行，退出码沿用 §13.4"），§13.4 只给了
+`infy test [pkg] [--bench] [--cov]` 一行。以下四点规范都没定义，选定实现如下。
+
+**(a) 入口被 harness 替换，§7.4 的入口规则在 test 构建里不适用**。`codegen::Config.test_harness`
+为真时 `emit_driver()` 直接走 `emit_test_driver()`，`main` 依次做：注册链表（若该 module 有链）→
+`infy_run_package_inits(0, 0u)` → 逐个调用 harness 的 `#[test]` 函数 → 打总结行 → 返回。
+**不调 `infy_runtime_start`**：调度器不参与，所以 `#![entry_chain]` 指向的链在 `infy test` 里一行节点都不跑。
+`cli::resolve_entry` 的 `E-0600`（"产物无入口"）在 test 构建里跳过 —— 它的入口是 harness，
+不是链也不是 `fn main`。锁点 = `cli::tests::test_refuses_cov_and_runs_zero_tests_where_there_are_none`
+（对 `examples/tour` 跑 `infy test`：程序 stdout 恰为 `test result: 0 passed, 0 failed, 0 total\n`，
+即"链没被启动"本身也被逐字节钉住，而不是靠"没有输出"反推）。
+
+**(b) "通过"的判据只认两种签名**：`fn` 无返回 = 调用返回即通过；返回 `Result<…>` = 取 `.is_ok`
+（§14.7 的样例 `-> Result<(), test::Fail>` 用的就是这一族，配合 `?`）。其它返回类型
+（`-> u32`、`-> bool`）**报 `CgError` 而不是猜一个判据**；带参数的 `#[test]` 同样拒绝
+（§5.9 没有参数注入机制，`env` 的字段集按 §4.6 是封闭的）。`#[bench]` 只有 `--bench` 才进运行集，
+而 §14.7 的基准签名 `fn(b: &mut test::Bench)` 依赖 `std/test`，§10 的 std 签名表里**没有任何
+`std.test` 条目** —— 登记为 **F21**，拒绝消息里点名这一条。
+锁点 = `codegen::tests::harness_refuses_tests_it_cannot_call_or_judge`、
+`codegen::tests::bench_functions_enter_the_suite_only_under_bench`。
+
+**(c) panic 中止整条套件，退出码 §13.4 的 3**。`#[test]` 是从 `main` 里直接调用的普通函数，
+不在任何焦点内，§4.16 的 catch 点（`infy_rt.c` 的 `infy_tls_try`）因此不存在：
+`infy_panic` 走完 `infy_report` → `infy_cleanup_drain` → `process_radius_exit()` → `exit(3)`。
+**没有改成"每个测试套一层 catch"**：那要把内部入口 `infy_rt_catch`（`infy_rt_internal.h:146`）
+提升进冻结公共头，属于 ABI 变更、要四条 C 链同批改，本轮按 C4 的同一原则（能不动 C 侧就不动）
+先把行为如实实现并钉住：panic 之后的测试**不运行**、总结行**不打**，§9.2 报告逐字节转发在 stderr。
+锁点 = `cli::tests::a_panic_inside_a_test_is_exit_3_and_stops_the_suite`（断言 `a_first ... ok` 在、
+`z_after` 不在，即"次序"而不是"存在"）。
+
+**(d) harness 的报告打在自己的 stdout，用 C 的 `fputs`**。§7.7.1 第 4 项把 **INFY 的 `print()`** 判给
+日志汇（stderr），而本实现里没有任何 INFY 构造能写 stdout（**F19**）；harness 不是 INFY 程序构造，
+是编译器生成的 C，所以它自己开一条通道，不冒充 `print()` 的语义。名字走 `fputs("test <pkg>::<fn> ... ", stdout)`
+的字面量而非格式串（§2.3 允许非 ASCII 标识符，不能让标识符落到 `printf` 的格式参数位上）。
+CLI 侧沿用 D-35：构建信息在 stdout、`test ok/FAILED` 状态行在 stderr、程序两条流逐字节转发。
+C 运行时是文本模式流，所以报告的行尾在 Windows 上是 `\r\n` —— 测试按 `\r\n`→`\n` 归一后**逐字节**比较
+（与 C4 的 §9.2 比较同一手法）。
+
+**(e) `--cov` 显式拒绝（exit 1）**：§12.4 要求覆盖率来自 `-O0` 构建的节点表插桩，阶段 [7]-[9] 都不产出
+插桩，`--cov` 没有消费者。不静默忽略、更不假报一个覆盖率 —— 登记为 **F22**。
+锁点 = `cli::tests::test_refuses_cov_and_runs_zero_tests_where_there_are_none`。
+
+**(f) test 产物的 `.inf meta` 入口字段仍写 §7.4 的 `fn main`/首条链**（冻结容器只有 `ENTRY_MAIN`/链两档，
+没有"harness"这一档），所以 `infy artifact info` 对 test 产物打出的"入口"与实际执行的 harness 不符 ——
+登记为 **F23**，不改布局也不改声称。
+
+**锁定点**（全部为本轮实测）：`cli` 的 4 条新测试 + `codegen::tests::{harness_runs_each_test_in_sorted_order_and_judges_result_by_is_ok,
+harness_refuses_tests_it_cannot_call_or_judge, bench_functions_enter_the_suite_only_under_bench}`。
+
+## D-37 §5.9 的"测试文件不进普通构建"从未接线（`pkg` 里算好的 `is_test`/约束求值是死代码），接线时顺带定了三处
+
+**现状核对**：`pkg::PackageFile.is_test`、`Package.is_test_pkg`、`PackageFile.constraint` 三个字段
+早就由 `discover()` 填好，`pkg::constraint_matches()` 也早就存在，但**全仓库没有一个调用点**
+（`grep -rn "constraint_matches\|unknown_constraint_names" src/*.rs` 只命中定义处与本轮新增处）
+—— 也就是说 §2.2/§5.9 的文件选择在 `infy check|build|run` 上根本没生效：任何 `*_test.infy`
+都进了普通构建。`src/lexer.rs:2187` 的 `lex_file_with_features()`（唯一会打 `E-0012` 的词法入口）
+同样是死代码，所以 §2.2 的"未知约束名 → `E-0012`"在 CLI 上从不触发。
+
+**接线的选定实现**（`pkg::BuildConfig` + `pkg::file_selected`，由 `cli::load_scoped` 调用）：
+- §5.9 的门：`f.is_test || pkg.is_test_pkg` ⇒ 只在 `BuildConfig.test`（= `infy test`）为真时入选；
+- §2.2 的门：文件自己的 `//infy:build <表达式>` 对 `BuildConfig` 求值。两道门都要过。
+- `E-0012` 的**未知名检查放在选择之前、对每个文件做**（不是只对被编译的文件）：否则
+  `//infy:build riscv` 会让文件被静默排除，把拼错的约束名变成"这个文件从来没存在过"。
+  代价是该路径的诊断落在 `file:1:1`（module 层，同 `E-0501`/`E-0090` 的既有约定），
+  而 `lex_file_with_features` 那条带 span 的路径本轮**不再调用**，避免同一文件打两遍 `E-0012`。
+  锁点 = `cli::tests::build_constraints_gate_the_file_set_from_the_cli`。
+
+**(a) §2.2 的约束名全集漏了自己用到的两个名字**：line 96 的封闭集里没有 `ignore`，也没有 `test`，
+而 §2.2 的样例写 `//infy:build ignore`、§14.7 写 `//infy:build test`。选定实现把两者收进
+`pkg::BASE_CONSTRAINTS`，并让 `lexer::known_constraint_names()` 直接返回该常量（此前是两份手抄清单，
+同族问题见 `docs/spec-deviations.md` D-32 的"第二份真相"）。求值规则：`ignore` 恒假（任何构建都排除）、
+`test` 取 `BuildConfig.test`。锁点 = `pkg::tests::constraint_expression_evaluates_the_build_config`。
+
+**(b) 约束表达式解析失败没有对应码**：§2.2 只发了 `E-0011`（位置）/`E-0012`（未知名）/`E-0013`（重复）/
+`W-0003`（恒假）。`//infy:build linux &&` 这类不完整表达式不属于其中任何一条。选定实现**借用 `E-0012`**
+（同一族的"这条约束写错了"）并把解析器的原文放进 note，**且绝不因为解析失败就把文件收进来**。
+`W-0003`（"约束恒 false"）本轮**没有实现**：它要求对约束做静态不可满足性判定，而实现只对当前
+`BuildConfig` 求值 —— 登记为 **F24**。
+
+**(c) §5.1 R1"包名必须等于目录末段名"与 §5.9/§14.1 冲突，按后两条开例外**：§5.9 明写"目录内可存在
+`package foo` 与 `package foo_test` 两种测试文件"，§14.1/§14.7 又是 `tests/build_test.infy` =
+`package build_test`（目录末段名是 `tests`）。R1 按字面执行会把规范自己的两种形态都判死。
+选定实现：`_test.infy` 文件额外允许 `package <目录>_test` 与 `package <文件名主干>` 两种包名；
+目录级 R2 检查改为看**不同包名的集合**，只允许 `{<目录>, <目录>_test}` 这一对并存（`tests/` 里两个
+不同主干名仍是违规）。锁点 = `pkg::tests::discover_accepts_the_package_shapes_the_spec_shows`、
+`pkg::tests::discover_reports_genuinely_two_package_directories`。
+
+**顺带修掉的两个实现缺陷（不是规范歧义，记在 `docs/status.md` 的 C5 一节）**：
+1. R2 的判据此前写在反的地方 —— `if names.insert(pkg_name).is_some() { continue; }` 把
+   **同名第二个文件**当作违规：`core/pack/mod.infy` + `core/pack/second.infy`（`package pack` × 2，
+   即 §14.1 的 `mod.infy`+`cache.infy` 形态）会被**静默丢掉一个文件**并打
+   `E-0501 内存在两个包名`。本轮用一次性探针实测确认（`infy check` 在合法 module 上 exit 2）。
+2. `discover_into` 直接用 `read_dir` 的顺序，而该顺序决定 `FileId` 编号、进而决定发射的 C 文本与
+   build-id —— §7.3 的可复现承诺因此依赖文件系统。现在 `files`/`subdirs` 都按名字排序。
+   锁点 = `pkg::tests::discover_orders_files_by_name`。

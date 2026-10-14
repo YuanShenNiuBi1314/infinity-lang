@@ -22,7 +22,7 @@ use crate::ast::{
     LinkageStmt, ParsedFile, Pat, PatKind, Prim, StartNode, Stmt, StmtKind,
 };
 use crate::hir::{HirCrate, HirEntry, HirItem, Layout, Target};
-use crate::sema::{ChainInfo, ConstValue, Program, Ty};
+use crate::sema::{ChainInfo, ConstValue, Program, TestKind, Ty};
 use crate::span::{FileId, Sources};
 use crate::token::{Lit, Punct};
 
@@ -78,6 +78,11 @@ pub struct Config {
     /// `[profile] overflow` (§5.2/§4.4). Only `panic` is implemented; `saturate` is refused (D-30).
     pub overflow_panic: bool,
     pub module: String,
+    /// §5.9: `infy test` — the generated `main` becomes the `#[test]` harness instead of calling
+    /// the §7.4 entry.
+    pub test_harness: bool,
+    /// §13.4's `infy test --bench`: put `#[bench]` functions in the harness's run set as well.
+    pub bench: bool,
 }
 
 impl Default for Config {
@@ -88,6 +93,8 @@ impl Default for Config {
             header_include: "infy_rt.h".to_string(),
             overflow_panic: true,
             module: String::new(),
+            test_harness: false,
+            bench: false,
         }
     }
 }
@@ -1859,7 +1866,116 @@ impl<'a> Cg<'a> {
         Ok(())
     }
 
+    /// §5.9/§13.4: the `infy test` entry. The harness is generated C, so it owns a report channel
+    /// of its own — per-test lines on stdout (§7.7.1 item 4 assigns INFY's own `print()` to the log
+    /// sink, and no INFY construct can write stdout yet, BACKLOG F19). Verdict per §13.4: `0` when
+    /// every test passed, `1` when any returned `Err`. A panic inside a test leaves the process with
+    /// §13.4's `3` and stops the suite, because §4.16 gives no catch point outside a focus
+    /// (docs/spec-deviations.md D-36).
+    fn emit_test_driver(&mut self) -> Result<(), CgError> {
+        let mut tests: Vec<crate::hir::HirFn> = self
+            .hir
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                HirItem::Fn(f) => match f.test_kind {
+                    Some(TestKind::Test) => Some(f.clone()),
+                    Some(TestKind::Bench) if self.cfg.bench => Some(f.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        // §7.3: the report is a function of the declared set, not of the directory walk order.
+        tests.sort_by(|a, b| a.package.cmp(&b.package).then_with(|| a.name.cmp(&b.name)));
+        let mut s = String::from("\n/* ---- §5.9 test harness (`infy test`) ---- */\nint main(void) {\n");
+        let chains: Vec<&crate::hir::HirChain> = self
+            .hir
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                HirItem::Chain(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        if !chains.is_empty() {
+            s.push_str(&format!(
+                "    static const InfyChainDesc* const infy_chain_table[{}] = {{ {} }};\n\
+                 \x20   infy_chain_register_table(infy_chain_table, {}u);\n",
+                chains.len(),
+                chains.iter().map(|c| format!("&{}_desc", c.symbol)).collect::<Vec<_>>().join(", "),
+                chains.len()
+            ));
+        }
+        s.push_str("    infy_run_package_inits(0, 0u);\n");
+        s.push_str("    uint32_t infy_t_n = 0u, infy_t_bad = 0u;\n");
+        for f in &tests {
+            let label = format!("{}::{}", f.package, f.name);
+            let what = if matches!(f.test_kind, Some(TestKind::Bench)) { "`#[bench]`" } else { "`#[test]`" };
+            if f.is_event || f.is_foreign {
+                return Err(CgError::new(
+                    "§5.9",
+                    format!("codegen: {what} `{label}` 没有可执行的本体（`event`/`extern` 由宿主提供，§3.3/§7.6）"),
+                ));
+            }
+            if f.self_ty.is_some() {
+                return Err(CgError::new(
+                    "§5.9",
+                    format!("codegen: {what} `{label}` 是方法，harness 没有一个接收者可传（§5.9 只定义自由函数）"),
+                ));
+            }
+            if !f.params.is_empty() {
+                // §14.7's `#[bench] fn(b: &mut test::Bench)` needs `std/test`, which has no entry in
+                // §10's std table at all (BACKLOG F21) — so the honest message names that, not a
+                // generic "bad signature".
+                let why = if matches!(f.test_kind, Some(TestKind::Bench)) {
+                    "§14.7 的基准签名是 `fn(b: &mut test::Bench)`，而 §10 的 std 签名表里没有任何 \
+                     `std.test` 条目（含 `Bench`/`iter`），`b.iter()` 在阶段 [4] 就不可解析 —— \
+                     登记为 BACKLOG F21"
+                        .to_string()
+                } else {
+                    "§5.9 没有给测试函数注入参数的机制（`env` 的字段集合按 §4.6 是封闭的）".to_string()
+                };
+                return Err(CgError::new(
+                    "§5.9",
+                    format!("codegen: {what} `{label}` 有 {} 个参数，harness 无法调用它：{why}", f.params.len()),
+                ));
+            }
+            s.push_str(&format!("    /* {label} (§5.9) */\n    infy_t_n += 1u;\n"));
+            // `fputs` with the name baked into the literal, so no user identifier is ever a format
+            // string (§2.3 allows non-ASCII identifiers).
+            s.push_str(&format!("    fputs(\"test {label} ... \", stdout);\n    fflush(stdout);\n"));
+            match &f.ret {
+                None => s.push_str(&format!("    (void){}();\n    fputs(\"ok\\n\", stdout);\n", f.symbol)),
+                Some((ret, _)) => {
+                    if !matches!(ret, Ty::Result { .. }) {
+                        return Err(CgError::new(
+                            "§5.9",
+                            format!(
+                                "codegen: {what} `{label}` 的返回类型不是 `()` 也不是 `Result<…>`，\
+                                 harness 对它没有可判定的\u{201c}通过\u{201d}条件（§5.9/§14.7 只给出这两种形态）"
+                            ),
+                        ));
+                    }
+                    let ty = self.c_ty_isolated(ret)?;
+                    s.push_str(&format!(
+                        "    {{ {ty} infy_t_r = {}(); if (infy_t_r.is_ok) {{ fputs(\"ok\\n\", stdout); }} \
+                         else {{ fputs(\"FAILED\\n\", stdout); infy_t_bad += 1u; }} }}\n",
+                        f.symbol
+                    ));
+                }
+            }
+        }
+        s.push_str("    printf(\"test result: %u passed, %u failed, %u total\\n\", infy_t_n - infy_t_bad, infy_t_bad, infy_t_n);\n");
+        s.push_str("    return infy_t_bad == 0u ? 0 : 1;\n}\n");
+        self.driver = s;
+        Ok(())
+    }
+
     fn emit_driver(&mut self) -> Result<(), CgError> {
+        if self.cfg.test_harness {
+            return self.emit_test_driver();
+        }
         let mut s = String::from("\n/* ---- entry (§7.4) ---- */\nint main(void) {\n");
         let chains: Vec<&crate::hir::HirChain> = self
             .hir
@@ -3845,6 +3961,22 @@ mod tests {
     }
 
     fn emit_try(src: &str) -> Result<String, Vec<String>> {
+        emit_with(src, Config::default())
+    }
+
+    /// §5.9: the same pipeline with `infy test`'s configuration, so the harness driver is emitted.
+    fn harness_try(src: &str, bench: bool) -> Result<String, Vec<String>> {
+        emit_with(src, Config { test_harness: true, bench, ..Config::default() })
+    }
+
+    fn harness_of(src: &str) -> String {
+        match harness_try(src, false) {
+            Ok(t) => t,
+            Err(e) => panic!("test harness refused: {e:?}\n--- source ---\n{src}"),
+        }
+    }
+
+    fn emit_with(src: &str, cfg: Config) -> Result<String, Vec<String>> {
         let mut sources = Sources::default();
         let f = sources.add("p/mod.infy".to_string(), format!("package p\n\n{src}\n"));
         let mut h = Handler::default();
@@ -3865,7 +3997,6 @@ mod tests {
         if !hc.errors.is_empty() {
             return Err(hc.errors.iter().map(|e| format!("hir: {}", e.message())).collect());
         }
-        let cfg = Config::default();
         emit(&prog, &hc, &files, &sources, &cfg).map_err(|es| es.iter().map(|e| e.render()).collect())
     }
 
@@ -3890,9 +4021,8 @@ mod tests {
         let cfg = Config {
             target_triple: "x86_64-pc-windows-gnu".to_string(),
             target: Target::REFERENCE,
-            header_include: "infy_rt.h".to_string(),
-            overflow_panic: true,
             module: l.manifest.module_path.clone(),
+            ..Config::default()
         };
         match emit(&prog, &hc, &files, &l.sources, &cfg) {
             Ok(t) => t,
@@ -4150,6 +4280,53 @@ mod tests {
             e.iter().any(|s| s.contains("§7.6.3") || s.contains("D3")),
             "{e:?}"
         );
+    }
+
+    // ------------------------------------------------------------ §5.9 test harness
+
+    /// §5.9/§13.4: under `infy test` the generated `main` is the harness, not the §7.4 entry. The
+    /// run set is exactly the `#[test]` functions, in (package, name) order — order is asserted
+    /// because the C4 round learned that existence-only assertions pass on a wrong control flow —
+    /// and a `Result`-returning test is judged by `.is_ok`, not by the call having happened.
+    #[test]
+    fn harness_runs_each_test_in_sorted_order_and_judges_result_by_is_ok() {
+        let t = harness_of("#[test]\nfn zeta() -> Result<u32, u32> { Ok(1u32) }\n\n#[test]\nfn alpha() { }\n\nfn not_a_test() { }\n");
+        let a = t.find("p::alpha").expect("alpha is in the suite");
+        let z = t.find("p::zeta").expect("zeta is in the suite");
+        assert!(a < z, "§7.3: the report is sorted by name, not by declaration order\n{t}");
+        assert!(!t.contains("p::not_a_test"), "an un-annotated fn is not a test");
+        assert_eq!(t.matches("infy_t_n += 1u;").count(), 2, "one counted call per test");
+        assert!(t.contains("infy_t_r.is_ok"), "a `Result` test must be judged: {t}");
+        assert!(t.contains("FAILED") && t.contains("infy_t_bad += 1u;"), "the failing branch counts");
+        assert!(t.contains("return infy_t_bad == 0u ? 0 : 1;"), "§13.4: 1 = a test failed");
+        assert!(t.contains("fputs(\"test p::alpha ... \", stdout);"), "report on stdout (D-36)");
+        assert!(!t.contains("entry (§7.4)"), "the harness replaces the entry driver");
+    }
+
+    /// §5.9: the harness only has a definition of "passed" for `()` and `Result<…>`. Anything else
+    /// is refused by name instead of guessing (e.g. treating a returned `bool` as a verdict).
+    #[test]
+    fn harness_refuses_tests_it_cannot_call_or_judge() {
+        let e = harness_try("#[test]\nfn needs_arg(x: u32) { }\n", false).unwrap_err().join("\n");
+        assert!(e.contains("§5.9") && e.contains("needs_arg"), "{e}");
+        assert!(e.contains("§4.6"), "the refusal must say why there is no injection: {e}");
+        let e2 = harness_try("#[test]\nfn returns_value() -> u32 { 1u32 }\n", false).unwrap_err().join("\n");
+        assert!(e2.contains("§5.9") && e2.contains("returns_value"), "{e2}");
+    }
+
+    /// §13.4's `--bench` is the only way a `#[bench]` function enters the run set; and §14.7's
+    /// benchmark signature (`fn(b: &mut test::Bench)`) has no `std/test` in §10's std table, so a
+    /// bench with the shape §5.9 *could* run is refused naming that gap (BACKLOG F21) rather than
+    /// silently timing nothing.
+    #[test]
+    fn bench_functions_enter_the_suite_only_under_bench() {
+        let t = harness_of("#[bench]\nfn bench_zero() { }\n");
+        assert!(!t.contains("p::bench_zero"), "no `--bench`, no bench in the suite");
+        assert_eq!(t.matches("infy_t_n += 1u;").count(), 0, "the suite is empty, not faked");
+        assert!(t.contains("infy_t_n - infy_t_bad"), "still reports 0 total (§13.4: success)");
+        let e = harness_try("#[bench]\nfn bench_one(n: u32) { }\n", true).unwrap_err().join("\n");
+        assert!(e.contains("§5.9") && e.contains("bench_one"), "{e}");
+        assert!(e.contains("std.test"), "the refusal names the missing §10 entry (F21): {e}");
     }
 
     // ------------------------------------------------------------ §7.3 byte stability

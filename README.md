@@ -20,7 +20,7 @@ infy expand --stage macro   # §6.8，可用（与 fmt 一样：positional 目�
 infy build            # 阶段 [1]-[5] + [7] hir + [8] codegen + [9] 链接与 §7.4 段容器：exit 0，产出单文件产物
 infy artifact info <产物> [--nodes]   # §7.4：读回 .inf meta 与节点表；非产物 → E-0605 + exit 7
 infy run              # §13.4 开发态：[1]-[9] 建到临时目录 + 立即执行，程序的 stdout/stderr 逐字节转发；exit 0（tour），运行时 panic 时 exit 3
-infy test             # 未实现：notice + exit 1
+infy test             # §5.9：测试构建（`*_test.infy` 与 `tests/…` 只在这里入选）+ 跑生成的 `#[test]` harness；全过 exit 0、有 Err exit 1、panic exit 3（§13.4）
 infy doc              # 未实现：notice + exit 1
 infy ifbc dump|verify # 未实现：notice + exit 1
 infy conformance --report   # 未实现：notice + exit 1
@@ -37,7 +37,8 @@ infy conformance --report   # 未实现：notice + exit 1
 | §9.4 / E.5 | `--diag-json` 结构（`phase` / `origin` / `expand_chain` / `suggestions` / `runtime_ctx`） | 🟡 能输出，无金样测试 |
 | §2 | 词法：编码与换行、嵌套注释、`//infy:build` 约束、XID 标识符与保留字、生命周期记法、数值/字符串/原字符串/字节串/`char`/`cord` 的完整文法与转义封闭表、`@embed` 词法不透明区 | ✅ 79 项测试 |
 | §3 | EBNF 递归下降（含 §3.6 嵌入、§3.9 宏、§3.11/3.12/3.13 补全），§3.10 消歧，错误恢复 | 🟡 7 项测试 + `examples/tour` 全量解析（A4 轮补 `start(chain = …)` 与嵌套泛型闭合 2 项）；没有"全产生式都落到 AST"的审计 |
-| §5 | module/package/file 三层、`MODULE.infy.toml`、§5.3 导入解析次序、`internal` 可见性、§5.7 MVS、§5.8 dirhash、lock 读写、§2.2 约束表达式 | 🟡 **19 项独立单测**（A4 轮补：清单逐段/`E-0506`/`E-0507`/`W-0500`、§5.3 次序、`^` 区间、MVS 最小选择与冲突、dirhash、lock 往返与 `E-0200`）；`discover()` 目录发现仍只有 tour 证据 |
+| §5 | module/package/file 三层、`MODULE.infy.toml`、§5.3 导入解析次序、`internal` 可见性、§5.7 MVS、§5.8 dirhash、lock 读写、§2.2 约束表达式 | 🟡 **24 项独立单测**（A4 轮补：清单逐段/`E-0506`/`E-0507`/`W-0500`、§5.3 次序、`^` 区间、MVS 最小选择与冲突、dirhash、lock 往返与 `E-0200`；C5 轮补：`//infy:build` 表达式对 `BuildConfig` 求值、§5.9 测试文件只进测试构建、`discover()` 的 §5.1 R1/R2 形状与 `read_dir` 排序）。C5 轮之前的实情：`constraint_matches`/`unknown_constraint_names`/`is_test` **存在但零调用点**，§2.2/§5.9 的文件选择从未生效，`E-0012` 在 CLI 上从不触发 |
+| §5.9 / §13.4 `infy test` | 测试构建的文件选择 + `#[test]` harness（入口替换、`()`/`Result` 两种判据、退出码 0/1/3）+ `--bench` 开关 | 🟡 C5 轮落地：`codegen::emit_test_driver` 按 (package, name) 序逐个调用，`Result` 取 `.is_ok`，报告由生成的 C `fputs` 到 stdout；`cli::test_cmd` = 建到临时目录 + 执行 + 逐字节转发（同一 module 上 `infy check` 1 file / `infy test` 2 files 已实测）。**仍 🟡**：`std/test` 在 §10 无任何条目 ⇒ §14.7 的样例（`test::assert_eq`、`Bench`）过不了 `check`，`#[bench]` 有参数即拒（F21）；`--cov` 显式拒（F22）；panic 不逐测试隔离（要动冻结头，见偏差 D-36）；test 产物的 `.inf meta` 入口字段仍写 §7.4 那一档（F23）|
 | §4 | 类型全集、字面量范围、无隐式数字转换、运算符语义、`?` 展开、生命周期 elision、§4.12 数字细节、穷尽性、§2.12 const-eval、`env` 封闭字段集、`unsafe` 六禁令 | 🟡 **22 项独立单测**（A4 轮补：内建构造、未声明名、字面量取型与后缀范围、`type_compatible` 逐臂、`E-0120`、`env`/`E-0140`、`goto`/`start`）；`?` 展开、elision、穷尽性、const-eval、`unsafe` 六禁令仍只有 tour 证据 |
 | §4.7 | 借用检查 | ✅ 15 项：`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006` 正反例 + `E-0121` 4 项（A4 轮补；其判据低估数值绑定，见偏差 D-19 / BACKLOG F7） |
 | §5.8 | SHA-256 / base64 / Merkle dirhash 自研实现（NIST 与 RFC 4648 向量） | ✅ 12 + 7 项 |
@@ -52,11 +53,13 @@ infy conformance --report   # 未实现：notice + exit 1
 | §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ⬜ `src/host.rs` 是占位文件 —— **未实现**（偏移表本身已由 `src/hir.rs::env_table` 落成并有金样） |
 | 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32335 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 82 断言 B2 轮起也链生产 `infy_rt.c`（同为 82/82，输出逐字节相同）。仍不等于 §12 合规：外部用例为 0，双侧交叉验证受 D4 阻塞 |
 
-`cargo test --offline --lib` 目前 **395 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
-"绿灯"只表示已写测试的模块自洽：A4 轮之后 `sema`(22) 与 `pkg`(19) 已不再是零单测，C2 轮之后 `codegen` 也不再是
-（**19** 项，锁 §4.1/§4.8 布局自检、§4.9/§7.2 检查永不关、§4.11 `?`、§3.12 `match`、§4.7.4 清理序、
-§8.4 节点表、§8.2 `goto` 转移控制、§5.3 调用解析、§7.3 字节稳定），C3 轮新建的 `artifact` 直接带 **18** 项
-（§7.4 容器逐字段读回、七个拒绝理由各一条、§7.3 九类输入逐个绑定、`INFY_META_OFF_*` 钉回冻结头文本），仍在进行中或未开始的只剩
+`cargo test --offline --lib` 目前 **410 passed / 0 failed**（`cargo check --offline --lib` 0 error / 51 warning）。
+"绿灯"只表示已写测试的模块自洽：A4 轮之后 `sema`(22) 与 `pkg`(24，C5 轮 +5) 已不再是零单测，C2 轮之后 `codegen` 也不再是
+（**22** 项 = 19 + C5 轮的 3 项 harness 断言，锁 §4.1/§4.8 布局自检、§4.9/§7.2 检查永不关、§4.11 `?`、§3.12 `match`、
+§4.7.4 清理序、§8.4 节点表、§8.2 `goto` 转移控制、§5.3 调用解析、§5.9 测试 harness、§7.3 字节稳定），
+C3 轮新建的 `artifact` 直接带 **18** 项（§7.4 容器逐字段读回、七个拒绝理由各一条、§7.3 九类输入逐个绑定、
+`INFY_META_OFF_*` 钉回冻结头文本），C4/C5 轮把 `cli` 抬到 **16** 项（`infy run`/`infy test` 的端到端退出码与逐字节转发、
+§5.9/§2.2 的文件选择、§5.8 的 dirhash 不随构建范围变、`--cov`/`--arg`/`--feature` 的显式拒绝），仍在进行中或未开始的只剩
 `host`、`btrack`、`atrack`、`conformance`、`doc`（`hir` 于 C1 轮补了 20 项声明层金样，语句/表达式级 IFIR 仍未落 ——
 阶段 [8] 是 AST→C 直接发射）。
 C 侧另有两份独立 harness，**两份都直接链生产 `runtime/infy_rt.c`**：`runtime/test_rt.c` →
@@ -75,6 +78,9 @@ C 侧另有两份独立 harness，**两份都直接链生产 `runtime/infy_rt.c`
 `src/codegen.rs` 明确拒绝的构造（逐条指名条款，见偏差 D-26…D-31 与 BACKLOG F12…F15）：闭包、`dyn`、`@embed`、
 A 轨 `extern` 调用、`event` 调用、`for`/`defer`/`const_assert`、128 位算术与字面量、窄位宽移位、
 `overflow = "saturate"`、含 NUL 的 `str` 字面量、字节串字面量、owned 值的三种移动形式；
+`infy test --cov`（§12.4 的 `-O0` 节点表插桩没有阶段产出，显式 exit 1，BACKLOG F22）、
+`infy test --bench` 依赖的 `std/test`（§14.7 的 `test::Bench`/`b.iter()` 与 `test::assert_eq` 在 §10 的 std
+签名表里**一条都没有**，故有参数的 `#[bench]` 一律拒绝并点名本条，BACKLOG F21）、
 `std.net` 的 TLS 后端（§10.4）、`infy lsp`（§13.4 标注为可选）、`dyn Trait` 的跨实现 vtable 偏移表（规范缺口 C-7 ②）、
 `line_map`/`exception_table` 的规范字节格式（缺口 C-7 ①，本实现自行固定并写入 `runtime/IFBC.md`）。
 

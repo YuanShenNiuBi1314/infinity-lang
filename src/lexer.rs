@@ -72,13 +72,9 @@ fn u32o(off: usize) -> u32 {
 
 /// §2.2 closed constraint set. `ignore` (§2.2's own example) and `test` (§14.7's
 /// `//infy:build test`) are used by the spec but missing from its list on line 96; they are
-/// admitted here so the spec's own examples do not diagnose. Everything else must come from
-/// `features`.
+/// admitted by `pkg::BASE_CONSTRAINTS`, which is the single truth both `E-0012` checks read.
 pub fn known_constraint_names() -> &'static [&'static str] {
-    &[
-        "windows", "linux", "macos", "x86_64", "aarch64", "msvc", "gnu", "a_track", "b_track",
-        "debug", "release", "ignore", "test",
-    ]
+    crate::pkg::BASE_CONSTRAINTS
 }
 
 /// §2.2: extract the identifiers of a constraint expression (`ident | "!" constraint |
