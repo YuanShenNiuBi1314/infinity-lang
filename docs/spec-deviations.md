@@ -881,3 +881,56 @@ IFBC 返回指令"⇒ 该表达式的值就是所在 item 的返回值。于是�
 差别在它是**探针产物**而不是手写形状 ⇒ 复跑 `btrack::tests::py_unit_fixture_is_exactly_what_the_ingest_produces`
 需要本机有发布时那台机器的同一个 CPython（本轮 = 3.14.6）。§7.7.3 本来就把源语言工具链定为**构建期**依赖
 （"构建期依赖 ≠ 运行期依赖，与 A 轨需要 C 编译器完全同构"），所以这里按 §12.2 记录而不假装可移植。
+
+## D-45 §7.8.4/§13.4 的 `infy ifbc dump|verify` 有四处规范没写：输入形态、`--canonical` 是哪一份文本、拒绝走哪个退出码、一个区里多个模块怎么分帧
+
+规范给的只有三句：§13.4 列 `infy ifbc dump|verify <artifact>`；§7.8.4"提供 … 用于诊断与合规测试（§12.3）"；
+D.10"`infy ifbc verify --all-errors` 可一次列出全部违规（默认只报首个，保持与运行时一致）"。
+§12.3 又把 `infy ifbc dump` 列为黄金文件之一。剩下的四处都没定义，本实现的确定选择如下（提交 `D2` 那批）。
+
+**(a) 输入形态：产物与裸镜像都收，`.inf ifbc` 只接受"恰好一个模块"**。
+`classify_ifbc` 先按 §7.4 容器读（`artifact::read` 只看文件尾的段尾，D-33 ⇒ 裸镜像绝不会被误判成容器），
+容器走 `.inf ifbc` 区；读不出容器再按 IFBC 镜像读（`IFB1` 魔数）。
+区非空而 `meta.n_ifbc_modules != 1` ⇒ **点名拒绝**（exit 1）：§7.4 没有为一个区里多个模块定义任何分帧
+（无计数前缀、无长度表、无分隔符），两侧读取器也都没实现，本命令不猜一种分隔符去给"区的前缀"发合格证。
+F29 落地时必须先裁这条（或由 `n_ifbc_modules` + 逐模块长度表把分帧钉进 §7.4），届时这里从拒绝变成支持。
+区为空 ⇒ exit 0 并把"0 个 B 轨模块 / 区域 0 字节"打在输出里，`ifbc_empty_region_text` 另点名 F29 与
+"不声称校验过产物里的 B 轨字节码" —— 空区是"没有东西可查"，不是"查过了没问题"。
+锁点 = `cli::tests::an_artifact_with_an_empty_ifbc_region_is_reported_as_empty`、
+`a_one_module_artifact_is_read_from_the_ifbc_region`（容器路径真读回写入的那一份字节）、
+`several_modules_in_one_region_are_refused_by_name`。
+
+**(b) `--canonical` 是 D4(3) 那份双侧共用文本，且此时 stdout 是纯的**。
+默认输出 = 人类可读反汇编（`IfbcModule::disassemble`）—— 它**没有**跨语言逐字节锁点，C 侧
+`infy_ifbc_dump` 是另一套行格式（D-42），所以只锁"同一份字节两次渲染相同"（§12.3 黄金文件的最小要求）。
+`--canonical` = 规范化文本：dump 走 `ifbc::dump_canonical` ↔ C `infy_ifbc_dump_canonical`，
+verify 走 `ifbc::verify_canonical` ↔ `infy_ifbc_verify_canonical`（行语法 `H/T/P/F/I/L/X/S` 与 `V`，
+见 `runtime/IFBC.md` §6.1 与 `docs/internals/ifbc-encoding-rust.md` §6）。裁定 = canonical 模式下
+**不打**表头、状态行与 note（状态行改走 stderr），因为那一份文本的用途就是与 **C 侧**渲染的
+`runtime/fixtures/*.can.txt` / `*.ver.txt` 按原始字节 `cmp`。
+D4(3) 把这个锁点放在 C harness 与 `ifbc::tests` 里；本轮第一次把它抬到命令行那一层
+（`cli::tests::cli_canonical_dump_equals_the_text_the_c_loader_rendered`、
+`cli_canonical_verify_equals_the_verdict_text_the_c_loader_rendered`）。
+`W-0705` 在 canonical 模式下不渲染（D-42(e)：本侧按指令、C 侧按函数，粒度不同，不是可比文本）。
+
+**(c) 退出码：§7.8.3 的阻断结论记 2，读不出的文件记 7，命令用法错记 1**。
+§13.4 的 2 写的是"诊断阻断（E，或 strict 下 W）"，而 §7.8.3/D.10 的结论是 `R-07xx`，规范**没有**给
+装载期拒绝分配退出码。选 2 的理由是按角色而非按字面：2 是唯一表达"某项检查说了不通过"的号；
+1 与"命令跑不下去"（读不到文件、不认识的子命令、缺参数）不可区分，7 被 §13.4 限定给
+§5.8/§7.3 的校验和/可复现性。文件两侧都读不出（既无段尾也无 `IFB1`）⇒ 沿用 `artifact info` 的借用
+（`E-0605` + exit 7，D-32），并把两条拒绝理由都打出来。**没有**新增任何 `E-`/`R-` 码（UB-024）。
+锁点 = `cli::tests::verify_reports_the_first_finding_by_default_and_all_of_them_with_the_flag`、
+`ifbc_refuses_a_file_that_is_neither_and_an_unusable_invocation`。
+
+**(d) host 签名表用 `HostSigTable::std_default()`，逐 build 的表不可得**。
+§7.8.3 第 5 项要求 `call.host` 的签名"逐元匹配 `IFABI`"，而 `src/host.rs`（§11 `HostApi`）仍是 1 行占位、
+D3 的 A 轨绑定表也还没生成 ⇒ 本命令拿的是 §10 的 std 签名表（与 `ifbc::tests` 和 C harness 同一张）。
+后果要说清：`infy ifbc verify` 今天校验的是"镜像对 std 表"，不是"镜像对该产物实际注册的 host 表"。
+另按此裁定，`verify` 的结论**只在 `.ver.txt` 那一份矩阵上与 C 侧比过**；对
+`runtime/fixtures/ifbc_all_ops.bin` 本侧报 26 条阻断（`call.virt`/`call.embed`/`invoke.dynamic` 一类，
+F26 前半），C 侧不报同样的集合 ⇒ 两侧装载期校验等价的这句话仍然不许讲（清单 = D-42 (a)–(e)）。
+
+**(e) `--all-errors` 的粒度**：D.10 说"一次列出全部违规（默认只报首个）"，没定义"首个"是首个**函数**
+还是首条**结论**。裁定 = 首个失败函数返回时手上已有的全部结论（`ifbc::verify(.., false)` 的既有语义，
+与运行时"首失败项映射 R-码后整体拒绝该模块"一致：模块级拒绝不需要也不应拿到别的函数的结论）。
+实测 = 矩阵镜像默认报 1 条（`R-0704 func #0 @ 0x0005`），`--all-errors` 报 10 条。

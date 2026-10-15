@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 460 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 468 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
 Finished `dev` profile  (50 warnings，全部为 unused/dead code，见 BACKLOG F2；D4(1) 清掉一处死字段)
 $ infy check examples/tour
@@ -114,10 +114,10 @@ $ (cd examples/tour && infy fmt --check)
 2 file(s) are not canonical                        # exit 2，见下文"导览源码不是格式化不动点"
 ```
 
-460 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 460；D1(2) 轮实测）：
+468 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 468；D2 轮实测）：
 `lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `pkg` 24 · `btrack` **30**（D1(1) 前是 0，D1(2) 轮 23 → 30） ·
 `sema` 22 · `codegen` 22 · `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` 20 · `artifact` 18 ·
-`cli` **20** · `toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `parser` 8 · `base64` 7 · `stdlib` 4 · `diag` 2。
+`cli` **28**（C5 轮 16 → D1(2) 轮 20 → **D2 轮 28** = `infy ifbc dump|verify` 的八条） · `toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `parser` 8 · `base64` 7 · `stdlib` 4 · `diag` 2。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -128,7 +128,7 @@ $ (cd examples/tour && infy fmt --check)
   §7.7.3 版本锁、附录 E.3 表语法与表体 hash、§7.8.3 的降级自检），它揪出并修掉的三个缺陷见下文 D1(1) 一节。
   `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成独立单测模块（C4 轮 **19** 项 = `goto` 必须转移控制那一条；C5 轮 **22** 项 = §5.9 测试 harness 的 3 条），`hir.rs` 的 20 项锁阶段 [7]，
   `artifact.rs`（§7.1 阶段 [9] / §7.3 / §7.4）在 C3 轮新建并直接带 18 项单测 + 一份被 C 侧读取器消费的逐字节夹具，
-  `cli.rs` 从 C4 轮的 9 项到 C5 轮的 16 项、D1(2) 轮的 **20** 项（`infy test` 的三条端到端 + §5.9/§2.2 的文件选择两条 + §5.8 dirhash 不随构建范围变的一条 + `--cov` 拒绝）。
+  `cli.rs` 从 C4 轮的 9 项到 C5 轮的 16 项、D1(2) 轮的 **20** 项、**D2 轮的 28** 项（`infy test` 的三条端到端 + §5.9/§2.2 的文件选择两条 + §5.8 dirhash 不随构建范围变的一条 + `--cov` 拒绝 + [6a] 经命令行的摄取四条 + `infy ifbc dump|verify` 八条）。
 - 先前记为"§9.2 字节级金样"实际是 1 条规范样例逐字节 + 1 条 caret 行规则（`diag` 2 项）；
   `goto` 的三条 `E-0301` 越界路径与 `E-0121` 在 A4 轮之前无测试（**A4 轮已补**，见下）。
 
@@ -136,20 +136,21 @@ $ (cd examples/tour && infy fmt --check)
 `infy build` **自 C3 轮起跑完 §7.1 阶段 [1]–[9]**：前端 → HIR → C11 → 用 A 轨 `cc` 链成宿主镜像 →
 追加 §7.4 段容器与 64 字节段尾，`infy artifact info` 读得回自己刚产出的文件（P4/P13/P14），故 exit **0**。
 阶段 [10]（sumdb 校验与运行时自校验比对）仍**未做**，`.inf sum` 只是把 `MODULE.infy.lock` 的 dirhash 清单抄进容器；
-`doc`/`lib pack`/`ifbc dump`/`conformance`/`bench` 仍显式报"未实现"（exit 1）；**`run` 自 C4 轮起真执行**（§13.4 的
+`doc`/`lib pack`/`conformance`/`bench` 仍显式报"未实现"（exit 1）；**`infy ifbc dump|verify` 自 D2 轮起可用**（§7.8.4，见下文 D2 一节；今天真产物的 `.inf ifbc` 恒空 = F29，命令对此明打为空而不假称校验过）；**`run` 自 C4 轮起真执行**（§13.4 的
 开发态 = [7]-[9] 建到临时目录 + 立即执行，退出码按 §13.4，见下文 C4 一节）；**`test` 自 C5 轮起真执行**（§5.9 的
 测试构建 + 生成的 `#[test]` harness，退出码 0/1/3 按 §13.4，见下文 C5 一节；`bench` 留在未实现里是因为 §13.4
 根本没有这个子命令，它是 `infy test --bench`）；
-B 轨 `src/btrack.rs` 的**库内**链路（探针→扫描→降级→本侧装载自检）已于 **D1(1) 轮**跑通并带 23 项单测，**D1(2) 轮**接进 CLI（阶段 [6a]）并把镜像交给 C 侧装载（30 项单测 + `ifbc_py_unit.bin` 夹具），
-但阶段 [6a] 仍**没有任何 CLI 调用点**、产出的镜像还没被 C 侧 `infy_ifbc.c` 装载过 ⇒ D1 端到端仍未收敛；
+B 轨 `src/btrack.rs` 的**库内**链路（探针→扫描→降级→本侧装载自检）已于 **D1(1) 轮**跑通并带 23 项单测，**D1(2) 轮**接进 CLI（阶段 [6a]）并把镜像交给 C 侧装载（30 项单测 + `ifbc_py_unit.bin` 夹具）⇒ D1 已勾；
+**D2 轮**再把 §7.8.4 的 `infy ifbc dump|verify` 命令接上（`cli` 20 → **28**，双侧文本第一次在命令层比对）。
+B 轨剩下的缺口在**产物那半边**：阶段 [8] 没有通往 IFBC VM 的调用通道 ⇒ `.inf ifbc` 恒空、含 `@py` 的 module 走不到 [9]（**F29**），§7.7.1 样例本体也被能力表红着拒（**F30**）；
 C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（C3 轮复跑 **32335 断言 / 0 失败**，直接链生产 `infy_rt.c`）；
 `src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs` 是 1 行占位文件（`src/artifact.rs` 已于 C3 轮从"不存在"落成 §7.4 容器写入器 + 读取器 + §7.3 build-id，18 项独立单测）（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
 A 轨绑定、`std.net` TLS、`infy lsp` 未实现。
 IFBC 断言（B3 轮 79 → 82，D4(2) 轮 **82 → 146**：合并线格式 + 17 条间隙指令 + Rust 写↔C 读执行的夹具；
 D4(3) 轮 **146 → 167**：三份双侧共用文本夹具，D1(2) 轮 **167 → 180**：第四份 = 阶段 [6a] 的真产物）
 **B2 轮起既链 `runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，两侧同为 **180/180**（D1(2) 轮复跑）、
-stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 B 轨的端到端（D1 剩下那半边：CLI 接线 +
-C 侧装载夹具）。Rust↔C 的**逐指令反汇编相等**已于 D4(3) 轮落地（偏差 D-42）；"两侧校验结论等价"另被 F26 挡着。
+stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 B 轨的**产物半边**（D1/D2 已把摄取与检视命令接上，
+缺的是阶段 [8] 通往 IFBC VM 的调用通道 ⇒ `.inf ifbc` 恒空 = **F29**）。Rust↔C 的**逐指令反汇编相等**已于 D4(3) 轮落地（偏差 D-42），D2 轮起这份相等也在 CLI 层比对；"两侧校验结论等价"另被 F26 挡着。
 
 ## A2 本轮修掉的真实缺陷（每条都有回归测试）
 
@@ -744,8 +745,11 @@ rt harness **32335 assertions / 0 failures** exit 0（在 `target/scratch` 里�
 
 ## 仍未实现
 
-`doc`/`lib pack`/`ifbc dump`/`conformance`/`lsp`/`bench`（exit 1）目前明确返回"未实现"而不是假成功
-（`infy build` 自 C3 轮起 exit **0**：阶段 [1]–[9] 全通，产物容器可被 `infy artifact info` 与 C 侧运行时读回；
+`doc`/`lib pack`/`conformance`/`lsp`/`bench`/`ingest`（exit 1）目前明确返回"未实现"而不是假成功
+（`infy ifbc dump|verify` **自 D2 轮起可用**：§7.8.4 的检视命令，输入 = §7.4 产物或裸 IFBC 镜像，
+输出 = 反汇编 / `--canonical` 的双侧共用文本 / §7.8.3 的校验结论，见下文 D2 一节。它今天能检视的镜像来自
+`runtime/fixtures`，而**真产物的 `.inf ifbc` 恒空**（F29），命令对此明打"0 个 B 轨模块"而不假称校验过；
+`infy build` 自 C3 轮起 exit **0**：阶段 [1]–[9] 全通，产物容器可被 `infy artifact info` 与 C 侧运行时读回；
 **`infy run` 自 C4 轮起 exit 0/3 真执行**，见上文 C4 一节；**`infy test` 自 C5 轮起 exit 0/1/3 真执行**，
 见上文 C5 一节。`bench` 留在这一列是因为 §13.4 根本没有 `infy bench`，它是 `infy test --bench`；
 `infy test --cov` 同样显式 exit 1 —— §12.4 的 `-O0` 节点表插桩没有任何阶段产出，F22）；
@@ -819,4 +823,51 @@ Rust 侧 `btrack::tests::py_unit_fixture_is_exactly_what_the_ingest_produces` �
 **C 侧只动 `test_ifbc.c`**（`infy_ifbc.c` / `infy_rt.c` / 冻结头零改动）仍按纪律复跑四条链：
 `gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c` 与 `-c runtime/infy_ifbc.c` 各 **0 告警** exit 0、
 rt harness **32335 assertions / 0 failures** exit 0（在 `target/scratch` 里跑）、
+替身链 IFBC **180/180**、生产链 IFBC **180/180**、两份 stdout `cmp` **无差异**。
+
+## D2 轮（2026-10-16）：`infy ifbc dump|verify` 接进 CLI，双侧文本第一次在**命令层**比对
+
+§13.4 列了 `infy ifbc dump|verify <artifact>`、§7.8.4 承诺"提供 … 用于诊断与合规测试（§12.3）"、§12.3 又把
+`infy ifbc dump` 当黄金文件 —— 而这条命令此前落在 `cli.rs` 的"未实现"臂里（exit 1 的 notice）。
+实质件全在库里（`ifbc::disassemble` / `dump_canonical` / `verify_canonical` / `verify` ↔ C 侧同名件），
+本轮只补命令这一层，没有再造第二套渲染器。落地面只有 `src/cli.rs`：`IfbcInput`/`IfbcOpenErr`/`classify_ifbc`
+（先按 §7.4 容器读、再按裸镜像读）/`ifbc_dump_text`/`ifbc_verify_image`/`ifbc_verify_canonical_text`/
+`ifbc_empty_region_text`/`ifbc_cmd`，加进 `run()` 的派发与 `usage()`，并从"未实现"臂里摘掉 `ifbc`。
+
+**实测（P22/P23/P24，全部是本轮真实命令输出）**
+- `infy ifbc dump --canonical runtime/fixtures/ifbc_{rust_writer,all_ops,py_unit}.bin` 三份输出与 **C 侧**渲染的
+  `.can.txt` 按原始字节 `cmp` 无差异，exit 0；不带 `--canonical` 的人类可读形态只锁"同一份字节两次渲染相同"
+  （C 侧 dumper 是另一套行格式 = D-42，没有跨语言字节锁）。
+- `infy ifbc verify runtime/fixtures/ifbc_verify_matrix.bin` 默认报 **1** 条（`R-0704: func #0 @ 0x0005: switch 的
+  某个 case 目标 0x0007 不是本函数内的指令边界`）—— D.10 的"默认只报首个，保持与运行时一致"；
+  `--all-errors` 报 **10** 条（`R-0704 ×2 / R-0705 / R-0706 ×3 / R-0707 ×2 / R-0710 / R-0713`）；
+  `--canonical` 的 10 行 `V …` 与 C 侧 `.ver.txt` 逐字节 `cmp` 无差异。三条都是 exit **2**。
+- `ifbc_rust_writer.bin` 与 `ifbc_py_unit.bin`（= [6a] 的真产物）各 **0** 条阻断 ⇒ exit 0。
+  **不据此讲"两侧校验等价"**：`ifbc_all_ops.bin` 本侧报 **26** 条而 C 侧不报同一集合（F26 前半 / D-42 (a)–(e)），
+  命令的输出里直接把这句话打成 note。
+- 真实产物 `examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe`：`dump` 与 `verify` 都 exit 0 并明打
+  `ifbc … — .inf ifbc 为空（0 个 B 轨模块 / 区域 0 字节）：没有可反汇编/校验的字节码` + 点名 F29 与
+  "不声称校验过产物里的 B 轨字节码"（F29 是 D2 开工前就接受的前提，不绕）。
+- 既无 `INFYART2` 段尾又无 `IFB1` 魔数的文件（`README.md`）→ `E-0605` + exit **7**，且**两条**拒绝理由都打；
+  不认识的子命令 / 缺文件 / 读不到 → exit **1**。
+
+**规范未定 → 选定实现，记偏差 D-45 (a)–(e)**：输入形态（容器或裸镜像；`.inf ifbc` 只接受恰好 1 个模块，
+`n_ifbc_modules != 1` **点名拒绝**而不去猜一种 §7.4 没定义的分帧）、`--canonical` = D4(3) 那份双侧文本且
+此时 stdout 必须纯（表头/状态行走 stderr，否则 `cmp` 无从谈起）、拒绝的退出码（§7.8.3 的阻断结论 → 2、
+读不出的文件 → 7、用法错 → 1）、host 表用 `HostSigTable::std_default()`（`src/host.rs` 是 1 行占位 ⇒
+今天校验的是"镜像对 std 表"，不是"镜像对该产物注册的 host 表"）、`--all-errors` 的"首个"裁成首个**失败函数**。
+
+**测试**：`cli` **20 → 28**（八项：三份 `.can.txt` + 一份 `.ver.txt` 的 CLI 级锁、默认 vs `--all-errors` vs
+`--canonical`、空区那两行**文字**、1 模块容器的区读回 == 写入字节、多模块点名拒绝、既非产物又非镜像）。
+容器那两条是本轮唯一需要现造的形状 —— 今天没有任何真实构建会写出非空 `.inf ifbc`，所以测试用
+`artifact::write` 造容器（`container_with_ifbc`），把命令的产物路径钉住，等 F29 落地时不必再补这一层。
+
+**回归（全部本轮实测，非引用）**：`cargo test --offline --lib` **468 passed / 0 failed**（基线 460，+8 全在 `cli`）、
+`cargo check --offline --lib` 0 error / **50 warning**（未新增）；`infy check examples/tour` exit 0、
+`infy build` exit 0（生成 C11 仍 **12513** 字节、产物仍 **199975** 字节、`build-id 4d8250b5…55ba` 逐字节未变 ——
+本轮没碰 [7]-[9]）、`--verify-reproducible` exit 0、`infy run`/`infy test examples/tour` exit 0、
+`infy artifact info … --nodes` exit 0、生成 C 的 `gcc -std=c11 -Wall -Wextra -I runtime -c` exit 0（0/0）、
+`(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决，未变）；
+**C 侧零改动**（`.c`/`.h` 一行没动）仍复跑四条链：`gcc -c runtime/infy_rt.c` 与 `-c runtime/infy_ifbc.c` 各
+**0 告警** exit 0、rt harness **32335 assertions / 0 failures** exit 0（在 `target/scratch` 里跑）、
 替身链 IFBC **180/180**、生产链 IFBC **180/180**、两份 stdout `cmp` **无差异**。
