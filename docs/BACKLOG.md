@@ -366,7 +366,7 @@
 
 ### 阶段 D：双轨嵌入的真实端到端
 
-- [ ] D1 `src/btrack.rs` 收敛（子任务被截断）：CPython 探测 → 能力扫描 → lowering → IFBC。
+- [x] D1 `src/btrack.rs` 收敛（子任务被截断）：CPython 探测 → 能力扫描 → lowering → IFBC。
       验收：`@py` 的 tour 片段产出可被 `infy_ifbc.c` 装载的模块；`eval` 触发 `E-0711`；未映射 opcode 触发 `E-0712` 并点名具体项；声明 `py = "3.13"` 而本机是 3.14 触发 `E-0713`。
       **D1(1) 轮（2026-10-15）= 两段增量的第一段（探测 + 能力扫描）已落地，D1 保持 `[ ]`**。
       按 §2 的建议没有重写，做法是**先补测试**：`btrack` **0 → 23 项**（每项 doc comment 指名条款）。
@@ -407,6 +407,45 @@
       会被 **F27** 挡在执行那一半（装载通过而执行显式 `R-0710`），那是**预期的显式失败**，不要去绕。
       (c) `.inf ifbc` 恒空（`artifact.rs` 写 0 个 B 轨模块）；真接上之后 C3 轮钉的 199975 字节 /
       `build-id 4d8250b5…55ba` / `blob 738` 三处数字会一起动 —— 预期变化，须同步改 status/coverage/README 与本节。
+      **D1(2) 轮（2026-10-15）= 余项 (a)(b) 落地，D1 验收四项全部有实测锁点 ⇒ 勾 `[x]`；(c) 登记为 F29**。
+      (a) **阶段 [6a] 接进 CLI**：`cli.rs::frontend` 在 `analyse()` 之后、渲染诊断之前调 `ingest_b_track`
+      （§7.1 的阶段注要求 `infy check` 也跑 [6a]，而 §7.1 又规定"任一阶段出现 `E-` 即中止后续阶段" ⇒
+      只在 [1]-[5] 干净时才摄取）；新增 `btrack::EmbedSite` / `ingest_embed_site` / `embed_ty_kind`
+      （§7.7.1 规则 1 的 `sema::Ty` → `ifbc::TyKind` 映射，容器类折到 `dyn`，`u128`/`auto` **拒绝而不回落**）、
+      `cli.rs` 的 AST 采集（§3.6 的两个合法位置：整体 body 与语句表达式，含 Block/If/While/For/Match/Unsafe/
+      Defer 的嵌套），镜像存在 `Loaded::embed_images`，`infy check` 每份打一行 `ingest ok —`（§13.4 未规定
+      `check` 的输出格式，按本仓库"每个已落地阶段一行状态"的既有约定，见偏差 **D-44(g)**）。
+      裁定与保留名集合等七处规范未定 = **D-44**；`E-0713` 同时承担"解释器不在场"（spec:1051 的字面）。
+      **接线当场揪出两条实现缺陷**（都不是规范歧义，各带回归锁点）：
+      (1) `build_embed_unit` 问探针要 `__infy_unit__`，而 `wrap_embed_unit` 写的是 `def <unit_name>` ⇒
+      `unit_code()` 名字匹配不上就**静默回落到模块 code object**，扫的是包装器的 `MAKE_FUNCTION` 流，
+      单元体里的 opcode/builtin/import 一个都不进扫描，产出的镜像也不是那个函数（D-44(d)，改 `run_python_probe_named`）；
+      (2) `sema` 的 `ExprKind::Embed` 臂无条件返回 `Ty::Unit`，令 §7.7.1 自己的样例在阶段 [4] 吃
+      `E-0110 返回值类型不匹配：期望 Vec<f32>，实际 ()` ⇒ **阶段 [6a] 从 CLI 永远到不了**（D-44(e)，
+      改判为所在 item 的声明返回类型，§7.7.1 规则 2 的推论）。顺带 (3) 补丁级声明 `py = "3.14.6"` 时
+      版本比较放行而能力表按原串去找 `IFBC-CAP-py-3.14.6.toml` → 假 `E-0712`（D-44(f)，改按 `dump.py_minor()`）。
+      (b) **C 侧真装载了一份 `@py` 镜像**：新夹具 `runtime/fixtures/ifbc_py_unit.bin`（1062 字节，
+      由 `ingest_embed_site` 从 §7.7.1 的 `normalize` 单元产出，非手写形状）+ `.can.txt`（1144 字节，
+      **C 侧** `INFY_REGENERATE_CANONICAL=1` 渲染），`test_ifbc.c::test_py_unit_fixture` 用**生产装载器**读它并过
+      §7.8.3 六项校验（`rc == 0`），再从规范化文本里 `sscanf` 回函数记录断言 **arity 2 / ret_sig 13(f64) /
+      ret_arity 1** —— §7.7.1 规则 1 的声明表穿过探针、lowering、编码器，在虚拟机这一侧读回来还是那一张；
+      另断言 `L` 行在场（§7.4 的原始语言行映射，本例 13 行全部映射到 Python 第 2 行）。
+      Rust 侧 `ifbc::tests::canonical_render_equals_the_c_loader_render` 把这份夹具加进同一份文本的比对列表，
+      `btrack::tests::py_unit_fixture_is_exactly_what_the_ingest_produces` 断言"重新生成 == 夹具"。
+      **不声称执行**：B 轨帧的执行通道在阶段 [8]（F29），且 `import.attr`/`seq.iter` 那一半还被 **F27** 挡着。
+      验收四项的第 1 项用的是 §7.7.1 单元**去掉推导式**的那一份体（`return scale * 2.0`）——
+      原样推导式被能力表红着拒绝（`RERAISE` 在表里是 `-`，另有 `f32` 与无后缀字面量的混宽算术被 lowering
+      自检拒），这是 §7.7.2 期望的行为而不是本条的失败，规范样例本身过不了扫描登记为 **F30**。
+      证据：`cargo test --offline --lib` **460 passed / 0 failed**（基线 449，+7 全在 `btrack` +4 在 `cli` = 11）、
+      `cargo check --offline --lib` 0 error / **50 warning**（未新增）、
+      `infy check examples/tour` 仍 exit 0 且 stdout 逐字节未变（无 B 轨单元 ⇒ [6a] 一行不打，
+      `cli::tests::a_module_without_embeds_produces_no_images` 钉住 P6）、`infy build` 仍 12513 字节 C11 /
+      199975 字节产物 / `blob 738` / `build-id 4d8250b5…55ba`（阶段 [6a] 不参与 [9] 的输入，(c) 未做）、
+      `--verify-reproducible` exit 0、`infy artifact info … --nodes` exit 0、`infy test examples/tour` exit 0、
+      `(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决，未变）；
+      **C 侧只改 `test_ifbc.c`**（`infy_ifbc.c`/`infy_rt.c`/头文件零改动）仍复跑四条链：`-c infy_rt.c` 与
+      `-c infy_ifbc.c` 各 **0 告警**、rt harness **32335/0**、替身链与生产链 IFBC 各 **180/180**
+      （基线 167，+13 = 新夹具装载那组 8 项 + 第四份双侧文本 5 项）且两份 stdout `cmp` **无差异**。
 - [ ] D2 `infy ifbc dump|verify` 接线（Rust 侧编码 ↔ C 侧虚拟机**交叉验证**：同一镜像两边读出的反汇编一致）。
 - [ ] D3 `src/atrack.rs`：`#[link]` + `@c` 配对、`infy_binding.h` 生成、`infy_e_<name>_<8hex>` 包装、缺 `unsafe` 报 `E-0721`、缺 `#[owns]/#[borrows]` 报 `E-0723`。
       验收：一个最小 `@c` 单元被 gcc 编译、链接、在产物里被调通。
@@ -727,155 +766,131 @@
       里那条"补上数值键就变红"的断言指向本条，把两张表移进 `the_number_keyed_table_agrees_…` 的列表，
       并确认 `check_alias_agreement` 对它们真的会触发（加一条人为造矛盾的测试）。
 
+- [ ] F29 **阶段 [8] 没有通往 IFBC VM 的调用通道，`.inf ifbc` 因此恒空**（D1(2) 轮接线时确认）：
+      阶段 [6a] 现在能从 CLI 产出真镜像（`Loaded::embed_images`），但 `codegen` 对 embed 体仍报
+      `CgError`（`src/codegen.rs:2334`，"A 轨单元调用未实现（D3）"同族），于是含 `@py` 的 module 在
+      `infy build` 阶段 [8] 就 exit 6，永远走不到 [9] ⇒ `artifact.rs` 那两行 `.inf ifbc` 写入对本构建
+      是**不可达路径**。规范侧的对应条款：§7.7.1 规则 1"不再是注入全局变量，而是函数调用约定"、
+      §7.4 `.inf ifbc` 非空时装载期先跑 §7.8.3、§12.2 要求行映射回原语言。
+      验收：给 codegen 一条 `infy_ifbc_invoke`/模块装载入口的发射形态（冻结头现在**没有**"从产物里取
+      B 轨模块"的公共入口，见 `runtime/IFBC.md` §7 的记录 ⇒ 先补头并同批复跑四条 C 链），把 `@py` 单元
+      接进调用约定，然后：同一个 module `infy build` exit 0、`infy artifact info` 打出
+      `n_ifbc_modules >= 1`、`.inf ifbc` 的长度等于镜像字节数、`infy run` 里该单元真被调用；
+      届时 199975 / `4d8250b5…55ba` / `blob 738` 三处数字会动（预期变化，同步改 status/coverage/README）。
+
+- [ ] F30 **§7.7.1 的 `@py` 样例本体过不了能力扫描**（D1(2) 轮接线时实测）：
+      `event normalize(batch: &[f32], scale: f32) -> Vec<f32> { @py(batch=batch, scale=scale) { out =
+      [ (x / scale) for x in batch ]; return out } }` 在 `infy check` 上报
+      `E-0712 字节码能力缺失：RERAISE`（扫描项 1 · code object `normalize` · `co_code+0x3c` · 原始语言行 3），
+      另有一条同族：`f32` 形参与无后缀 `2.0` 混宽 ⇒ `操作数类型 [f32, f64] 不满足能力表给出的任何映射目标`。
+      这不是接线缺陷，是 §7.7.2 设计的样子（"没实现的东西在构建期就红着退出"），但**规范的样例就是不能构建**
+      属于文档级矛盾：§14 的导览、§7.7.1 的样例、§12.2 的合规用例（"能力扫描正反例（每类 `E-0712`）"）
+      都默认这段能过。锁点 = `btrack::tests::the_list_comprehension_sample_is_refused_by_name_not_silently`
+      （断言点名 `RERAISE` 且带原始语言行）。
+      验收：要么扩能力表/`lowering` 让 `RERAISE` 与 `GET_ITER`/`FOR_ITER`/`END_FOR` 的收尾形态可映射
+      （F27 的迭代器载体是前置），要么把 §7.7.1/§14.2 的样例改成可摄取形态并请维护者在规范里勘误；
+      裁定写进 `docs/spec-deviations.md`，在此之前任何文档不得声称"§7.7.1 样例可构建"。
+
 ## 2. 当前指针
 
-> **下一轮第一件事：D1 的余项**（§1 阶段 D 的第一个 `[ ]` 仍是 **D1**）。D1(1) 轮（代码提交 `96b5da4`）已把
-> 「探测 + 能力扫描」这一段收敛：`btrack` **0 → 23 项**、验收四项的后三项拿到实测锁点、三条挡死整条路
-> 的实现根因修掉（裁定 = 偏差 **D-43**）。剩下的两半写在 D1 条目的"余项"里，都不需要重新审计：
-> **(a) 阶段 [6a] 的 CLI 接线** —— 全仓对 `btrack` 的引用只有 `artifact.rs` 的 `crc32` 与它自己的测试，
-> 入口 `btrack::build_embed_unit(...)` 已备好，接在 `cli.rs::frontend()` 之后、`hir::lower` 之前；
-> 要现造的只有 `HostSigTable` 里该单元那一行（§7.7.1 规则 1：参数表来自 **INFY 侧**声明的类型，
-> 即 `sema::Ty` → `ifbc::TyKind` 的映射，`hir::hir_ty_from_ast` 是最接近的现成件）。
-> **(b) 让 C 侧 `infy_ifbc.c` 真装载一份 `@py` 镜像** —— 新增 `runtime/fixtures/ifbc_py_unit.bin`，
-> 直接挂 D4(3) 的双向锁点（`.bin` 由 Rust 写入器生成 / `.can.txt` 由 C 侧 `INFY_REGENERATE_CANONICAL=1` 渲染），
-> `test_ifbc.c` 用**生产装载器**读它并过六项校验；带属性访问或迭代的片段被 **F27** 挡在执行那一半
-> （装载通过而执行显式 `R-0710`），那是**预期的显式失败**，不要去绕、不要当成编码 bug。
-> 阶段 D 的线格式债已清完：D4 的 (1) Rust 侧 `d7d8991`、(2) C 侧 `e5555dc`、(3) 双侧文本交叉验证
-> `1f8988d` 都落地；裁决在 **D-38**，动手时补裁的在 **D-40**（Rust）/ **D-41**（C）/ **D-42**
-> （交叉验证本身，含它当场抓到的三处分叉）/ **D-43**（B 轨：E.3 的取值域 + 3.12+ 的 `co_names` 索引打包 +
-> `IMPORT_NAME` 读错表）。两份形状文档 =
-> `docs/internals/ifbc-encoding-rust.md`（Rust，§6 是 D4(3) 新增的"双侧共用文本"）与
-> `runtime/IFBC.md`（C，§6.1 = 行语法）。
+> **下一轮第一件事：D2 —— `infy ifbc dump|verify` 的 CLI 接线**（§1 阶段 D 的第一个 `[ ]`；D1 已在
+> D1(2) 轮勾掉，证据写在该条目里）。D2 需要的实质件**全在库里**，不要另起一套：
+> (1) 人类可读反汇编 = Rust `src/ifbc.rs::disassemble` ↔ C 侧 `infy_ifbc_dump`（`runtime/infy_ifbc.c`）；
+> (2) **双侧共用**的规范化文本 = Rust `ifbc::dump_canonical` / `ifbc::verify_canonical` ↔ C
+>     `infy_ifbc_dump_canonical` / `infy_ifbc_verify_canonical`，行语法 `H/T/P/F/I/L/X/S`
+>     （语法在 `runtime/IFBC.md` §6.1 与 `docs/internals/ifbc-encoding-rust.md` §6）；
+> (3) 装载期六项校验 = Rust `ifbc::verify(m, &HostSigTable::std_default(), all_errors)` ↔ C 侧
+>     `validate_module`（§7.8.3）；
+> (4) 镜像来源 = `Loaded::embed_images`（阶段 [6a] 的产物，`cli.rs::frontend` 之后就在）与
+>     `runtime/fixtures/ifbc_*.bin` 四份夹具。
+> D2 只剩命令行那一层：`infy ifbc dump <镜像文件|产物>` / `infy ifbc verify <产物>`（§13.4 的
+> `infy ifbc verify runner` = "校验 `.inf ifbc` 段（§7.8.3 六项）"），退出码按 §13.4，并把"两侧读同一份
+> 文本"从 C harness 提到 CLI 断言（`cli::tests` 跑本侧命令，与 C 侧渲染的 `.can.txt` 比同一份字节）。
+> **两条必须先接受的前提**：① `.inf ifbc` 恒空（**F29**：阶段 [8] 对 embed 体仍报 `CgError`
+> `codegen.rs:2334`，含 `@py` 的 module 在 [8] 就 exit 6，永远走不到 [9]）⇒ "校验产物的 `.inf ifbc` 段"
+> 这一档今天只能验"`n_ifbc_modules = 0` + 明打为空"，不许假装校验过；② 本侧装载期校验与 C 侧的 δ 表
+> 仍不等价（**F26 前半**，不可比清单 = 偏差 **D-42** 的 (a)–(e)）⇒ "两侧校验结论等价"这句话在 D2 里
+> 仍然不许写进任何文档，措辞照 `docs/coverage.md` 的"被测对象是生产运行时吗"那一行。
 >
-> **D4(3) 之后新增的常驻面（D1 直接要用）**：
-> (0a) 双侧共用的规范化文本：C 侧 `infy_ifbc_dump_canonical` / `infy_ifbc_verify_canonical`，
->     Rust 侧 `ifbc::dump_canonical` / `ifbc::verify_canonical`，行语法 `H/T/P/F/I/L/X/S`。
->     **方向分工是设计核心**：`.bin` 只有 `INFY_REGENERATE_FIXTURE=1` 能重写（Rust 写入器是唯一作者），
->     `.can.txt` / `.ver.txt` 只有 **C 侧**的 `INFY_REGENERATE_CANONICAL=1` 能重写，两侧各自断言同一份
->     文件 —— 改线格式 / 表形态 / 助记符 / 操作数个数 = 至少一侧红，没有一侧能单独定义答案。
->     D1 产出的每份 `@py` 镜像都能直接挂上这条锁点，不需要再造比较器。
-> (0b) 三份夹具：`ifbc_rust_writer.bin`(1031B) + `.can.txt`、`ifbc_all_ops.bin`(2083B) + `.can.txt`
->     （附录 D 全部 opcode，一条一个 `I` 行，含 17 条间隙指令、`switch` 内联 case 表、类型操作数
->     越界时的 `?` 后缀）、`ifbc_verify_matrix.bin`(1890B) + `.ver.txt`（11 函数 / 10 条
->     `(code, func, off)`）。IFBC harness 因此 **146 → 167 断言**（两条链同数）。
-> (0c) `.gitattributes` 把 `runtime/fixtures` 钉成 `binary` / `-text`：本机 `core.autocrlf=true`，
->     没有它检出会把 LF 文本改成 CRLF ⇒ 双侧逐字节比较**假红**（不是内容漂移）。动夹具前先确认这条
->     还在（手法：`rm` 掉再 `git checkout --`，然后 `cmp`）。
-> (0d) C 侧 `coro.resume` / `coro.throw` 现在是 **1 操作数**（D.8 的 `h` 在线上；执行仍从操作数栈取
->     被 resume 的值，`h` 与 `ldw` 的类型注解同类：装载与反汇编读、执行不读）。D1 的发侧别再按
->     0 操作数想。D.9 的助记符名也按规范改成 `size_of` / `align_of` / `field_off`（`typeof.idx` 是名字）。
+> **D1(2) 轮实测（本轮复跑，非引用）= 新基线**：`cargo test --offline --lib` **460 passed / 0 failed**
+> （基线 449，+11：`btrack` 23 → **30**、`cli` 16 → **20**；全分布 `lexer` 79 · `derive` 57 · `fmt` 39 ·
+> `macro_expand` 35 · `btrack` **30** · `pkg` 24 · `sema` 22 · `ifbc` 22 · `codegen` 22 · `hir` 20 ·
+> `cli` **20** · `artifact` 18 · `toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `parser` 8 ·
+> `base64` 7 · `stdlib` 4 · `diag` 2 = 460）；`cargo check --offline --lib` 0 error / **50 warning**
+> （未新增）；`infy check examples/tour` exit 0 且 **stdout 逐字节未变**（无 B 轨单元 ⇒ [6a] 一行不打，
+> `cli::tests::a_module_without_embeds_produces_no_images` 钉住）；`infy build examples/tour` exit 0 且
+> 生成 C11 仍 **12513 字节**、产物仍 **199975 字节**、`blob 738`、`build-id 4d8250b5…55ba`（阶段 [6a]
+> 不参与 [9] 的输入，(c) 未做）；`--verify-reproducible` exit 0；`infy artifact info … --nodes` exit 0；
+> `infy test examples/tour` exit 0；`(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决）；
+> **C 侧只动 `test_ifbc.c`**（`infy_ifbc.c` / `infy_rt.c` / 头文件零改动）仍复跑四条链：`-c infy_rt.c` 与
+> `-c infy_ifbc.c` 各 **0 告警**、rt harness **32335/0**（必须在 `target/scratch` 里跑）、替身链与生产链
+> IFBC 各 **180/180**（基线 167，+13）且两份 stdout `cmp` **无差异**。
+> **180 取代 167 的原因**：第四份双侧文本夹具 `runtime/fixtures/ifbc_py_unit.bin`(1062B) +
+> `.can.txt`(1144B)。它是**阶段 [6a] 的真产物**（`ingest_embed_site` 从 §7.7.1 的 `normalize` 单元经
+> 探针 → §7.7.2 扫描 → lowering → 编码器得来，不是手写形状），C 侧 `test_ifbc.c::test_py_unit_fixture`
+> 用**生产装载器**读它、过六项校验，再从 `F` 行 `sscanf` 回 **arity 2 / ret_sig 13(f64) / ret_arity 1**
+> —— §7.7.1 规则 1 的声明表穿过整条链在虚拟机这一侧还是那一张；另断言 `L` 行在场（§7.4 的原始语言行映射）。
+> 方向分工不变：`.bin` 只有 `INFY_REGENERATE_FIXTURE=1`（Rust）能重写，`.can.txt` 只有 **C 侧**
+> `INFY_REGENERATE_CANONICAL=1` 能重写。**复跑它需要 CPython 3.14.6**（§7.7.3 把源语言工具链定为构建期
+> 依赖；D1(1) 轮的 `btrack` 测试本来就依赖它，本轮把同一依赖带进了夹具那一层，见偏差 D-44(h)）。
 >
-> **D1 接手要点（仍然有效的部分，逐条沿用）**：
-> (1) **CPython 本机可用：`python` = 3.14.6**（D-38 轮实测）。D1 验收的"声明 `py = "3.13"` 而本机是
->     3.14 → `E-0713`"今天就有真环境可测；`btrack.rs` 的 `find_python` / `run_python_probe` /
->     `CapTable` / `capability_scan` / `lower_named` / `ifbc::verify` 骨架都在文件里，缺的是**接线与
->     测试**。D4(1) 已经把 `btrack.rs` 的连动面改完（`Instance`→`Dyn`、`push_func` 的 `max_stack`、
->     guard/box.dyn 操作数、`Selected::Object` 按 `arity()` 构造），**不要**再按旧形状写。
-> (2) **`src/btrack.rs` 不是占位，是 4476 行 / 75 个 `pub fn` / 0 项单测的截断模块**（`atrack.rs`、
->     `host.rs`、`doc.rs`、`conformance.rs` 才是 1 行占位）。截断模块的正确做法是**收敛而不是重写**：
->     先跑一次性探针打印 `@py` 片段进出的中间形态（探测 JSON → `CodeObj` → 能力扫描 → lowering
->     指令流 → `dump_canonical` 文本），再定位缺口。它上次失败撞到 agent 最大轮次（150）⇒
->     要么提高 maxTurns，要么拆成"探测+能力扫描"与"lowering+IFBC"两条增量。
-> (3) **两处已知形状缺陷会在 D1 现形，且都是"预期的显式失败"，别当 IFBC 编码 bug 去绕**：
->     `new.set ty` 没有元素个数落点（**F25**）、`Selected::Object` 对多于 1 个操作数的映射是显式拒绝；
->     C 侧对象模型缺属性表 / 迭代器 / 集合载体 ⇒ `import.attr` / `inst.get` / `inst.set` / `seq.iter` /
->     `seq.next` / `new.set` 六条**装载通过而执行返回 R-0710**（**F27**，偏差 D-41 第 2 项）⇒ 带属性
->     访问或迭代的 `@py` 片段只能验到"装载成功"那一半。本侧装载期还拒绝 `call.virt` / `call.embed` /
->     `invoke.dynamic`（**F26**，D-42 的 (a)）。
-> (4) **`.inf ifbc` 目前恒为空**（`src/artifact.rs` 写 0 个 B 轨模块）。D1 产出真字节码后 `infy build`
->     的段 blob 会变，C3 轮钉住的 `199975 字节` / `build-id 4d8250b5…55ba` / `blob 738` 三处数字会
->     一起动 —— 那是**预期变化**，要同步改 `docs/status.md`、`docs/coverage.md`、`README.md` 与本节，
->     别留旧声称。
-> (5) **C5 留下的可复用面**（`src/cli.rs`）：`frontend(positional, rest, scope)` = 阶段 [1]-[5]，
->     `check` / `build` / `run` / `test` 共用；`load_scoped(root, handler, scope, triple)` =
->     §5.9+§2.2 的文件选择；`run_module(..., scope)` + `forward_program(out, label, note)` =
->     建到临时目录 + 执行 + 逐字节转发；`codegen::Config` 7 个字段（`test_harness` / `bench`），
->     **加开关同时给 `Default`**，`codegen::tests` 有 `emit_with(src, cfg)` 可复用。D2 的
->     `infy ifbc dump|verify` 应当复用 `frontend`，并且现在可以**直接复用**
->     `disassemble`（人类可读）与 `dump_canonical` / `verify_canonical`（可比对那档），别再起一套。
-> (6) **"哪些文件参与构建"只有一个入口**：`pkg::BuildConfig` + `pkg::file_selected`。新维度往
->     `BuildConfig` 里加，别在 `cli` 里另写判据；**未知名 `E-0012` 必须在选择之前、对每个 discovered
->     文件做**（否则拼错的约束名把文件变成"从来没存在过"）。并且：任何"过滤 `Loaded::files`"的改动
->     都要顺着查以文件集合为输入的下游 —— §5.8 dirhash、§7.3 build-id、`infy mod tidy` 的 lock 内容
->     都必须与构建范围无关（`cli::package_dirhashes` 已改为从 `pkg::discover` 重取全树）。
-> (7) **第一次执行 / 装载必然现形**（C4 的 D-34、C5 的 §5.1 R2 与 `read_dir` 顺序、D4(3) 的 `coro.*`
->     宽度与本侧 `verify` 重复报告，全是这么揪出来的）：`infy check` / `build` / `artifact info` 全绿
->     对"能不能装载 / 跑完"没有预测力，而**两侧各自单测全绿对"两侧读法是否相同"也没有预测力**。
->     D1 的第一条断言应当是"`infy_ifbc.c` 装载成功 + 六项校验过 + 退出码 + 双侧 canonical 文本相同"，
->     不是"反汇编看着对"。断言要写**次序与逐字节**，不要写 `contains` 的存在性（识别法：grep 测试里的
->     `contains(`；控制流 / 时序性质只查存在 = 会绿会骗人）。
-> (8) **手法留档**：改了 `infy_ifbc.c` / `infy_rt.c`（哪怕只改 `.h`）都要复跑四条 C 链 ——
->     `-c infy_rt.c`（0 告警）、`-c infy_ifbc.c`（0 告警）、rt harness、替身链 IFBC、生产链 IFBC +
->     `cmp` 两份 stdout；rt / ifbc 的二进制**产在 `target/scratch/` 并从那里跑**（夹具按
->     `../../runtime/fixtures/…` 取，换目录 = 假失败）；编译 C 侧测试**四个 `.c` 一起给**
->     （少 `infy_dyn.c` 时 `ld` 只返回 `collect2: error: ld returned 5`）；跨语言一致性靠**逐字节夹具**
->     （artifact 那份 + IFBC 这三份）。**D4(3) 新增一类更强的手法：跨语言差分文本** —— 两侧各实现一份
->     "只含双方都有的字段"的渲染，比较的对象由**对方**生成并提交，比两侧各自单测强得多：本轮它第一次
->     跑就抓到一条线宽错误（`coro.*`）+ 一族命名错（D.9）+ 本侧一条重复报告缺陷。
-> (9) **`infy test` 的 harness 输出在 Windows 上是 CRLF**（C 运行时文本模式流），期望串按
->     CRLF→LF 归一后逐字节比较 —— 与 §9.2 报告的既有手法一致；但 **IFBC 的规范化文本是 LF**
->     （两侧都按原始字节写、按原始字节比），别把两件事混为一谈（`.gitattributes` 那条就是为它加的）。
-> (10) **BACKLOG 指针与文档的旧描述会过期**，本轮又实证一次：D.9 的 `.idx` 名同时写在 C 代码、
->     `runtime/IFBC.md` 和**本侧自己的镜像文档** `docs/internals/ifbc-encoding-rust.md` 里（同一个错
->     抄了两遍，而本侧代码本来就是对的）；`runtime/IFBC.md` §7 还声称两个私有入口"declared in
->     `infy_rt_internal.h`" —— `grep ifbc runtime/infy_rt_internal.h` 一个都没有，声明其实在
->     `test_ifbc.c` 的 `extern` 里。接手任何"看起来已实现 / 已记录"的条款前，先 grep 调用点与声明处。
-> (11) **本轮新增的一条文档卫生教训（写进经验库）**：`core.autocrlf=true` 这台机器上，用脚本以文本
->     模式整文件重写 docs 会把 LF 变成 CRLF，git 于是把整个文件报成改动（本轮 `docs/BACKLOG.md`
->     一度 804 增 / 760 删）。收尾必须看 `git diff --numstat` 的删除列，并确认行尾；写文件要二进制模式
->     或用编辑工具，别用文本模式整篇重写。
+> **本轮新增的常驻面**：
+> (1) `btrack::EmbedSite`（§7.1 [6a] 的入参形态：`{lang, unit_name, body, params: Vec<(String, TyKind)>,
+>     ret, file, pos}`）/ `btrack::ingest_embed_site` / `btrack::embed_ty_kind`（§7.7.1 规则 1 的
+>     `sema::Ty` → `ifbc::TyKind` 映射；容器类折到 `dyn`；`u128`/`i128`/`auto`/未定型 **拒绝而不回落**）/
+>     `btrack::IngestedImage{unit, image, source_toolchain, n_funcs}`；`btrack::probe_version` 现在是 `pub`。
+> (2) `Loaded::embed_images` + `cli.rs` 的 `embed_sites` / `sites_of_item` / `embeds_in_body|block|stmt` /
+>     `ingest_b_track` / `embed_gap`；[6a] 的唯一调用点在 `frontend()` 里 `analyse()` 之后、诊断渲染之前，
+>     **且只在 [1]-[5] 无阻断诊断时**运行（§7.1"任一阶段出现 `E-` 即中止后续阶段"）。
+> (3) 裁定 = 偏差 **D-44** 的 (a)–(h)：解释器不在场用 `E-0713`（spec:1051 的字面）、B 轨前缀未实现与
+>     类型无标量码用 `E-0712`（§9.4 闭集里没有更贴的号，**没有**挪用废止号、也没用 `E-0702`/`E-0716`）、
+>     参数表取阶段 [4] 的**实参表达式类型**、元数据实参名闭集 `{name, timeout_ms, isolation}`、
+>     单元默认名 = 所在 item 名、补丁级声明按 `dump.py_minor()` 查表、`check` 多打一行 `ingest ok —`、
+>     B 轨夹具的构建期环境依赖。
+> (4) 本轮修掉的三条实现缺陷（都在 [6a] 第一次被走到时现形，别再按旧行为写代码）：
+>     `build_embed_unit` 问探针要 `__infy_unit__` 而包装器写的是单元名 ⇒ `unit_code()` **静默回落到模块
+>     code object**，扫的是 `MAKE_FUNCTION` 流、单元体一个 opcode 都不进扫描（D-44(d)）；
+>     `sema` 的 `ExprKind::Embed` 臂返回 `Ty::Unit` ⇒ §7.7.1 自己的样例在阶段 [4] 吃 `E-0110`、
+>     [6a] 从 CLI 永远到不了（D-44(e)）；`py = "3.14.6"` 时版本比较放行而能力表按原串找
+>     `IFBC-CAP-py-3.14.6.toml` → 假 `E-0712`（D-44(f)）。
+>
+> **仍然有效的接手要点（逐条沿用，不要再审计）**：
+> (旧 1) CPython **3.14.6** 在位；`INFY_PYTHON` 覆盖解释器路径（`find_python`）。本机无 3.13 / lua。
+> (旧 3) **预期的显式失败，不要去绕**：`RERAISE` 未映射 + `f32` 与无后缀字面量混宽算术被自检拒 ⇒
+>     §7.7.1 的推导式样例过不了扫描（**F30**）；`import.attr`/`inst.get`/`inst.set`/`seq.iter`/`seq.next`/
+>     `new.set` 六条装载通过而执行 `R-0710`（**F27**）；`new.set` 没有元素个数落点（**F25**）；
+>     `call.virt`/`call.embed`/`invoke.dynamic` 本侧判 `R-0705`（**F26**）。
+> (旧 5) `cli.rs` 可复用面：`frontend(positional, rest, scope)`、`load_scoped`、`run_module`、
+>     `forward_program`、`codegen::Config`（加开关同时给 `Default`）、`codegen::tests::emit_with(src, cfg)`。
+> (旧 6) "哪些文件参与构建"只有一个入口 = `pkg::BuildConfig` + `pkg::file_selected`；未知名 `E-0012`
+>     在选择之前对每个 discovered 文件做；过滤 `Loaded::files` 后要顺着查 dirhash / build-id / lock。
+> (旧 7) **第一次执行 / 装载 / 接线必然现形**：D1(2) 再一次实证 —— `btrack` 30 项单测全绿对"CLI 能不能
+>     走到它"没有预测力。认法与手法已并进经验库 `infy-unreachable-implementation-branch`（本轮更新）。
+> (旧 8) 手法：改 `infy_ifbc.c`/`infy_rt.c`（哪怕只改 `.h`）就复跑四条 C 链；二进制产在 `target/scratch/`
+>     并从那里跑；编 C 测试**四个 `.c` 一起给**；跨语言一致性靠逐字节夹具 + 双侧差分文本。
+> (旧 9) `infy test` 的 harness 输出在 Windows 上是 CRLF（归一后逐字节比），而 **IFBC 规范化文本是 LF**
+>     （按原始字节比）；`.gitattributes` 把 `runtime/fixtures` 钉成 `binary`/`-text`，别删。
+> (旧 11) `core.autocrlf=true` 这台机上别用文本模式脚本整篇重写文件；收尾看 `git diff --numstat` 的删除列。
+> (新) **本轮自己犯的错**：向大文件插入整段时把"锚点行"当成边界 ⇒ 函数体被拼到同一行
+> （`fn f() {        let mut …`）、以及同一段测试被插入两次。修法 = 按行号切片 + 二进制写回，
+> 改完立刻 `grep -c` 数函数名并跑全量 `cargo test`；已写进经验库 `feedback-edit-insert-deletes-lines`
+> （user 域）与 BACKLOG §0 的纪律之外，不新增规则。
 >
 > **推送欠账**：只认现算 `git rev-list --count <远端SHA>..HEAD`；远端 SHA 用
 > `gh api repos/YuanShenNiuBi1314/infinity-lang/git/refs/heads/toolchain --jq .object.sha` 回查，
-> `Everything up-to-date` 不算成功。**D4(3) 轮**推 `1f8988d` + 本轮做账提交，结果见 RUNLOG 的
-> `cron-15-push` 行（本轮现算，别引用旧数）。
-> C4 / C5 / D4(1) / D4(2) 都是第 1 次就成、C3 轮第 6/7 次、cron-12 三次全败 ⇒ `github.com:443` 仍是
-> **间歇**不通而不是坏了：照协议先推一次、失败再试一次即停，不预先加变体、不循环轰炸；若连败，
-> 首个候选是 `git -c http.version=HTTP/1.1 push origin HEAD:toolchain`。
+> `Everything up-to-date` 不算成功。**cron-16 轮欠的 3 个提交已在 cron-17 开头补推清掉**（第 1 次尝试
+> exit 0，`69d1459..26ae5fe`，回查远端 = 本地 HEAD）；本轮两个提交（代码 + 做账）的欠账见 RUNLOG
+> `cron-17-push`，下一轮仍只认现算。`github.com:443` 仍是**间歇**不通而不是坏：C4/C5/D4(1)/(2)/(3)/cron-17
+> 都第 1 次即成、C3 第 6/7 次、cron-12 与 cron-16 全败 ⇒ 先推一次、失败再试一次即停，连败时首个候选
+> `git -c http.version=HTTP/1.1 push origin HEAD:toolchain`。
 >
-> **D1(1) 轮实测（本轮复跑，非引用）**：`cargo test --offline --lib` **449 passed / 0 failed**（`btrack`
-> 0 → **23**；分布 79/57/39/35/24/**23**/22/22/22/20/18/16/15/15/12/9/8/7/4/2 = 449）、
-> `cargo check --offline --lib` 0 error / **50 warning**（未新增）、`infy check|build|test examples/tour`
-> 全 exit **0**、`--verify-reproducible` exit **0**（199975 == 199975、生成 C11 仍 12513 字节 —— 本轮只动
-> `src/btrack.rs`，阶段 [9] 的输入没变）、`(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决）、
-> **C 侧零改动仍复跑四条链**：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警**、rt harness **32335/0**、
-> 替身链与生产链 IFBC 各 **167/167**、两份 stdout `cmp` **无差异**。
-> 已验证事实（**D4(3) 轮复跑，历史快照**）：`cargo test --offline --lib` **426 passed / 0 failed**
-> （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `pkg` 24 · `sema` 22 · `ifbc` **22**
-> （+2 = 双侧文本锁点）· `codegen` 22 · `hir` 20 · `artifact` 18 · `cli` 16 · `toml` 15 · `borrow` 15 ·
-> `sha256` 12 · `codes` 9 · `parser` 8 · `base64` 7 · `stdlib` 4 · `diag` 2 = 426）；
-> `cargo check --offline --lib` 0 error / **50 warning**（未新增）；
-> `infy check examples/tour` exit 0（仍 2 files）；`infy build examples/tour` exit 0（生成 C11 仍
-> **12513 字节**、产物仍 **199975 字节**、`build-id 4d8250b5…55ba` 与 C3/C4/C5/D4(1)/D4(2) 同值
-> ⇒ 本轮动的是 C 侧 IFBC 虚拟机与本侧校验器，阶段 [9] 只链 `infy_rt.c` + `infy_dyn.c`，产物字节不变）；
-> `--verify-reproducible` exit 0（199975 == 199975）；`infy test examples/tour` exit 0（程序 stdout
-> 42 字节 `test result: 0 passed, 0 failed, 0 total`）；`infy artifact info <产物> --nodes` exit 0
-> （节点表 6 行 = 行 8/9/10/11/16/19）；`gcc -std=c11 -Wall -Wextra -I runtime -c 生成的 ci.c`
-> exit 0（**0 error / 0 warning**）；`(cd examples/tour && infy fmt --check)` 仍 exit **2**
-> （F6 未裁决，未变）；**C 侧四条链全部复跑**：`-c runtime/infy_rt.c` **0 告警** exit 0、
-> `-c runtime/infy_ifbc.c` **0 告警** exit 0、rt harness **32335 assertions / 0 failures** exit 0
-> （必须在 `target/scratch` 里跑）、替身链 IFBC **167/167** exit 0（基线 146，+21 = D4(3) 的三份夹具
-> 断言）、生产链 IFBC **167/167** exit 0、两份 stdout `cmp` 无输出。
-> **本轮未复跑、仍是 C5 轮实测**（不在本轮主张范围内）：`infy run examples/tour` 的 0/0 字节、
-> 三套合成 `infy test` 的 exit 0/1/3 与逐字节报告、`--cov` exit 1、`--bench` exit 6、
-> §5.9 / §2.2 的文件选择三条（同一 module 上 `infy check` = 1 file 而 `infy test` = 2 files；
-> `//infy:build ignore` 不入选、`//infy:build test` 只在 test 构建入选、`//infy:build riscv` →
-> `E-0012`）。C5 轮修掉 **2 个实现缺陷**（§5.1 R2 判据写反；`read_dir` 顺序漏进 `FileId` / 发射文本 /
-> build-id），**挡住第 3 处同族风险**（`package_dirhashes` 取过滤后的 `Loaded::files`），并把
-> **3 处死代码接活**（`pkg::constraint_matches`、`pkg::unknown_constraint_names`、
-> `lexer::lex_file_with_features` 的替代路径）；裁为偏差 **D-37** 与 **D-36**。**D4(3) 轮另修
-> 1 处本侧缺陷**：`verify_func` 对同一 `(code, off)` 重复报 2–3 次（操作数 / 邻接检查写在高度走查里，
-> 而走查又把直线后继压回工作栈），修法是检查搬出走查 + 后继不再压栈，见 D-42。
-> 未修只登记：D-18、D-19/F7、F8、F9/F10/F11、F12…F15、F16/F17/F18、F19/F20、F21/F22/F23/F24、
-> F25 / F26（F26 的"把 verify 结论也比一遍"那半已做，剩"本侧按 C 的 δ 表实现那三条 + dynamic call
-> 可证明性"那半）、**F27（C 侧对象模型缺属性表 / 迭代器 / 集合载体 ⇒ 六条指令装载通过而执行显式
-> R-0710，偏差 D-41）**；`main` 与本地分叉（另一会话推了 `faa34ad` / `05da606`），
-> **合并主干由人决定**。
-> 优先级最高的已知地雷：**D1**（`src/btrack.rs` 端到端；C 侧现在读得懂 Rust 的字节且宽度已对齐，
-> 执行那一半被 **F27** 挡）、**F26 的前半**（本侧装载期校验与 C 的 δ 表不等价 ⇒ "两侧校验等价"仍
-> 不许讲，清单 = D-42 的 (a)–(e)）、**F12**（移动语义没有运行时入口，`String` / `Vec` 的真实程序
-> 写不出来）、**F15**（`fmt!` 被阶段 [4] 挡住，§14.2 样例不能 `check`）、**F19**（没有任何 INFY
-> 构造能写 stdout：`infy run` 的程序输出对现有一切实例恒为 0 字节）、**F21**（`std/test` 在 §10
-> 一条没有 ⇒ §14.7 的测试样例过不了 `check`，`#[bench]` 无法表达）、**F5 / F6**（CLI 目录参数不一致、
-> §14 源码不是格式化不动点）、**F7**、**F8**。F9 已在 C2 落地时按"只匹配 `Lit::Int`、`ExprKind::Int`
-> 分支只作防御"绕过，死臂本身仍未清。
+> 未修只登记：D-18、D-19/F7、F8、F9/F10/F11、F12…F15、F16/F17/F18、F19/F20、F21/F22/F23/F24、F25、
+> F26（"把 verify 结论也比一遍"那半已做）、F27、F28、**F29**（阶段 [8] 没有通往 IFBC VM 的调用通道 ⇒
+> `.inf ifbc` 恒空）、**F30**（§7.7.1 的推导式样例过不了能力扫描，规范样例不能构建）；
+> `main` 与本地分叉（另一会话推了 `faa34ad` / `05da606`），**合并主干由人决定**。
+> 优先级最高的已知地雷：**D2**（CLI 接线，实质件齐了）、**F26 的前半**（"两侧校验等价"仍不许讲）、
+> **F12**（移动语义没有运行时入口，`String`/`Vec` 的真实程序写不出来）、**F15**（`fmt!` 被阶段 [4] 挡住，
+> §14.2 样例不能 `check`）、**F19**（没有任何 INFY 构造能写 stdout ⇒ `infy run` 的程序输出对现有一切实例
+> 恒为 0 字节）、**F21**（`std/test` 在 §10 一条没有 ⇒ §14.7 样例过不了 `check`）、**F29/F30**（B 轨的
+> 产物半边与规范样例）、**F5 / F6**、**F7**、**F8**。F9 已在 C2 落地时按"只匹配 `Lit::Int`、
+> `ExprKind::Int` 分支只作防御"绕过，死臂本身仍未清。
