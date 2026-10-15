@@ -915,9 +915,10 @@
 >
 > **推送欠账**：只认现算 `git rev-list --count <远端SHA>..HEAD`；远端 SHA 用
 > `gh api repos/YuanShenNiuBi1314/infinity-lang/git/refs/heads/toolchain --jq .object.sha` 回查，
-> `Everything up-to-date` 不算成功。**cron-16 轮欠的 3 个提交已在 cron-17 开头补推清掉**（第 1 次尝试
-> exit 0，`69d1459..26ae5fe`，回查远端 = 本地 HEAD）；本轮两个提交（代码 + 做账）的欠账见 RUNLOG
-> `cron-17-push`，下一轮仍只认现算。`github.com:443` 仍是**间歇**不通而不是坏：C4/C5/D4(1)/(2)/(3)/cron-17
+> `Everything up-to-date` 不算成功。**D2 轮（cron-18）两个提交（代码 `d6c26a1` + 做账 `68a792a`）第 1 次
+> 推送即 exit 0**（`5e93c7c..68a792a`），`gh api` 回查远端 = 本地 HEAD = `68a792a…` ⇒ **现算欠账 0**
+> （cron-16 欠的 3 个早在 cron-17 开头就补清了）。本行的做账提交再让欠账 = 1，下一轮仍只认现算。
+> `github.com:443` 仍是**间歇**不通而不是坏：C4/C5/D4(1)/(2)/(3)/cron-17/D2
 > 都第 1 次即成、C3 第 6/7 次、cron-12 与 cron-16 全败 ⇒ 先推一次、失败再试一次即停，连败时首个候选
 > `git -c http.version=HTTP/1.1 push origin HEAD:toolchain`。
 >
