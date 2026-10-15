@@ -649,6 +649,9 @@ impl IngestErr {
     /// The §9.3 code this failure reports, if it has one.
     pub fn code(&self) -> Option<&'static str> {
         Some(match self {
+            // §7.1's stage note: `[6a]` under `infy check` **needs** the source-language toolchain
+            // present to run the capability scan, and its absence is the §7.7.3 version code.
+            IngestErr::ToolchainMissing { .. } => "E-0713",
             IngestErr::VersionMismatch { .. } => "E-0713",
             IngestErr::VersionUndeclared { .. } => "E-0715",
             IngestErr::BinaryWheel { .. } => "E-0714",
@@ -772,7 +775,7 @@ pub fn find_python() -> Option<PathBuf> {
     None
 }
 
-fn probe_version(python: &Path) -> Option<String> {
+pub fn probe_version(python: &Path) -> Option<String> {
     let out = Command::new(python)
         .arg("-E")
         .arg("-c")
@@ -4495,26 +4498,40 @@ pub fn build_embed_unit(
     pos: Position,
     handler: &mut Handler,
 ) -> Result<IfbcModule, IngestErr> {
-    let declared = manifest
-        .b_track
-        .get("py")
-        .cloned()
-        .ok_or_else(|| {
-            let d = Diagnostic::new("E-0715", Phase::Embed, file, pos)
-                .with_origin(Origin::EmbedPy)
-                .titled("使用 @py 但清单无 [b_track] 条目")
-                .note("§7.7.3 要求精确到 minor 的版本声明；未声明即拒绝构建")
-                .help("在 MODULE.infy.toml 写 [b_track] py = \"3.13\"（§7.7.3）");
-            handler.emit(d);
-            IngestErr::VersionUndeclared { lang: "py".to_string() }
-        })?;
+    // §7.7.3: an `@py` unit needs `[b_track] py = "<minor>"` in the manifest — undeclared is a
+    // refusal, never a guessed version. The minor itself is taken from the probe afterwards,
+    // because that is what actually compiled the unit.
+    if !manifest.b_track.contains_key("py") {
+        let d = Diagnostic::new("E-0715", Phase::Embed, file, pos)
+            .with_origin(Origin::EmbedPy)
+            .titled("使用 @py 但清单无 [b_track] 条目")
+            .note("§7.7.3 要求精确到 minor 的版本声明；未声明即拒绝构建")
+            .help("在 MODULE.infy.toml 写 [b_track] py = \"3.13\"（§7.7.3）");
+        handler.emit(d);
+        return Err(IngestErr::VersionUndeclared { lang: "py".to_string() });
+    }
     let src = wrap_embed_unit(body, params, unit_name);
-    let dump = run_python_probe(python, &src)?;
+    // The probe selects the unit by *name* (`unit_code()` looks for the wrapper the block was
+    // compiled into), so it has to be told the name `wrap_embed_unit` just wrote. Asking it for
+    // `__infy_unit__` instead silently returns the module code object, which is the wrapper's
+    // `MAKE_FUNCTION` stream — not the unit body — and then no opcode, builtin or import inside the
+    // block is ever scanned.
+    let dump = run_python_probe_named(python, &src, unit_name).map_err(|e| {
+        handler.emit(e.diagnostic(file, pos));
+        e
+    })?;
     check_probe_version(manifest, &dump).map_err(|e| {
         handler.emit(e.diagnostic(file, pos));
         e.clone()
     })?;
-    let cap = CapTable::load("py", &declared)?;
+    // §7.7.3 makes the declaration **patch-insensitive** (`check_probe_version` normalises it), so
+    // the capability table is looked up by the minor that actually compiled the unit — `3.14.6`
+    // declaring a `py = "3.14.6"` module used to ask for `IFBC-CAP-py-3.14.6.toml` and die with
+    // `E-0712 能力表无法读取` while the version check itself had passed.
+    let cap = CapTable::load("py", &dump.py_minor()).map_err(|e| {
+        handler.emit(e.diagnostic(file, pos));
+        e
+    })?;
     match lower_named(&dump, &cap, &hosts, &format!("b_track/{unit_name}.py")) {
         Ok(m) => Ok(m),
         Err(v) => {
@@ -4530,6 +4547,143 @@ pub fn build_embed_unit(
 /// 原语言"). `None` is the `W-0705` case, never an error.
 pub fn original_line(m: &IfbcModule, code_off: u32) -> Option<u32> {
     m.line_of_code_off(code_off)
+}
+
+// ------------------------------------------------------------------ stage [6a]: the front end's entry
+
+use crate::ast::Prim;
+use crate::sema::Ty;
+
+/// §7.1 stage [6a]: one B-track embed unit **as the INFY side declares it**. §7.7.1 rule 1 is the
+/// reason this type exists: the IFBC parameter table comes from the INFY-side types, never from
+/// anything read back out of the code object, so the front end hands over names plus `TyKind`s and
+/// this module never has to guess one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbedSite {
+    /// `py` or `lua` — §7.5's whitelist, B-track half (§7.7.1).
+    pub lang: String,
+    /// The wrapper name the probe compiles: `name = "…"` when written, else the enclosing item.
+    pub unit_name: String,
+    /// The block body, verbatim (§2.11: lexically opaque, braces excluded).
+    pub body: String,
+    /// `(python parameter name, INFY-side kind)` in the order `@py(…)` wrote them.
+    pub params: Vec<(String, TyKind)>,
+    /// The enclosing item's declared return type, or `Unit` when it declares none (§7.7.1 rule 2).
+    pub ret: TyKind,
+    pub file: FileId,
+    pub pos: Position,
+}
+
+impl EmbedSite {
+    /// §7.7.1 rule 1 as the `HostSigTable` row `unit_signature` looks up by unit name.
+    pub fn host_sig(&self) -> HostSig {
+        let params: Vec<TyKind> = self.params.iter().map(|(_, k)| *k).collect();
+        HostSig::new(&self.unit_name, &params, self.ret)
+    }
+
+    /// The wrapper's positional parameter names, in table order.
+    pub fn param_names(&self) -> Vec<&str> {
+        self.params.iter().map(|(n, _)| n.as_str()).collect()
+    }
+}
+
+/// What stage [6a] produces for one unit: the image bytes, and the §7.7.3 `source_toolchain`
+/// string that §7.3 requires inside the `build-id` input set ("换 Python 版本必须换 build-id").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IngestedImage {
+    pub unit: String,
+    pub image: Vec<u8>,
+    pub source_toolchain: String,
+    /// Function records in the image (the unit plus every nested code object that lowered).
+    pub n_funcs: usize,
+}
+
+/// §7.7.1 rule 1: map an INFY-side type onto IFBC's static `TyKind`. `None` means **not
+/// expressible** — §2 of `runtime/IFBC.md` is a closed 18-row set with no 128-bit width, and
+/// `auto` / unresolved types carry no information. The caller refuses those; boxing a guess would
+/// be exactly the "假成功" P3 forbids.
+pub fn embed_ty_kind(t: &Ty) -> Option<TyKind> {
+    Some(match t {
+        Ty::Prim(p) => match p {
+            Prim::I8 => TyKind::I8,
+            Prim::I16 => TyKind::I16,
+            Prim::I32 => TyKind::I32,
+            Prim::I64 => TyKind::Int,
+            Prim::U8 => TyKind::U8,
+            Prim::U16 => TyKind::U16,
+            Prim::U32 => TyKind::U32,
+            Prim::U64 => TyKind::U64,
+            Prim::Usize => TyKind::Usize,
+            Prim::Isize => TyKind::Isize,
+            Prim::F32 => TyKind::F32,
+            Prim::F64 => TyKind::Float,
+            Prim::Bool => TyKind::Bool,
+            Prim::Char => TyKind::Char,
+            Prim::Str => TyKind::Str,
+            Prim::Unit => TyKind::Unit,
+            Prim::U128 | Prim::I128 => return None,
+        },
+        Ty::Bool => TyKind::Bool,
+        Ty::Unit => TyKind::Unit,
+        Ty::Str => TyKind::Str,
+        // Owned `String` and borrowed `str` are the same dyn-visible text at the boundary (`DY_STR`,
+        // §7.7.7); the parameter table only needs the value class.
+        Ty::String => TyKind::Str,
+        // A shared borrow is the same value view — §4.2's `&T` has no separate IFABI row.
+        Ty::Ref { inner, .. } => embed_ty_kind(inner)?,
+        Ty::Ptr { .. } => TyKind::Ptr,
+        Ty::Slice { .. } | Ty::Array { .. } | Ty::Vec { .. } => TyKind::List,
+        Ty::Tuple(..) => TyKind::Tuple,
+        Ty::Option { .. } => TyKind::Option,
+        Ty::Result { .. } => TyKind::Result,
+        Ty::Boxed { .. } => TyKind::Box,
+        Ty::Rc { atomic, .. } => {
+            if *atomic {
+                TyKind::Arc
+            } else {
+                TyKind::Rc
+            }
+        }
+        Ty::Fn { .. } | Ty::Closure(_) => TyKind::Func,
+        Ty::Dyn(_) => TyKind::Dyn,
+        Ty::Adt(_) | Ty::Named(_) => TyKind::Instance,
+        Ty::Never => TyKind::Never,
+        Ty::Auto | Ty::IntLit | Ty::Generic(_) | Ty::Invalid => return None,
+    })
+}
+
+/// §7.1 [6a] for one site: put the declared table into the host signature table, let CPython's own
+/// compiler take the wrapped body, run §7.7.2's scan, lower, and encode. Every failure is already a
+/// §9 diagnostic on `handler`; `Err` means "the build stops here", never a partial image.
+pub fn ingest_embed_site(
+    site: &EmbedSite,
+    manifest: &Manifest,
+    python: &Path,
+    handler: &mut Handler,
+) -> Result<IngestedImage, IngestErr> {
+    let hosts = HostSigTable::std_default().with_unit_sig(&site.unit_name, site.host_sig());
+    let names = site.param_names();
+    let m = build_embed_unit(
+        &site.body,
+        &names,
+        &site.unit_name,
+        manifest,
+        python,
+        &hosts,
+        site.file,
+        site.pos,
+        handler,
+    )?;
+    let n_funcs = m.funcs.len();
+    Ok(IngestedImage {
+        unit: site.unit_name.clone(),
+        image: m.encode(),
+        source_toolchain: format!(
+            "CPython {}",
+            probe_version(python).unwrap_or_else(|| manifest.b_track.get("py").cloned().unwrap_or_default())
+        ),
+        n_funcs,
+    })
 }
 
 #[cfg(test)]
@@ -5051,5 +5205,207 @@ mod tests {
         let text = ifbc::dump_canonical(&m.encode()).expect("双侧共用的规范化文本必须能渲染这张镜像");
         assert!(text.lines().any(|l| l.starts_with('F')), "至少一个函数记录：{text}");
         assert!(text.lines().any(|l| l.starts_with('I')), "至少一条指令：{text}");
+    }
+
+    /// §7.7.1 rule 1: the parameter table is read off the **INFY-side** types. The `None` half of
+    /// each pair is §2 of `runtime/IFBC.md` being a closed 18-row set (no 128-bit width) or a type
+    /// that carries no information (`auto`, unresolved) — refusing is the honest answer, boxing a
+    /// guess is not.
+    #[test]
+    fn embed_ty_kind_reads_the_declared_type_or_refuses() {
+        let slice = Ty::Slice { inner: Box::new(Ty::Prim(Prim::F32)) };
+        let cases: Vec<(Ty, Option<TyKind>)> = vec![
+            (Ty::Prim(Prim::U32), Some(TyKind::U32)),
+            (Ty::Prim(Prim::I64), Some(TyKind::Int)),
+            (Ty::Prim(Prim::F64), Some(TyKind::Float)),
+            (Ty::Prim(Prim::F32), Some(TyKind::F32)),
+            (Ty::Prim(Prim::Char), Some(TyKind::Char)),
+            (Ty::Str, Some(TyKind::Str)),
+            (Ty::String, Some(TyKind::Str), ),
+            (Ty::Bool, Some(TyKind::Bool)),
+            (Ty::Unit, Some(TyKind::Unit)),
+            // `&[f32]`（§7.7.1 样例的 `batch`）：共享引用透传到被指向的容器类
+            (Ty::Ref { inner: Box::new(slice.clone()), mutable: false, lifetime: None }, Some(TyKind::List)),
+            (Ty::Vec { inner: Box::new(Ty::Prim(Prim::F32)) }, Some(TyKind::List)),
+            (Ty::Tuple(vec![Ty::Prim(Prim::U8)]), Some(TyKind::Tuple)),
+            (Ty::Adt("Fail".into()), Some(TyKind::Instance)),
+            (Ty::Prim(Prim::U128), None),
+            (Ty::Prim(Prim::I128), None),
+            (Ty::Auto, None),
+            (Ty::IntLit, None),
+            (Ty::Invalid, None),
+        ];
+        for (t, want) in cases {
+            assert_eq!(embed_ty_kind(&t), want, "{}", t.text());
+        }
+        // 容器类在 IFABI 线上就是 `dyn`（§2 的标量码域），签名文本与摘要按同一规则算。
+        assert_eq!(TyKind::List.sig_code(), TyKind::Dyn as u8);
+        assert_eq!(embed_ty_kind(&Ty::String).map(TyKind::sig_code), Some(TyKind::Str as u8));
+    }
+
+    /// The §7.7.1 sample's calling convention, one unit, through the front end's entry point: the
+    /// declared `f64`/`u32` table and the declared return must land in the image's own function
+    /// record (`nargs`, `ret_sig`, and the §7.8.3 item-5 digest), not be re-derived from the dump.
+    #[test]
+    fn the_declared_table_reaches_the_function_record() {
+        let mut h = Handler::default();
+        let img = ingest_embed_site(
+            &unit_site("normalize", "return scale * 2.0", &[("scale", TyKind::Float), ("n", TyKind::U32)], TyKind::Float),
+            &manifest_py(Some("3.14")),
+            &python(),
+            &mut h,
+        )
+        .unwrap_or_else(|e| panic!("阶段 [6a] 摄取失败：{e}"));
+        assert_eq!(h.exit_code(), 0, "摄取不应再发诊断：{:?}", h.summary());
+        assert_eq!(img.unit, "normalize");
+        let m = ifbc::decode(&img.image).expect("阶段 [6a] 的镜像必须能被本侧解码器读回");
+        assert_eq!(m.unit, "normalize", "探针应按写入的单元名取函数体，而不是模块包装器");
+        assert_eq!(m.funcs.len(), 1, "只有单元自己那一条函数记录：{:?}", m.funcs);
+        let f = &m.funcs[0];
+        assert_eq!(f.nargs, 2, "§7.7.1 规则 1：形参个数来自 INFY 侧声明");
+        assert_eq!(f.ret_sig, u32::from(TyKind::Float.sig_code()), "返回类型同样来自声明（规则 2）");
+        assert!(img.source_toolchain.starts_with("CPython 3.14"), "§7.7.3：进 build-id 的源工具链串：{}", img.source_toolchain);
+    }
+
+    /// D1's acceptance, this side: the image stage [6a] produced passes §7.8.3's six checks here.
+    /// `runtime/test_ifbc.c::test_py_unit_fixture` runs the same checks with the **production**
+    /// loader over the committed bytes.
+    #[test]
+    fn a_b_track_image_passes_the_load_checks_on_this_side() {
+        let m = ifbc::decode(&py_unit_fixture_bytes()).expect("夹具应能被本侧解码");
+        let bad: Vec<String> = ifbc::verify(&m, &HostSigTable::std_default(), true)
+            .into_iter()
+            .filter(|v| v.code.starts_with('R'))
+            .map(|v| v.render())
+            .collect();
+        assert!(bad.is_empty(), "装载期校验不该报 R-码：{bad:?}");
+        // §7.4 的行映射：镜像里的行号是**原始语言**的行号（这里单元体只有两行有效代码）。
+        assert!(!m.lines.is_empty(), "B 轨镜像必须带原语言行映射");
+    }
+
+    /// §7.7.3 through the CLI entry: a declared minor that is not the interpreter's is `E-0713`,
+    /// and the ingest produces no image.
+    #[test]
+    fn a_version_disagreement_stops_the_ingest_and_reports_e0713() {
+        let observed = probe_version(&python()).expect("探针版本应可读");
+        let declared = if observed.starts_with("3.14") { "3.13" } else { "3.14" };
+        let mut h = Handler::default();
+        let r = ingest_embed_site(
+            &unit_site("normalize", "return scale * 2.0", &[("scale", TyKind::Float)], TyKind::Float),
+            &manifest_py(Some(declared)),
+            &python(),
+            &mut h,
+        );
+        let e = r.expect_err(&format!("声明 {declared} 而解释器是 {observed}，必须拒绝"));
+        assert_eq!(e.code(), Some("E-0713"), "{e}");
+        assert_eq!(h.exit_code(), 2, "诊断必须让构建变红：{:?}", h.summary());
+    }
+
+    /// §7.7.1 的样例形状在**本构建**里过不了扫描（`RERAISE` 在能力表里是 `-`），这是显式失败而不是
+    /// 静默跳过；诊断必须点名 opcode 并带原始语言行（登记为 BACKLOG F29）。
+    #[test]
+    fn the_list_comprehension_sample_is_refused_by_name_not_silently() {
+        let mut h = Handler::default();
+        let e = ingest_embed_site(
+            &unit_site(
+                "normalize",
+                "out = [ (x / scale) for x in batch ]\nreturn out",
+                &[("batch", TyKind::List), ("scale", TyKind::Float)],
+                TyKind::List,
+            ),
+            &manifest_py(Some("3.14")),
+            &python(),
+            &mut h,
+        )
+        .expect_err("§7.7.1 的推导式样例含未映射 opcode，应显式拒绝");
+        assert_eq!(e.code(), Some("E-0712"), "{e}");
+        match &e {
+            IngestErr::Scan(v) => {
+                let named: Vec<String> = v.iter().map(|x| x.item.clone()).collect();
+                assert!(
+                    named.iter().any(|x| x.contains("RERAISE")),
+                    "诊断必须点名具体 opcode（§7.7.2）：{named:?}"
+                );
+                assert!(
+                    v.iter().any(|x| x.py_line.is_some()),
+                    "§7.4：拒绝必须带原始语言行，否则改写时无从定位：{named:?}"
+                );
+            }
+            other => panic!("应是能力扫描失败，实得 {other:?}"),
+        }
+    }
+
+    /// The committed `runtime/fixtures/ifbc_py_unit.bin`: a **real stage-[6a] image** (not a
+    /// hand-built one), which `runtime/test_ifbc.c` loads with the production VM. Only
+    /// `INFY_REGENERATE_FIXTURE=1` rewrites it; the paired `.can.txt` is rendered by the **C** side
+    /// (`INFY_REGENERATE_CANONICAL=1`), so neither side defines the shared text alone — the same
+    /// division of direction D4(3) set up. Regenerating requires the CPython this image was
+    /// ingested from (§7.7.3 makes stage [6a] a build-time dependency of B-track, of `gcc` for C).
+    #[test]
+    fn py_unit_fixture_is_exactly_what_the_ingest_produces() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/runtime/fixtures/ifbc_py_unit.bin");
+        let bytes = py_unit_fixture_bytes();
+        if std::env::var("INFY_REGENERATE_FIXTURE").is_ok() {
+            std::fs::write(path, &bytes).expect("explicit fixture regeneration");
+        }
+        let on_disk = std::fs::read(path).unwrap_or_else(|e| {
+            panic!("{path} 不在仓库里（{e}）—— 用 INFY_REGENERATE_FIXTURE=1 生成一次")
+        });
+        assert_eq!(on_disk, bytes, "阶段 [6a] 的产物与已提交夹具不再逐字节相同");
+        // 双侧共用的文本由 C 侧渲染；这一侧读出的镜像必须与夹具是同一份内容。
+        let m = ifbc::decode(&bytes).expect("夹具可解码");
+        assert_eq!(m.unit, "normalize");
+        assert_eq!(m.funcs.len(), 1);
+    }
+
+    /// The B-track unit behind `runtime/fixtures/ifbc_py_unit.bin`. §7.7.1 rule 1's declared table,
+    /// one body that the capability table covers end to end (no attribute access, no iteration —
+    /// those are F27's load-but-cannot-execute half).
+    fn py_unit_fixture_bytes() -> Vec<u8> {
+        let mut h = Handler::default();
+        ingest_embed_site(
+            &unit_site("normalize", "return scale * 2.0", &[("scale", TyKind::Float), ("n", TyKind::U32)], TyKind::Float),
+            &manifest_py(Some("3.14")),
+            &python(),
+            &mut h,
+        )
+        .unwrap_or_else(|e| panic!("夹具单元的摄取失败：{e}"))
+        .image
+    }
+
+    /// §7.7.3's "patch 不敏感" has to reach the capability **table** too: declaring the full
+    /// interpreter version (`py = "3.14.6"`) must resolve `IFBC-CAP-py-3.14.toml`, not ask for a
+    /// nonexistent `3.14.6` table and die with `E-0712 能力表无法读取` after the version check
+    /// already passed. The minor the probe reports is what compiled the unit, so that is the key.
+    #[test]
+    fn a_patch_level_declaration_still_finds_the_minor_capability_table() {
+        let observed = probe_version(&python()).expect("探针应报出解释器版本");
+        let mut h = Handler::default();
+        let img = ingest_embed_site(
+            &unit_site("normalize", "return scale * 2.0", &[("scale", TyKind::Float)], TyKind::Float),
+            &manifest_py(Some(&observed)),
+            &python(),
+            &mut h,
+        )
+        .unwrap_or_else(|e| panic!("声明补丁级版本 {observed} 也应摄取成功：{e}"));
+        assert!(!img.image.is_empty(), "补丁级声明不该产出空镜像");
+        assert_eq!(h.exit_code(), 0, "{observed} 不该引出诊断：{:?}", h.summary());
+    }
+
+    /// A site as stage [6a] receives it: `@py(scale=scale, n=n)` over a one-line body, §7.7.1's form.
+    fn unit_site(        unit: &str,
+        body: &str,
+        params: &[(&str, TyKind)],
+        ret: TyKind,
+    ) -> EmbedSite {
+        EmbedSite {
+            lang: "py".to_string(),
+            unit_name: unit.to_string(),
+            body: body.to_string(),
+            params: params.iter().map(|(n, k)| (n.to_string(), *k)).collect(),
+            ret,
+            file: 0,
+            pos: Position { line: 1, column: 1 },
+        }
     }
 }

@@ -4213,6 +4213,10 @@ mod tests {
         for (bin, txt) in [
             ("ifbc_rust_writer.bin", "ifbc_rust_writer.can.txt"),
             ("ifbc_all_ops.bin", "ifbc_all_ops.can.txt"),
+            // D1: a **stage-[6a]** image (btrack lowering of a real `@py` unit), not a hand-built
+            // one — `btrack::tests::py_unit_fixture_is_exactly_what_the_ingest_produces` pins the
+            // bytes, this pins that both readers still describe them with one text.
+            ("ifbc_py_unit.bin", "ifbc_py_unit.can.txt"),
         ] {
             let bytes = fixture_bytes(dir, bin);
             let want = String::from_utf8(fixture_bytes(dir, txt)).expect("canonical text is UTF-8");

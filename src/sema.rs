@@ -1817,7 +1817,12 @@ impl<'a> Checker<'a> {
                 // §3.6: embed blocks bind to an event/fn body or a statement; patterns and type
                 // positions are the parser's `E-0700`, unreachable here.
                 self.check_embed_expr(embed, e.span);
-                Ty::Unit
+                // §7.7.1 rule 2: the unit's `return` *is* the enclosing item's return, so an
+                // embed expression has that item's declared return type — not `()`. Typing it as
+                // unit made every `-> T` item whose body is a `@py` block fail its own tail check
+                // with `E-0110` (§7.7.1's sample `normalize` included), which is why stage [6a]
+                // could never be reached from the CLI.
+                self.ret_ty.clone()
             }
             ExprKind::MacroCall { name, .. } => {
                 self.emit("E-0402", e.span, format!("未展开的宏调用 `{name}!`"), name, Some("§6.5：宏在阶段 [2] 展开，展开后必须是合法 AST 片段".into()), Some("检查 macro_rules! 是否可见，或 infy expand 观察展开结果".into()));

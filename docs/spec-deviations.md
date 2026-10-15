@@ -818,3 +818,66 @@ case  := key "->" mnemonic
 本机没有 3.13 / lua 解释器，数值不能凭记忆填（§12.2 的可复核要求，B1 轮"编造常数"那一族的教训），
 所以只登记不补数；`the_name_keyed_tables_still_map_every_row` 里留了一条**补上数值键就会变红**的断言，
 强迫改动者把表移进数值键测试并消掉 F28。
+
+## D-44 D1(2) 轮（阶段 [6a] 接进 CLI）落地时的八处规范未定，选定确定实现
+
+**为什么需要这一条**：§7.7 把 B 轨的**构建期**行为写成条款，但"接进 `infy check`"之后每一件事都需要一个
+确定的错误码、一个确定的取值来源、或一个确定的名字规则，而规范三处都没写。`btrack` 的上半段（探测 +
+扫描 + lowering）在 D1(1) 轮已经有 23 项单测，本轮第一次从 CLI 走到它 —— 当场现形的两条实现缺陷
+（`unit_code()` 的名称错配、`sema` 把 embed 表达式判成 `()`）写在 (d)(e) 里，因为它们改变了"什么算合法程序"。
+
+**(a) 构建期解释器不在场 → `E-0713`**。§7.1 的阶段注（spec:1051）明写"[6a] 在 `infy check` 下**需要**源语言
+工具链在场才能做能力扫描（缺失 → `E-0713`）"，而 §9.4 的 `E-0713` 标题是"字节码版本不匹配"。码表是闭集
+（§9.4 共 210 码，且 spec:1508 禁止挪用废止号），所以同一个码承担"版本不符"与"根本不在场"两种语义。
+裁定 = 照 §7.1 的字面用 `E-0713`，标题写"未找到 py 工具链（清单声明 3.14）"、help 指 `infy toolchain add py`
+（§7.6.2）；落点 = `IngestErr::ToolchainMissing::code()`，`cli::ingest_b_track` 在没有解释器时逐单元发射。
+
+**(b) 前缀未实现 / 参数表不可表达 → `E-0712`**。§9.4 没有"B 轨前缀本实现不降低"或"INFY 侧类型没有 IFABI
+标量码"的码。`E-0712`（字节码能力缺失，§7.7.2）是唯一同族的：它的语义就是"这条路要走能力表扩容"。
+裁定 = 两处都报 `E-0712` 并在标题里点名具体项（`@lua 的字节码摄取未实现` / `` `widen` 的形参表无法构造`），
+诊断里写明 §7.7.1 规则 1 与 `runtime/IFBC.md` §2 的封闭签名集。锁点 =
+`cli::tests::a_lua_unit_is_refused_by_name_and_blocks_the_build`、
+`cli::tests::a_parameter_with_no_ifabi_row_stops_the_ingest`。
+**没有**借用的号：`E-0716`（限进程隔离前缀）、`E-0702`（限白名单之外的前缀，`@lua` 在白名单内）。
+
+**(c) 参数表的取值来源 = 阶段 [4] 推断出的实参表达式类型**。§7.7.1 规则 1 只说"编译器读 INFY 侧声明类型，
+生成 IFBC 形参表"，而具名实参的值按 §2.6 可以是任意表达式（`@py(scale=scale*1.0)`）。裁定 =
+取 `sema::Program::ty(实参表达式 span)`，即 [4] 给该表达式的类型；返回类型取所在 item 的声明返回类型。
+元数据实参名闭集 = `{name, timeout_ms, isolation}`（规范未给 B 轨保留名清单；`name` 是 §7.6.1 的 A 轨配对键、
+`timeout_ms` 是规则 3、`isolation` 是 §7.7.5）。单元默认名 = 所在 item 名（规范只写 `name = "…"` 可指定）。
+不可映射（`u128`/`i128`/`auto`/未定型）一律拒绝，**不回落 `()`** —— 回落会静默改变 §7.8.3 校验项 5 比较的摘要。
+
+**(d) 实现缺陷（修）：探针被问的单元名与 `wrap_embed_unit` 写入的名字不一致**。
+`build_embed_unit` 调 `run_python_probe(python, &src)`，而那个入口固定用 `unit = "__infy_unit__"`；
+`wrap_embed_unit` 写的却是 `def <unit_name>(…)`。`CodeObjDump::unit_code()` 在名字匹配不上时
+**回落到模块 code object**（它的文档注释把这叫"source is not a wrapper"），于是摄取拿到的是模块包装器的
+`MAKE_FUNCTION` 流：单元体里的 opcode / builtin / import **一个都没被扫描**，产出的镜像也不是那个函数。
+表现是"任何具名单元都得到一张看似正常的镜像"，而不是报错。
+裁定/修法 = `build_embed_unit` 改调 `run_python_probe_named(python, &src, unit_name)`。
+锁点 = `btrack::tests::the_declared_table_reaches_the_function_record`（断言 `m.unit == "normalize"` 且函数记录
+只有一条 —— 回落路径下这两条都成立不了）与 `cli::tests::check_ingests_a_py_unit_and_keeps_the_declared_table`。
+
+**(e) 实现缺陷（修）：`sema` 把 embed 表达式的类型判成 `()`，令 §7.7.1 自己的样例过不了 `infy check`**。
+`check_expr_inner` 的 `ExprKind::Embed` 臂无条件返回 `Ty::Unit`，而 §7.7.1 规则 2 写"单元的 `return` 映射到
+IFBC 返回指令"⇒ 该表达式的值就是所在 item 的返回值。于是规范样例
+`event normalize(…) -> Vec<f32> { @py(…) { … } }` 在阶段 [4] 就吃 `E-0110 返回值类型不匹配：期望 Vec<f32>，实际 ()`，
+阶段 [6a] 从 CLI **永远到不了**（这条挡住的是整条 D1，与 D1(1) 轮那三条挡死扫描的缺陷同族）。
+修法 = 该臂返回 `self.ret_ty.clone()`（`check_body` 在检查体之前已按声明设好）。
+锁点 = `cli::tests::check_ingests_a_py_unit_and_keeps_the_declared_table`（不带这条修复就是 exit 2）。
+
+**(f) 补丁级声明查不到能力表（修）**。§7.7.3 写"精确到 minor；**patch 不敏感**"，但归一只做在版本比较里：
+`py = "3.14.6"` 时 `check_probe_version` 放行、`CapTable::load("py", "3.14.6")` 却去找
+`IFBC-CAP-py-3.14.6.toml` → `E-0712 能力表无法读取`。裁定 = 表名按**探针报出的 minor** 取
+（`dump.py_minor()`，即真正编译了该单元的那个 minor；§7.7.3 已保证它与声明一致）。
+锁点 = `btrack::tests::a_patch_level_declaration_still_finds_the_minor_capability_table`。
+
+**(g) `infy check` 的 stdout 增加一行 `ingest ok —`**。§13.4 只规定 `check` 的退出码，没规定输出格式；
+本仓库的既有约定是每个已落地阶段打一行状态（`codegen ok —`、`artifact ok —`）。裁定 = 阶段 [6a] 每份镜像
+打一行 `ingest ok — 阶段 [6a] \`<unit>\`：IFBC 镜像 N 字节 / M 函数（CPython 3.14.6，§7.7.1）`，
+无 B 轨单元的模块一行不打 ⇒ `examples/tour` 的 stdout 逐字节未变。
+
+**(h) B 轨夹具的环境依赖**。`runtime/fixtures/ifbc_py_unit.bin` 与 D4(2)/D4(3) 那三份夹具方向分工相同
+（`.bin` 只有 `INFY_REGENERATE_FIXTURE=1` 能重写、`.can.txt` 只有 **C 侧** `INFY_REGENERATE_CANONICAL=1` 能重写），
+差别在它是**探针产物**而不是手写形状 ⇒ 复跑 `btrack::tests::py_unit_fixture_is_exactly_what_the_ingest_produces`
+需要本机有发布时那台机器的同一个 CPython（本轮 = 3.14.6）。§7.7.3 本来就把源语言工具链定为**构建期**依赖
+（"构建期依赖 ≠ 运行期依赖，与 A 轨需要 C 编译器完全同构"），所以这里按 §12.2 记录而不假装可移植。

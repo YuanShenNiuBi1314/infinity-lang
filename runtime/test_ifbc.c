@@ -1132,6 +1132,54 @@ static void canonical_case(const char* label, const char* bin, const char* txt, 
     CHECK(live_objs() == base, "  (canon) rendering leaks nothing");
 }
 
+/* ===== D1: a real stage-[6a] image, loaded by the production VM =====
+ * `runtime/fixtures/ifbc_py_unit.bin` is NOT hand-built: it is the bytes `btrack::ingest_embed_site`
+ * produced from an `@py` unit by driving this machine's CPython (§7.7.1) — probe → §7.7.2 scan →
+ * lowering → `ifbc::encode`. D1's acceptance is literally "the `@py` fragment produces a module
+ * `infy_ifbc.c` can load", so this is the load half of that claim, with the six §7.8.3 validations
+ * run by the loader itself. The declared-table half (§7.7.1 rule 1) is read back out of the func
+ * record: arity 2, return `f64` (scalar code 13) — what the INFY side wrote, not what Python inferred.
+ * Execution of a B-track frame is a different question (F27/F29) and is deliberately not claimed
+ * here. Path is module-relative like the other fixtures: run from target/scratch. */
+static void test_py_unit_fixture(void) {
+    uint64_t base = live_objs();
+    long n = 0;
+    char* img = read_whole("../../runtime/fixtures/ifbc_py_unit.bin", &n);
+    CHECK(img != 0 && n > 0, "(btrack) stage-[6a] fixture present (run from target/scratch)");
+    if (!img) return;
+
+    FILE* rep = mem_stream();
+    InfyIfbcModule* m = 0;
+    int rc = infy_ifbc_load((const uint8_t*)img, (uint64_t)n, &m, 1, rep);
+    CHECK(rc == 0 && m != 0, "(btrack) the C loader accepts the ingested @py image (six validations)");
+    if (rc) { long rn = 0; char* t = slurp(rep, &rn); fprintf(stderr, "(btrack) load rc=%d report:\n%s\n", rc, t); free(t); }
+    if (m) infy_ifbc_module_free(m);
+
+    /* the same image through this side's canonical renderer: the func record must carry the
+     * INFY-side table (§7.7.1 rule 1) — F <i> <name> <code_off> <code_len> <locals> <max_stack>
+     * <nargs> <ret_arity> <ret_sig> … (IFBC.md §6.1). */
+    FILE* d = mem_stream();
+    infy_ifbc_dump_canonical((const uint8_t*)img, (uint64_t)n, d);
+    long dn = 0; char* ct = slurp(d, &dn);
+    CHECK(dn > 0 && strncmp(ct, "E parse", 7) != 0, "(btrack) this side renders the ingested image");
+    char* fl = strstr(ct, "F 0 ");
+    CHECK(fl != 0, "(btrack) the ingested image has the unit's own func record");
+    if (fl) {
+        unsigned fi, nm, coff, clen, loc, mst, nargs, ret_arity, ret_sig;
+        int got = sscanf(fl, "F %u %u %u %u %u %u %u %u %u", &fi, &nm, &coff, &clen, &loc, &mst,
+                         &nargs, &ret_arity, &ret_sig);
+        CHECK(got == 9 && nargs == 2 && ret_sig == 13,
+              "(btrack) declared table survived the round trip: arity 2 / ret f64 (13)");
+        CHECK(ret_arity == 1, "(btrack) a scalar return, not a tuple (§7.7.1 rule 2)");
+    }
+    /* §7.4/§12.2: a B-track image must carry the ORIGINAL-language line map, and the unit/source
+     * names ride in the pool the loader read. */
+    CHECK(strstr(ct, "\nL ") != 0, "(btrack) the ingested image maps code offsets to Python lines");
+
+    free(ct); fclose(d); fclose(rep); free(img);
+    CHECK(live_objs() == base, "(btrack) loading the ingested image leaks nothing");
+}
+
 static void test_canonical_cross_check(void) {
     canonical_case("(canon) the D4(2) writer fixture disassembles identically",
                    "ifbc_rust_writer.bin", "ifbc_rust_writer.can.txt", 0);
@@ -1139,6 +1187,8 @@ static void test_canonical_cross_check(void) {
                    "ifbc_all_ops.bin", "ifbc_all_ops.can.txt", 0);
     canonical_case("(canon) the load-time verdicts agree per (code, func, off)",
                    "ifbc_verify_matrix.bin", "ifbc_verify_matrix.ver.txt", 1);
+    canonical_case("(canon) the stage-[6a] @py image disassembles identically",
+                   "ifbc_py_unit.bin", "ifbc_py_unit.can.txt", 0);
 
     /* the clean image: this side finds nothing blocking either, which is what makes the empty
      * `.ver.txt` above a statement rather than an absence. */
@@ -1186,6 +1236,7 @@ int main(void) {
     test_merged_rejections();
     test_dump_merged_format();
     test_rust_writer_fixture();
+    test_py_unit_fixture();
     test_canonical_cross_check();
     test_object_model();
     test_truncation_sweep();

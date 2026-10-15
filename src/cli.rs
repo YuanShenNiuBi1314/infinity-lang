@@ -127,6 +127,8 @@ pub struct Loaded {
     pub file_pkg: BTreeMap<FileId, String>,
     /// §5.9: the build configuration this module was loaded for (the test build sees more files).
     pub scope: Scope,
+    /// §7.1 [6a]: the IFBC images stage [6a] ingested for this build, one per B-track embed unit.
+    pub embed_images: Vec<crate::btrack::IngestedImage>,
     pub handler: Handler,
 }
 
@@ -262,7 +264,7 @@ pub fn load_scoped(root: &Path, handler: &mut Handler, scope: &Scope, triple: &s
     let mut lint = handler.lint.clone();
     lint.strict = matches!(manifest.profile.diagnostic_level, crate::pkg::DiagLevel::Strict);
     handler.lint = lint;
-    Some(Loaded { root: root.to_path_buf(), manifest, sources, files, file_pkg, scope: *scope, handler: std::mem::take(handler) })
+    Some(Loaded { root: root.to_path_buf(), manifest, sources, files, file_pkg, scope: *scope, embed_images: Vec::new(), handler: std::mem::take(handler) })
 }
 
 /// Run stages [2]–[5] over an already-loaded module and return it with diagnostics filled in.
@@ -512,6 +514,12 @@ fn frontend(positional: &[String], rest: &[String], scope: &Scope) -> Result<(Lo
         l.handler.lint.strict = false;
     }
     let prog = analyse(&mut l);
+    // §7.1's stage note puts [6a] inside `infy check` as well ("[6a] 在 `infy check` 下需要源语言
+    // 工具链在场才能做能力扫描"), but §7.1 also aborts every later stage on a blocking diagnostic,
+    // so the ingest only runs when [1]-[5] came back clean.
+    if l.handler.exit_code() == exit::OK {
+        ingest_b_track(&mut l, &prog);
+    }
     let rendered = l.handler.render(&l.sources);
     eprint!("{rendered}");
     if let Some(out) = rest.iter().position(|a| a == "--diag-json").and_then(|i| rest.get(i + 1)) {
@@ -526,6 +534,271 @@ fn frontend(positional: &[String], rest: &[String], scope: &Scope) -> Result<(Lo
     Ok((l, prog, summary, code))
 }
 
+/// §7.1 stage **[6a]**: every B-track embed unit in this build, as the **INFY side** declares it
+/// (§7.7.1 rule 1 — the parameter table is built from the types the item's arguments were inferred
+/// to, never from the code object). The refusals that belong to the front end rather than to the
+/// ingest are reported here and nowhere else:
+///
+/// * a B-track prefix this build cannot lower (`@lua`: §7.7.1's ingest table names `luac`, the
+///   probe only drives CPython) — `E-0712` naming the prefix, so the unit cannot be forgotten;
+/// * a bound argument sema recorded no type for, or a type with no row in §2 of
+///   `runtime/IFBC.md` (`u128`/`i128`, `auto`, an unresolved name) — `E-0712` naming the concrete
+///   item, never a boxed guess (P3: 红着退出，不留到运行时).
+///
+/// §3.6 allows an embed block in two positions (the whole body, or a statement expression); both
+/// are collected from every nesting of blocks. A-track `@c` is D3 and process-only prefixes are
+/// §7.7.5 — neither is a B-track ingest unit, so neither appears here.
+fn embed_sites(
+    files: &BTreeMap<FileId, ParsedFile>,
+    sources: &Sources,
+    prog: &sema::Program,
+    handler: &mut Handler,
+) -> Vec<crate::btrack::EmbedSite> {
+    let mut out = Vec::new();
+    for (file, pf) in files {
+        for item in &pf.items {
+            sites_of_item(sources, prog, handler, *file, item, &mut out);
+        }
+    }
+    out
+}
+
+fn sites_of_item(
+    sources: &Sources,
+    prog: &sema::Program,
+    handler: &mut Handler,
+    file: FileId,
+    item: &crate::ast::Item,
+    out: &mut Vec<crate::btrack::EmbedSite>,
+) {
+    use crate::ast::ItemKind;
+    const META: &[&str] = &["name", "timeout_ms", "isolation"];
+    let (sig, body) = match &item.kind {
+        ItemKind::Fn { sig, body } | ItemKind::Event { sig, body } => (sig, body),
+        ItemKind::Impl { items, .. } | ItemKind::Trait { items, .. } => {
+            for inner in items {
+                sites_of_item(sources, prog, handler, file, inner, out);
+            }
+            return;
+        }
+        ItemKind::ExternBlock { decls, .. } => {
+            for inner in decls {
+                sites_of_item(sources, prog, handler, file, inner, out);
+            }
+            return;
+        }
+        _ => return,
+    };
+    let mut blocks = Vec::new();
+    embeds_in_body(body, &mut blocks);
+    if blocks.is_empty() {
+        return;
+    }
+    // The declared return type comes from stage [4]'s record; an item sema never collected has no
+    // declared type to read, and `()` is the §3.3 reading of "no `->` written".
+    let ret = prog
+        .fns
+        .iter()
+        .find(|f| f.file == file && f.name == sig.name)
+        .or_else(|| prog.fns.iter().find(|f| f.name == sig.name && f.self_ty.is_none()))
+        .map(|f| f.ret.clone())
+        .unwrap_or(sema::Ty::Unit);
+    // §7.7.1 rule 2: the unit's `return` is the item's return value, so an unmappable return type is
+    // a gap in the parameter table too — falling back to `()` here would silently change the
+    // calling convention the loader validates (item 5 compares the digest of exactly this table).
+    let ret_kind = match crate::btrack::embed_ty_kind(&ret) {
+        Some(k) => k,
+        None => {
+            for e in &blocks {
+                if !e.is_b_track() || e.lang != "py" {
+                    continue;
+                }
+                handler.emit(embed_gap(
+                    file,
+                    sources.line_col(e.span).0,
+                    format!("`{}` 的返回类型无法表达", sig.name),
+                    format!(
+                        "§7.7.1 规则 2：声明的返回类型 `{ty}` 在 `runtime/IFBC.md` §2 的封闭签名集里没有对应行",
+                        ty = ret.text()
+                    ),
+                ));
+            }
+            return;
+        }
+    };
+    for e in blocks {
+        if !e.is_b_track() {
+            continue;
+        }
+        let pos = sources.line_col(e.span).0;
+        if e.lang != "py" {
+            handler.emit(embed_gap(
+                file,
+                pos,
+                format!("@{} 的字节码摄取未实现", e.lang),
+                format!(
+                    "§7.7.1 的摄取路径里 {lang} 一列写的是 `{probe}`，本实现只驱动 CPython；该单元不会静默丢弃",
+                    lang = e.lang,
+                    probe = if e.lang == "lua" { "luac -o" } else { "该语言的字节码编译器" }
+                ),
+            ));
+            continue;
+        }
+        let unit_name = e.unit_name().unwrap_or_else(|| sig.name.clone());
+        let mut params = Vec::new();
+        let mut refused = false;
+        for a in &e.args {
+            if META.contains(&a.name.as_str()) {
+                continue;
+            }
+            let Some(t) = prog.ty(a.value.span) else {
+                handler.emit(embed_gap(
+                    file,
+                    pos,
+                    format!("`{unit_name}` 的形参表无法构造"),
+                    format!("§7.7.1 规则 1 要求形参表来自 INFY 侧类型，而实参 `{arg}` 在阶段 [4] 没有类型（未声明即已被拒绝）", arg = a.name),
+                ));
+                refused = true;
+                break;
+            };
+            let Some(k) = crate::btrack::embed_ty_kind(t) else {
+                handler.emit(embed_gap(
+                    file,
+                    pos,
+                    format!("`{unit_name}` 的形参表无法构造"),
+                    format!(
+                        "§7.7.1 规则 1：实参 `{arg}` 的类型 `{ty}` 在 `runtime/IFBC.md` §2 的封闭签名集里没有对应行（无 128 位宽度、`auto` 与未定型者皆然）",
+                        arg = a.name,
+                        ty = t.text()
+                    ),
+                ));
+                refused = true;
+                break;
+            };
+            params.push((a.name.clone(), k));
+        }
+        if refused {
+            continue;
+        }
+        out.push(crate::btrack::EmbedSite {
+            lang: e.lang.clone(),
+            unit_name,
+            body: e.body.clone(),
+            params,
+            ret: ret_kind,
+            file,
+            pos,
+        });
+    }
+}
+
+/// `E-0712` (§7.7.2's "字节码能力缺失", the family the §9.4 table gives an ingest that cannot
+/// proceed) with the concrete item named in the title, per P3.
+fn embed_gap(file: FileId, pos: Position, title: String, note: String) -> Diagnostic {
+    Diagnostic::new("E-0712", Phase::Embed, file, pos)
+        .with_origin(crate::diag::Origin::EmbedPy)
+        .titled(title)
+        .note(note)
+        .help("等能力表 / §2 签名集扩容，或改写该单元（§7.7.1、§7.7.2）")
+}
+
+fn embeds_in_body<'a>(body: &'a crate::ast::Body, out: &mut Vec<&'a crate::ast::EmbedBlock>) {
+    match body {
+        crate::ast::Body::Embed(e) => out.push(e),
+        crate::ast::Body::Block(b) => embeds_in_block(b, out),
+        crate::ast::Body::Foreign => {}
+    }
+}
+
+fn embeds_in_block<'a>(b: &'a crate::ast::Block, out: &mut Vec<&'a crate::ast::EmbedBlock>) {
+    use crate::ast::ExprKind;
+    for st in &b.stmts {
+        embeds_in_stmt(st, out);
+    }
+    if let Some(t) = &b.tail {
+        if let ExprKind::Embed(e) = &t.kind {
+            out.push(e);
+        }
+    }
+}
+
+fn embeds_in_stmt<'a>(st: &'a crate::ast::Stmt, out: &mut Vec<&'a crate::ast::EmbedBlock>) {
+    use crate::ast::{ArmBody, ElseBranch, ExprKind, StmtKind};
+    match &st.kind {
+        StmtKind::Expr { expr, .. } => {
+            if let ExprKind::Embed(e) = &expr.kind {
+                out.push(e);
+            }
+        }
+        StmtKind::If { then, else_, .. } => {
+            embeds_in_block(then, out);
+            if let Some(branch) = else_ {
+                match &**branch {
+                    ElseBranch::Block(b) => embeds_in_block(b, out),
+                    ElseBranch::If(inner) => embeds_in_stmt(inner, out),
+                }
+            }
+        }
+        StmtKind::While { body, .. } | StmtKind::Loop { body, .. } | StmtKind::For { body, .. } => {
+            embeds_in_block(body, out)
+        }
+        StmtKind::Unsafe(b) | StmtKind::Defer(b) => embeds_in_block(b, out),
+        StmtKind::Match { arms, .. } => {
+            for a in arms {
+                match &a.body {
+                    ArmBody::Block(b) => embeds_in_block(b, out),
+                    ArmBody::Expr(e) => {
+                        if let ExprKind::Embed(emb) = &e.kind {
+                            out.push(emb);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// §7.1 [6a] over the whole module. A module with no B-track unit never touches the source-language
+/// toolchain — §7.1's note that `infy check` needs it is about modules that **use** `@py`.
+///
+/// Where the images go: §7.4's `.inf ifbc` region is the artifact's home for them, but reaching
+/// stage [9] requires stage [8] to emit the *call* into the IFBC VM, and a `@py` body is exactly
+/// the host event §3.3/§7.6.5 describes — which `codegen` refuses by name (F29). So `.inf ifbc`
+/// stays empty for every module this build can compile, and the committed consumer of a real
+/// stage-[6a] image is `runtime/test_ifbc.c`, which loads `ifbc_py_unit.bin` with the production
+/// VM. No fake success: nothing claims the artifact carries B-track bytecode.
+fn ingest_b_track(l: &mut Loaded, prog: &sema::Program) {
+    let Loaded { files, sources, handler, manifest, embed_images, .. } = l;
+    let sites = embed_sites(files, sources, prog, handler);
+    if sites.is_empty() {
+        return;
+    }
+    let python = match crate::btrack::find_python() {
+        Some(p) => p,
+        None => {
+            // §7.1's stage note and §7.7.3: the missing build-time interpreter is `E-0713`.
+            for s in &sites {
+                handler.emit(
+                    crate::btrack::IngestErr::ToolchainMissing {
+                        lang: s.lang.clone(),
+                        declared: manifest.b_track.get(&s.lang).cloned().unwrap_or_default(),
+                    }
+                    .diagnostic(s.file, s.pos),
+                );
+            }
+            return;
+        }
+    };
+    let mut images = Vec::new();
+    for s in &sites {
+        if let Ok(img) = crate::btrack::ingest_embed_site(s, manifest, &python, handler) {
+            images.push(img);
+        }
+    }
+    *embed_images = images;
+}
+
 fn check(positional: &[String], rest: &[String], building: bool) -> i32 {
     let (l, prog, summary, code) = match frontend(positional, rest, &Scope::default()) {
         Ok(x) => x,
@@ -533,6 +806,15 @@ fn check(positional: &[String], rest: &[String], building: bool) -> i32 {
     };
     if code == exit::OK {
         println!("check ok — {} file(s), {}", l.files.len(), summary);
+        for img in &l.embed_images {
+            println!(
+                "ingest ok — 阶段 [6a] `{}`：IFBC 镜像 {} 字节 / {} 函数（{}，§7.7.1）",
+                img.unit,
+                img.image.len(),
+                img.n_funcs,
+                img.source_toolchain
+            );
+        }
     } else {
         println!("check FAILED — {summary}");
     }
@@ -829,8 +1111,8 @@ fn build_c(l: &Loaded, prog: &sema::Program, rest: &[String], cmd: &str) -> i32 
         }
     );
     println!(
-        "  = note: .inf ifbc 为空（{} 个 B 轨模块）—— 字节码摄取 = D1 未做；\
-               .inf rt 来自 {} 的 infy_rt.c + infy_dyn.c",
+        "  = note: .inf ifbc 为空（{} 个 B 轨模块）—— 阶段 [6a] 已能摄取 `@py` 单元，缺的是阶段 [8] 通往 IFBC VM 的调用通道\
+               （docs/BACKLOG.md F29）；.inf rt 来自 {} 的 infy_rt.c + infy_dyn.c",
         a.meta.n_ifbc_modules,
         plan.runtime_dir.display()
     );
@@ -1857,5 +2139,157 @@ mod tests {
         files.insert(f, parser::parse(&src, f, &lexed, &mut h));
         let names = collect_link_units(&files);
         assert_eq!(names, vec!["a".to_string(), "z".to_string()], "sorted, not source order (§7.3)");
+    }
+
+    // ---------------------------------------------------------------- §7.1 [6a] B 轨摄取
+
+    /// A scratch module under `target/scratch/` (§5.1's shape: manifest + one package directory).
+    fn scratch_module(name: &str, manifest_tail: &str, src: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("scratch")
+            .join(name);
+        std::fs::create_dir_all(dir.join("core").join("embed")).expect("scratch module dir");
+        std::fs::write(
+            dir.join(pkg::MANIFEST_NAME),
+            format!(
+                "[module]\npath    = \"example/embed\"\nversion = \"0.1.0\"\ninfy    = \"2.0\"\n\n\
+                 [dependencies]\n\"std\" = \"1.0\"\n\n[profile]\noverflow = \"panic\"\n{manifest_tail}"
+            ),
+        )
+        .expect("manifest");
+        std::fs::write(dir.join("core").join("embed").join("mod.infy"), src).expect("source");
+        dir
+    }
+
+    /// §7.1's stage note: `infy check` runs [6a], so a module with a `@py` unit gets its IFBC image
+    /// from the front end — and the image's own function record carries the **INFY-side declared**
+    /// table (§7.7.1 rule 1: arity and the return's scalar code), which is what §7.8.3 item 5
+    /// later compares a digest against. The declared minor is read off the interpreter this build
+    /// finds, because §7.7.3 makes an agreement between the two a precondition, not a coincidence.
+    #[test]
+    fn check_ingests_a_py_unit_and_keeps_the_declared_table() {
+        let py = crate::btrack::find_python().expect("阶段 [6a] 需要构建期 CPython（§7.7.3）");
+        let observed = crate::btrack::probe_version(&py).expect("探针应报出解释器版本");
+        let minor = observed.split('.').take(2).collect::<Vec<_>>().join(".");
+        let dir = scratch_module(
+            "cli-6a-py",
+            &format!("[b_track]\npy = \"{minor}\"\n"),
+            "#![infy_version = \"2.0\"]\n\npackage embed\n\n\
+             event normalize(scale: f64, n: u32) -> f64 {\n    @py(scale=scale, n=n) {\n        return scale * 2.0\n    }\n}\n\nfn main() { }\n",
+        );
+        let (l, _prog, summary, code) =
+            frontend(&[dir.to_string_lossy().to_string()], &[], &Scope::default())
+                .expect("frontend 应返回结果");
+        assert_eq!(code, exit::OK, "该模块在 [1]-[6a] 应是干净的：{summary}");
+        assert_eq!(l.embed_images.len(), 1, "一个 @py 单元 = 一份镜像：{:?}", l.embed_images);
+        let img = &l.embed_images[0];
+        assert_eq!(img.unit, "normalize");
+        assert!(!img.image.is_empty(), "阶段 [6a] 必须产出镜像字节");
+        assert!(
+            img.source_toolchain.starts_with("CPython "),
+            "§7.7.3：源工具链串要进 `.inf meta` 与 build-id：{}",
+            img.source_toolchain
+        );
+        let m = crate::ifbc::decode(&img.image).expect("[6a] 的镜像必须可解码");
+        assert_eq!(m.funcs.len(), 1, "只有单元自己那一条函数记录（探针按写入的单元名取体）");
+        assert_eq!(m.funcs[0].nargs, 2, "§7.7.1 规则 1：形参个数来自 INFY 侧声明");
+        assert_eq!(m.funcs[0].ret_sig, 13, "f64 的标量码是 13（`runtime/IFBC.md` §2）");
+        assert!(!m.lines.is_empty(), "§7.4：镜像必须带原始语言行映射");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A B-track prefix this build cannot lower is an **explicit** refusal naming that prefix
+    /// (`E-0712`), not a unit that quietly vanishes: §7.7.1's ingest table names `luac` for `@lua`
+    /// while the probe only drives CPython.
+    #[test]
+    fn a_lua_unit_is_refused_by_name_and_blocks_the_build() {
+        let dir = scratch_module(
+            "cli-6a-lua",
+            "[b_track]\npy = \"3.14\"\nlua = \"5.4\"\n",
+            "#![infy_version = \"2.0\"]\n\npackage embed\n\n\
+             event shake(v: f64) -> f64 {\n    @lua(v=v) {\n        return v * 2.0\n    }\n}\n\nfn main() { }\n",
+        );
+        let (l, _prog, summary, code) =
+            frontend(&[dir.to_string_lossy().to_string()], &[], &Scope::default())
+                .expect("frontend 应返回结果");
+        assert_eq!(code, exit::DIAGNOSED, "未实现的 B 轨前缀必须变红：{summary}");
+        assert!(l.embed_images.is_empty(), "被拒绝的前缀不产出镜像：{:?}", l.embed_images);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §7.7.1 rule 1 with nothing to map: `u128` has no row in §2's closed signature set, so the
+    /// table cannot be built and the build stops **naming the item and which part of the table**。
+    /// Two shapes, because the parameter refusal and the return refusal are separate branches
+    /// (folding either into `dyn`/`()` would be the 假成功 P3 forbids).
+    #[test]
+    fn a_type_with_no_ifabi_row_stops_the_ingest_by_name() {
+        let py = crate::btrack::find_python().expect("阶段 [6a] 需要构建期 CPython（§7.7.3）");
+        let observed = crate::btrack::probe_version(&py).expect("探针应报出解释器版本");
+        let minor = observed.split('.').take(2).collect::<Vec<_>>().join(".");
+        let tail = format!("[b_track]
+py = \"{minor}\"
+");
+        for (name, src, want) in [
+            (
+                "cli-6a-u128-param",
+                "#![infy_version = \"2.0\"]
+
+package embed
+
+                 event widen(v: u128) -> u32 {
+    @py(v=v) {
+        return 1u32
+    }
+}
+
+fn main() { }
+",
+                "形参表",
+            ),
+            (
+                "cli-6a-u128-ret",
+                "#![infy_version = \"2.0\"]
+
+package embed
+
+                 event widen(v: u32) -> u128 {
+    @py(v=v) {
+        return v
+    }
+}
+
+fn main() { }
+",
+                "返回类型",
+            ),
+        ] {
+            let dir = scratch_module(name, &tail, src);
+            let (l, _prog, summary, code) =
+                frontend(&[dir.to_string_lossy().to_string()], &[], &Scope::default())
+                    .expect("frontend 应返回结果");
+            let text = l.handler.render(&l.sources);
+            assert_eq!(code, exit::DIAGNOSED, "{name}：无可表达类型必须变红（{summary}）");
+            assert!(text.contains("E-0712"), "{name} 应报 E-0712：{text}");
+            assert!(
+                text.contains(want) && text.contains("u128"),
+                "{name} 的诊断必须点名{want}与 `u128`：{text}"
+            );
+            assert!(l.embed_images.is_empty(), "{name}：拒绝就没有镜像：{:?}", l.embed_images);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// The other half of §7.1's stage note: a module with **no** B-track unit must not touch the
+    /// source-language toolchain at all — `examples/tour` is exactly that, and its images list is
+    /// empty even on a machine without Python. This is what keeps P6 (运行期零依赖) honest.
+    #[test]
+    fn a_module_without_embeds_produces_no_images() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples").join("tour");
+        let (l, _prog, _summary, code) =
+            frontend(&[root.to_string_lossy().to_string()], &[], &Scope::default())
+                .expect("frontend 应返回结果");
+        assert_eq!(code, exit::OK);
+        assert!(l.embed_images.is_empty(), "纯 INFY 模块没有 [6a] 镜像：{:?}", l.embed_images);
     }
 }
