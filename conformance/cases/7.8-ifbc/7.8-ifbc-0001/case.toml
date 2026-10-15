@@ -1,0 +1,8 @@
+id = "7.8-ifbc-0001"
+category = "7.8-ifbc"
+clause = "§7.8.3"
+title = "Rust 写入器的镜像过六项校验（正例）"
+kind = "ifbc-verify"
+expect = []
+exit = 0
+image = "runtime/fixtures/ifbc_rust_writer.bin"

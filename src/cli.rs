@@ -575,6 +575,52 @@ fn frontend(positional: &[String], rest: &[String], scope: &Scope) -> Result<(Lo
     Ok((l, prog, summary, code))
 }
 
+/// §12: the front-end verdict for one module directory, in process — the diagnostic **codes** and
+/// the exit code `infy check` would give, without rendering to a stream.
+pub struct Verdict {
+    /// Visible diagnostics in `Handler::sorted` order (suppressed-by-`[lints]` ones excluded, so a
+    /// case that `[lints]`-allows a code is not credited with reporting it).
+    pub codes: Vec<String>,
+    pub exit: i32,
+    pub rendered: String,
+}
+
+/// [`Verdict`] for `root` under build configuration `scope`. `None` only when there is no module to
+/// load at all (no `MODULE.infy.toml`); a manifest that *fails to parse* still yields a verdict,
+/// because those diagnostics are what such a case is about.
+///
+/// This deliberately calls the same functions `frontend()` calls rather than a re-implementation: a
+/// corpus run against a second pipeline would stay green while `infy check` itself is broken.
+pub fn check_verdict(root: &Path, scope: &Scope) -> Option<Verdict> {
+    if !root.join(pkg::MANIFEST_NAME).is_file() {
+        return None;
+    }
+    let mut handler = Handler::default();
+    let mut l = match load_scoped(root, &mut handler, scope, &host_triple()) {
+        Some(l) => l,
+        None => {
+            let codes = handler.visible().iter().map(|d| d.code.clone()).collect();
+            return Some(Verdict {
+                codes,
+                exit: handler.exit_code(),
+                rendered: handler.render(&handler_empty_sources(root)),
+            });
+        }
+    };
+    let prog = analyse(&mut l);
+    // §7.1 puts [6a] inside `check`, and §7.1 also aborts later stages on a blocking diagnostic —
+    // same rule as `frontend()`, so a B-track case's `E-0711`/`E-0712`/`E-0713` arrive exactly the
+    // way a user sees them.
+    if l.handler.exit_code() == exit::OK {
+        ingest_b_track(&mut l, &prog);
+    }
+    Some(Verdict {
+        codes: l.handler.visible().iter().map(|d| d.code.clone()).collect(),
+        exit: l.handler.exit_code(),
+        rendered: l.handler.render(&l.sources),
+    })
+}
+
 /// §7.1 stage **[6a]**: every B-track embed unit in this build, as the **INFY side** declares it
 /// (§7.7.1 rule 1 — the parameter table is built from the types the item's arguments were inferred
 /// to, never from the code object). The refusals that belong to the front end rather than to the

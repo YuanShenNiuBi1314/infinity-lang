@@ -1,0 +1,8 @@
+id = "7.8-ifbc-0002"
+category = "7.8-ifbc"
+clause = "§7.8.3"
+title = "缺陷矩阵：每个函数一个缺陷，全部阻断都要报出来"
+kind = "ifbc-verify"
+expect = ["R-0704", "R-0704", "R-0705", "R-0706", "R-0706", "R-0706", "R-0707", "R-0707", "R-0710", "R-0713"]
+exit = 2
+image = "runtime/fixtures/ifbc_verify_matrix.bin"

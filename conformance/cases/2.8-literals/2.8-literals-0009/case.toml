@@ -1,0 +1,7 @@
+id = "2.8-literals-0009"
+category = "2.8-literals"
+clause = "§2.9"
+title = "char 字面量装了两个码点：长度判断 + 语句层后果"
+kind = "check"
+expect = ["E-0049", "E-0053"]
+exit = 2

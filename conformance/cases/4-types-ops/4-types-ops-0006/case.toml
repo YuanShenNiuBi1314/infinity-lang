@@ -1,0 +1,7 @@
+id = "4-types-ops-0006"
+category = "4-types-ops"
+clause = "§4.13"
+title = "无后缀字面量适形形参类型（正例）"
+kind = "check"
+expect = []
+exit = 0

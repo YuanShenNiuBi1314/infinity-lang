@@ -1,0 +1,7 @@
+id = "2-lexical-0005"
+category = "2-lexical"
+clause = "§2.2"
+title = "块注释可嵌套（正例）"
+kind = "check"
+expect = []
+exit = 0

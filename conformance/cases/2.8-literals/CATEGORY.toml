@@ -1,0 +1,5 @@
+slug = "2.8-literals"
+table = "§12.5"
+title = "§2.8–§2.12 字面量/字符串/const-eval"
+check = "分隔符、进制、字面量溢出、多行 raw 缩进剥离、转义封闭表、confusables"
+required = "96"

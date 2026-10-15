@@ -1,0 +1,7 @@
+id = "4-types-ops-0004"
+category = "4-types-ops"
+clause = "§4.3"
+title = "给 let 绑定重新赋值"
+kind = "check"
+expect = ["E-0120"]
+exit = 2

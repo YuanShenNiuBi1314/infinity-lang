@@ -1,0 +1,7 @@
+id = "8-chains-0001"
+category = "8-chains"
+clause = "§8.2"
+title = "goto 指向不存在的锚点"
+kind = "check"
+expect = ["E-0301"]
+exit = 2

@@ -1,0 +1,7 @@
+id = "2-lexical-0002"
+category = "2-lexical"
+clause = "§2.1"
+title = "CRLF 行尾是 W-0001（而不是 E-0003）；§9.6 默认 strict 因此仍阻断"
+kind = "check"
+expect = ["W-0001"]
+exit = 2

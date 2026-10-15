@@ -1,0 +1,5 @@
+slug = "7.8-ifbc"
+table = "§12.2"
+title = "§7.8 IFBC"
+check = "校验器六项各自的正反例（必须拒绝畸形字节码，不得\"部分执行\"）"
+required = "64"

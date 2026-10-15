@@ -1,0 +1,7 @@
+id = "2.8-literals-0003"
+category = "2.8-literals"
+clause = "§2.8"
+title = "尾点浮点写法"
+kind = "check"
+expect = ["E-0044"]
+exit = 2

@@ -1,0 +1,7 @@
+id = "2-lexical-0011"
+category = "2-lexical"
+clause = "§2.10"
+title = "拉丁标识符里混一个西里尔 а"
+kind = "check"
+expect = ["E-0050"]
+exit = 2

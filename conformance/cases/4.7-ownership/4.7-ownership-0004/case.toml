@@ -1,0 +1,7 @@
+id = "4.7-ownership-0004"
+category = "4.7-ownership"
+clause = "§4.7.2"
+title = "正例：多个共享借用合法"
+kind = "check"
+expect = []
+exit = 0

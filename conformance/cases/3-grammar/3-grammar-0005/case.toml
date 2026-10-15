@@ -1,0 +1,7 @@
+id = "3-grammar-0005"
+category = "3-grammar"
+clause = "§2.7"
+title = "优先级表：* 绑得比 + 紧（正例）"
+kind = "check"
+expect = []
+exit = 0

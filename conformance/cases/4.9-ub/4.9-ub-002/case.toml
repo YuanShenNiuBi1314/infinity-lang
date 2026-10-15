@@ -1,0 +1,7 @@
+id = "4.9-ub-002"
+category = "4.9-ub"
+clause = "§4.6"
+title = "UB-024 env 的字段集合封闭且只读：写 env.iter"
+kind = "check"
+expect = ["E-0140"]
+exit = 2

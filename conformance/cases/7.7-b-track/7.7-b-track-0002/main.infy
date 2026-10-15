@@ -1,0 +1,11 @@
+#![infy_version = "2.0"]
+
+package case
+
+event widen(v: u128) -> u32 {
+    @py(v=v) {
+        return 1
+    }
+}
+
+fn main() { }

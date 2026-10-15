@@ -1,0 +1,7 @@
+id = "3.11-expr-pat-stmt-0001"
+category = "3.11-expr-pat-stmt"
+clause = "§3.12"
+title = "match 少一个变体就是不穷尽"
+kind = "check"
+expect = ["E-0070"]
+exit = 2

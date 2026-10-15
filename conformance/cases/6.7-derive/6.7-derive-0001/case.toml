@@ -1,0 +1,8 @@
+id = "6.7-derive-0001"
+category = "6.7-derive"
+clause = "§6.7"
+title = "正例：enum 上 derive(Debug, Clone, Copy)（生成体调未声明的 std.fmt.format_* = F35）"
+kind = "check"
+expect = []
+exit = 0
+defect = "F35"

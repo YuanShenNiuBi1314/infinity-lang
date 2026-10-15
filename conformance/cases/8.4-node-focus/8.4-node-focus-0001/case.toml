@@ -1,0 +1,7 @@
+id = "8.4-node-focus-0001"
+category = "8.4-node-focus"
+clause = "§8.4"
+title = "正例：序言语句不开节点，goto(+1) 落在下一个宿主语句"
+kind = "check"
+expect = []
+exit = 0

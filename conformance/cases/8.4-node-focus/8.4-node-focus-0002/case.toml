@@ -1,0 +1,7 @@
+id = "8.4-node-focus-0002"
+category = "8.4-node-focus"
+clause = "§8.4"
+title = "反例：把序言语句当成节点来数就会越界"
+kind = "check"
+expect = ["E-0301"]
+exit = 2

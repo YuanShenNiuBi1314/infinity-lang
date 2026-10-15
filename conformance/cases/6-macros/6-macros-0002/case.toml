@@ -1,0 +1,7 @@
+id = "6-macros-0002"
+category = "6-macros"
+clause = "§6.6"
+title = "macro_rules! 的首臂不会吞掉整条记号流（正例）"
+kind = "check"
+expect = []
+exit = 0

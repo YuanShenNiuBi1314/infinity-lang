@@ -1,0 +1,7 @@
+id = "4-types-ops-0005"
+category = "4-types-ops"
+clause = "§4.3"
+title = "if 的条件必须是 bool"
+kind = "check"
+expect = ["E-0110"]
+exit = 2

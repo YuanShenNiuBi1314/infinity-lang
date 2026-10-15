@@ -1,0 +1,8 @@
+id = "9.5-fmt-0001"
+category = "9.5-fmt"
+clause = "§9.5"
+title = "格式化幂等：一次与二次输出逐字节相同"
+kind = "fmt-idempotent"
+expect = []
+exit = 0
+file = "main.infy"

@@ -1,0 +1,7 @@
+id = "4.10-eval-order-0001"
+category = "4.10-eval-order"
+clause = "§4.13 规则 7"
+title = "无后缀字面量默认取 i32，不是 u32"
+kind = "check"
+expect = ["E-0110"]
+exit = 2

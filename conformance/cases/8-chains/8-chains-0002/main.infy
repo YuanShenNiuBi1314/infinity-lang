@@ -1,0 +1,13 @@
+#![infy_version = "2.0"]
+
+package case
+
+fn spawn() { }
+fn harvest() { }
+fn gate() { }
+fn retry() { }
+fn finalize() { }
+fn all_green() -> bool { true }
+fn take_u8(x: u8) { }
+fn take_i32(x: i32) { }
+chain P { label begin: spawn(); harvest(); gate(); { if (all_green()) { goto("done"); } goto(+1); } retry(); { goto("begin"); } label done: finalize(); }

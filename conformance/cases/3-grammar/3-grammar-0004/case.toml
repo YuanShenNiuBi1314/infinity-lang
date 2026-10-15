@@ -1,0 +1,7 @@
+id = "3-grammar-0004"
+category = "3-grammar"
+clause = "§3.6"
+title = "嵌套泛型的闭合不会被当成减号（正例）"
+kind = "check"
+expect = []
+exit = 0

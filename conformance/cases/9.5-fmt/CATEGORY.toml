@@ -1,0 +1,5 @@
+slug = "9.5-fmt"
+table = "§12.5"
+title = "§9.5 `infy fmt`"
+check = "幂等、AST 不变、注释保留、`@embed` 不透明、三档行宽各自黄金"
+required = "120"

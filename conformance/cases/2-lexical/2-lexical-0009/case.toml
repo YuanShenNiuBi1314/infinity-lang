@@ -1,0 +1,7 @@
+id = "2-lexical-0009"
+category = "2-lexical"
+clause = "§2.3"
+title = "双下划线前缀是保留写法"
+kind = "check"
+expect = ["E-0007"]
+exit = 2

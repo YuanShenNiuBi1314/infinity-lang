@@ -1,0 +1,8 @@
+id = "7.7-b-track-0003"
+category = "7.7-b-track"
+clause = "§7.7.1 规则 1"
+title = "可映射的声明表 + 无推导式的单元体 => [1]-[6a] 干净"
+kind = "check"
+expect = []
+exit = 0
+requires = ["python"]

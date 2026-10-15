@@ -1,0 +1,13 @@
+[module]
+path    = "example/conformance"
+version = "0.1.0"
+infy    = "2.0"
+
+[dependencies]
+"std" = "1.0"
+
+[profile]
+overflow = "panic"
+
+[b_track]
+py = "3.9"

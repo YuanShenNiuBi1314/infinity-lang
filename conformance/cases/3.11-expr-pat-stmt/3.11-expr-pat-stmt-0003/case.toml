@@ -1,0 +1,7 @@
+id = "3.11-expr-pat-stmt-0003"
+category = "3.11-expr-pat-stmt"
+clause = "§3.11"
+title = "结构体更新语法 ..base 移动剩余字段（正例）"
+kind = "check"
+expect = []
+exit = 0

@@ -1,0 +1,8 @@
+id = "7.7-b-track-0006"
+category = "7.7-b-track"
+clause = "§7.7.2"
+title = "未映射的子操作 BINARY_OP(**) => E-0712 点名到子操作"
+kind = "check"
+expect = ["E-0712"]
+exit = 2
+requires = ["python"]

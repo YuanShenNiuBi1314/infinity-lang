@@ -1,0 +1,5 @@
+slug = "1.3-domain-neutral"
+table = "§12.1"
+title = "§1.3 领域中立"
+check = "静态扫描 `std.*` 与语言层导出符号表，命中领域词表黑名单（`domain_terms.txt`）即判不合规；同时校验 `env` 字段集合封闭"
+required = "52"

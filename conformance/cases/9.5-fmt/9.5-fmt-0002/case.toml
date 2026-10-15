@@ -1,0 +1,8 @@
+id = "9.5-fmt-0002"
+category = "9.5-fmt"
+clause = "§9.5 规则 12"
+title = "注释与列表的尾逗号在二次格式化后保留"
+kind = "fmt-idempotent"
+expect = []
+exit = 0
+file = "main.infy"

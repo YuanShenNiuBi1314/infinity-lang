@@ -1,0 +1,7 @@
+id = "8-chains-0006"
+category = "8-chains"
+clause = "§8.2"
+title = "正例：start 的链与锚点都在"
+kind = "check"
+expect = []
+exit = 0

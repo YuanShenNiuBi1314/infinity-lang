@@ -1,0 +1,7 @@
+#![infy_version = "2.0"]
+
+package case
+
+enum P { A, B }
+fn d(p: P) -> u32 { match (p) { P::A => 1u32, P::B => 2u32, _ => 3u32, } }
+fn main() { }

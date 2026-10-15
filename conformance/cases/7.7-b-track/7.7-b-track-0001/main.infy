@@ -1,0 +1,12 @@
+#![infy_version = "2.0"]
+
+package case
+
+
+event shake(v: f64) -> f64 {
+    @lua(v=v) {
+        return v * 2.0
+    }
+}
+
+fn main() { }

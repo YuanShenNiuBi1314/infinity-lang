@@ -1,0 +1,8 @@
+id = "2-lexical-0013"
+category = "2-lexical"
+clause = "§2.11"
+title = "未知的 @ 嵌入前缀点名报 E-0702（级联出 8 条 E-0053 = F37）"
+kind = "check"
+expect = ["E-0702"]
+exit = 2
+defect = "F37"

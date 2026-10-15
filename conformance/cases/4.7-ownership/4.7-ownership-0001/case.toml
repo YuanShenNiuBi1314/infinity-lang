@@ -1,0 +1,7 @@
+id = "4.7-ownership-0001"
+category = "4.7-ownership"
+clause = "§4.7.1"
+title = "移出之后再使用同一个绑定：两处使用各报一条"
+kind = "check"
+expect = ["E-1001", "E-1001"]
+exit = 2

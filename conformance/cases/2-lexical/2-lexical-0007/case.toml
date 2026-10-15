@@ -1,0 +1,7 @@
+id = "2-lexical-0007"
+category = "2-lexical"
+clause = "§2.2"
+title = "同一文件两条 build 约束 => E-0013（两条都对本机构真，排除效应不掺进来）"
+kind = "check"
+expect = ["E-0013"]
+exit = 2

@@ -1,0 +1,7 @@
+id = "4-types-ops-0001"
+category = "4-types-ops"
+clause = "§4.1"
+title = "Some 的内层类型跟随实参：Option<u32> 里塞 1u64"
+kind = "check"
+expect = ["E-0110"]
+exit = 2

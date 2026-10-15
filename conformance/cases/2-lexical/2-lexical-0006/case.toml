@@ -1,0 +1,7 @@
+id = "2-lexical-0006"
+category = "2-lexical"
+clause = "§2.2"
+title = "build 约束出现在非首行"
+kind = "check"
+expect = ["E-0011"]
+exit = 2

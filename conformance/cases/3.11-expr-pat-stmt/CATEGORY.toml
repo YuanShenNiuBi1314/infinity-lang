@@ -1,0 +1,5 @@
+slug = "3.11-expr-pat-stmt"
+table = "§12.5"
+title = "§3.11–§3.13 表达式/模式/语句"
+check = "自动引用阶梯顺序、结构体更新移动、穷尽性与可达性、`defer` 顺序"
+required = "128"

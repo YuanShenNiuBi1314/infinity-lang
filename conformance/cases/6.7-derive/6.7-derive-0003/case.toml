@@ -1,0 +1,8 @@
+id = "6.7-derive-0003"
+category = "6.7-derive"
+clause = "§6.7"
+title = "正例：struct 上 derive(Debug)（同一族：生成体过不了 [4] = F35）"
+kind = "check"
+expect = []
+exit = 0
+defect = "F35"

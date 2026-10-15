@@ -642,7 +642,50 @@
 
 ### 阶段 E：§12 合规套件（这是唯一能声称"兼容"的东西）
 
-- [ ] E1 `conformance/cases/**`：按 §12.1/§12.2/§12.5 的分类建目录与用例文件格式（源文件 + 期望码），先从已有的单元测试里"搬运"成外部用例。
+- [x] E1 `conformance/cases/**`：按 §12.1/§12.2/§12.5 的分类建目录与用例文件格式（源文件 + 期望码），先从已有的单元测试里"搬运"成外部用例。
+      **E1 轮（2026-10-16）落地并勾 `[x]`**：`src/conformance.rs` 从 1 行占位落成 §12 的**分类表 + 用例格式 + 运行器**
+      （**11 项**单测），`conformance/cases/**` 落成 **83 条外部用例 / 17 个分类**（77 Pass、6 Blocked、**0 Fail**）。
+      (1) **分类表 = 规范三张表逐字抄**（20 行：§12.1 的 9 行 1244 + §12.2 的 3 行 256 + §12.5 的 8 行 800），
+          `the_category_table_adds_up_to_the_specs_own_totals` 钉住 1244/256/800/2300 与行数；
+          `CATEGORY.toml` 是这张表的**渲染产物**（`INFY_REGENERATE_CATEGORIES=1` 才重写），
+          `verify_category_file` 锁另一方向；加载器同时拒绝**未知分类目录**与**缺失分类目录**
+          （分类名拼错会让整目录用例静默消失 = §12.5 要防的那种谎报）。
+      (2) **用例格式**（规范只给了分类/数量/检查列，从未定义一个用例长什么样 ⇒ 偏差 **D-47 (a)–(h)**）：
+          一个用例 = 一个目录 = `case.toml`（`id`/`category`/`clause`/`title`/`kind`/`expect`/`exit` + 可选
+          `file`/`image`/`requires`/`defect`）+ 逐字节的源文件。**不**采用"期望写进被测源码注释里"那一流派
+          （§12.1 有"注释"分类、§12.5 的 §9.5 分类检查"注释保留"，期望若以注释承载就自指）。
+          `kind` 三档 = `check` / `fmt-idempotent` / `ifbc-verify`；§12.3/§12.4 的硬校验不进 `cases/**`（命令行为）。
+      (3) **运行器走 `infy check` 自己那条链**：新落成的 `cli::check_verdict`（`load_scoped` + `analyse` +
+          干净时的 `ingest_b_track`）是唯一入口，比较面 = 诊断码的排序多重集 + §13.4 退出码。
+          码表外的期望码由**加载器**拒（`codes::lookup`）；缺构建期工具 = **Blocked**（§7.7.3 的前提，
+          记通过是谎报、记失败是把环境说成实现）；`defect = "Fxx"` 的用例挂的仍是**规范**期望，
+          不达 → Blocked，**一旦通过 → 测试变红并要求删标记**（禁止"把缺陷当通过"）。
+          B 轨用例的清单写 `@PY_MINOR@`，由运行器换成**本机探针的 minor** —— 否则同一份提交的用例在测机器。
+      (4) **搬运来源** = 已有的 505 项单测的源码片段与 doc comment 条款（`lexer`/`parser`/`sema`/`borrow`/`pkg`/
+          `derive`/`cli`/`atrack`），落成外部用例后比较面变成"诊断码全集"，于是揪出下面五条
+          （原单测多是 `contains` 式断言，多出来的码以前没人看）。
+      **当场揪出并登记的缺口**：**F34**（§10 的 std 表里没有 `Vec::clone` ⇒ §4.7 的"clone 后再用"正例不可表达，
+      实测 `E-0110 类型 Vec<u8> 没有方法 clone` ×3）、**F35**（**任何 `#[derive(...)]` 都过不了 `infy check`**：
+      生成体调 `std::fmt::format_struct`/`format_unit`/`format_tuple`（`derive.rs:1165/1176`）而 §10 的 std 表里没有，
+      实测 `E-0053 缺少返回值` + `E-0101 调用未声明的函数` + `E-0110 无法解析字段`；改 package 目录 / 加
+      `import "std/fmt"` / 补 `[[bin]]`/`[[lib]]` 都不变。`derive.rs` 的 57 项断言的全是生成物**文本**，
+      生成体从未被阶段 [2]-[4] 回读，而 `examples/tour` 根本没有 `derive` ⇒ "derive 已通"从来没有端到端证据）、
+      **F36**（同一根因两阶段各报一次：`E-0020` ×2 且标题不同、`E-0410` ×2）、**F37**（未知 `@` 前缀报
+      `E-0702` 之后级联 8 条 `E-0053`）、**F38**（§1.3 领域中立的 `pkg::domain_neutrality_violations` 有单测而
+      **零 CLI 调用点**，规范点名的 `std/domain_terms.txt` 不在仓库 ⇒ 该分类结构性无用例）。
+      三个空分类逐条记名而不是删目录：`1.3-domain-neutral`（F38）、`10.9-std`（断言在运行期而程序没有
+      stdout 通道 = F19）、`11.1-host-protocol`（`src/host.rs` 占位）。
+      **一处假红提前挡掉**：`.gitattributes` 新增 `conformance/cases/** -text` —— 这台机 `core.autocrlf=true`，
+      检出会把源文件变成 CRLF，而 §2.1 的 `W-0001` **就把行尾当被测面** ⇒ 每条用例多一条诊断、
+      故意写 CRLF 的正反例整个失效（与 D4(3) 轮 `runtime/fixtures` 那条同族）。
+      回归全部复跑：`cargo test --offline --lib` **516 passed / 0 failed**（基线 505，+11 全在 `conformance`）、
+      `cargo check --offline --lib` 0 error / **50 warning**（未新增）、`infy check|build|run|test examples/tour` 全
+      exit 0 且 `--verify-reproducible` 0、生成 C11 仍 **12513** 字节 / 产物仍 **199975** 字节 / `blob 738` /
+      `build-id 4d8250b5…55ba` **逐字节不变**（本轮没碰 [7]-[9]）、`infy artifact info … --nodes` 0、
+      `fmt --check` 仍 exit **2**（F6 未裁决）；**C 侧零改动**仍复跑四条链：`-c infy_rt.c` 与 `-c infy_ifbc.c`
+      各 **0 告警**、rt **32335/0**、替身链与生产链 IFBC 各 **180/180** 且两份 stdout `cmp` **无差异**。
+      证据提交：见 RUNLOG `cron-20` 行与其后的做账提交（上述 516/0、0/50、83 条用例的 77/6/0、
+      四条 C 链与 tour 的 12513/199975/`4d8250b5…55ba` 全部为该提交上的实测复跑，非引用）。
 - [ ] E2 `infy conformance --report`：**逐分类通过率**（只报总数视为不合规，§12.5）。
 - [ ] E3 把通过率表落进 `docs/coverage.md`，并在 README 明确"距 100% 还差哪些类"。**在 100% 之前，任何文档不得出现"INFY v2.0 兼容"字样。**
 
@@ -914,18 +957,83 @@
       `E-0724`；§7.6.6 的 `#[link(isolation = "process")]`（独立子进程 + 长度前缀 IPC）全未实现。
       验收：逐条落地，或逐条在 `docs/spec-deviations.md` 记"无对应语义"，禁止假成功。
 
+- [ ] F34 **§10 的 std 签名表里没有 `Vec::clone`（也没有别的 clone 入口），于是 §4.7 的"clone 后再各自使用"这一类正例不可表达**（E1 轮搬运 `borrow::tests::clone_before_second_use_is_clean` 时确认）：
+      `fn take(v: Vec<u8>) -> Vec<u8> { v }` + `fn f(v: Vec<u8>) { let a = take(v); take(a.clone()); take(a); }`
+      实测报 **3 条 `E-0110 · 类型 Vec<u8> 没有方法 clone`**。原单测只断言"结果里不含 `E-1001`"（`contains` 式），
+      所以这三条一直在，只是从没被看见。后果不止用例：§4.7 的"正反 20 例"里 clone 那一档、
+      §6.7 `#[derive(Clone)]` 的语义、以及 F12（owned 移动没有运行时入口）都缺这一条路。
+      验收：把 `clone` 接进 §10 的 std 表（或裁定 §4.7 的解除形状走别的路径），令
+      `conformance/cases/4.7-ownership/4.7-ownership-0002` 从 Blocked 转 Pass 并删掉它的 `defect` 标记。
+
+- [ ] F35 **`#[derive(...)]` 生成的体调 §10 的 std 表里不存在的符号 ⇒ 任何 derive 都过不了 `infy check`**（E1 轮确认）：
+      `derive.rs:1165` 发 `std::fmt::format_struct`（`repr(C)` 时 `format_tuple`）、`:1176/1183` 发
+      `std::fmt::format_unit`，而 §10 的 std 签名表里**一条 `std.fmt.format_*` 都没有**（同 F21 的 `std.test` 那一族）。
+      实测最小形状 `#[derive(Debug)] pub struct Job { pub id: u32, }` → `E-0053 缺少返回值` +
+      `E-0101 调用未声明的函数 format/format_struct` ×3 + `E-0110 无法解析字段 id` ×4；enum 那一档再多出
+      `E-0070 match 不穷尽` ×2。换 package 名、加 `import "std/fmt" as fmt;`、补 `[[bin]]`/`[[lib]]` 都不变
+      （本轮逐条试过）。**为什么此前没人知道**：`derive.rs` 的 57 项单测断言的全是生成物的**文本**
+      （`expand_derives` 的产物从不被阶段 [2]-[4] 回读），而 `examples/tour` 的 `Phase`/`Job`/`Fail`
+      **根本没写 `#[derive]`** ⇒ "derive 已通"这一族声称从来没有端到端证据
+      （认法 = 经验库 `infy-unreachable-implementation-branch`）。
+      验收：给 §10 补 `std.fmt.format_struct`/`format_tuple`/`format_unit` 的签名（或裁定 derive 发别的形式），
+      令 `conformance/cases/6.7-derive/6.7-derive-0001` 与 `-0003` 从 Blocked 转 Pass 并删标记；
+      并给 derive 加一条"生成体再过一次 `analyse`"的常驻测试（否则下一族同形状还会重现）。
+
+- [ ] F36 **同一根因被两个阶段各报一次诊断**（E1 轮确认）：`let union = 1u32;` 报 **2 条 `E-0020`**
+      且标题不同（一条"保留字 `union` 不可作标识符"、一条"保留字作标识符"）；`#[derive(Nope)]` 报
+      **2 条 `E-0410`**。§9.2 没有"同一违规报两次"的规定，而 §12 的用例比较的是**诊断码全集** ⇒ 重复报告
+      直接改变通过率，也让 `--diag-json` 的消费者看到幻影条目。与 D4(3) 轮修掉的 `verify_func` 重复报告同族
+      （那次根因 = 检查写在走查里 + 后继被重复压栈）。
+      验收：每个形状只报一条（后者降级为 note 或合并），令
+      `conformance/cases/2-lexical/2-lexical-0010` 与 `conformance/cases/6.7-derive/6.7-derive-0002` 转 Pass、删标记。
+
+- [ ] F37 **未知 `@` 嵌入前缀（`E-0702`）之后级联 8 条 `E-0053`**（E1 轮确认）：
+      `fn main() { let v = @forth(a = 1) { 1u32 }; }` 实测 `E-0702` ×1 + `E-0053` ×**8** —— 一条词法错误
+      把整条语句乃至整个文件炸成"期望顶层声明"，而 §9.6 只给了每码上限（`MAX_PER_CODE`），没有相邻去重
+      也没有恢复点。影响面：§12.1 要求正反例成对，级联会让每条反例的期望里混进无关码
+      （本仓库这条只能挂 `defect` 记成 Blocked）。
+      验收：`E-0702` 之后把该嵌入表达式作为一个整体恢复（跳到 `;` 或块尾），令
+      `conformance/cases/2-lexical/2-lexical-0013` 转 Pass；顺带审 `lexer.rs` 其它"一个错误吞一行"的恢复点。
+
+- [ ] F38 **§1.3 领域中立的扫描有函数、没有调用点，而黑名单文件不在仓库里**（E1 轮确认）：
+      `pkg::domain_neutrality_violations`（`pkg.rs:1171`）实现并单测了 §2.10 的 NFKCCaseFold 匹配，但
+      **全仓库没有任何 CLI 调用点**（`grep -rn domain_neutrality src/` 只有定义与该函数自己的测试），
+      而规范 §12.1 点名的 `std/domain_terms.txt` 根本不存在（`find . -name domain_terms*` 空）。
+      ⇒ §1.3 要求的"静态扫描 `std.*` 与语言层导出符号表，命中黑名单即判不合规"在 `infy check`/`infy build`/
+      `infy conformance` 三条路上都不发生，`conformance/cases/1.3-domain-neutral/` 因此是空分类（目录留着、缺口打印）。
+      验收：把黑名单落成仓库内文件（并在 §10 的 std 表 + `stdlib.rs` 的导出符号上真跑一次），
+      加 `infy conformance` 的一档或 `infy check` 的一条诊断，再为该分类补正反用例。
+
 ## 2. 当前指针
 
-> **下一轮第一件事：E1 —— `conformance/cases/**` 的 §12 用例集**（§1 的第一个 `[ ]`；阶段 A/B/C/D 全部
-> 已勾，E 是"唯一能声称兼容的东西"）。三条现成的路，别重新发明：
-> (1) **用例来源就是已有的 505 项单测**：E1 写的就是"从已有的单元测试里搬运成外部用例"，而每条测试的
->     doc comment 已经指名条款（§4.1/§4.2/§8.2/§7.6.4/§7.7.2…）⇒ 先做一份"码 → §12 分类"的搬运清单；
->     **分类目录是文件名的真值源，不是测试模块名**（§12.1/§12.2/§12.5 才是分类）。
-> (2) `src/conformance.rs` 是 1 行占位 ⇒ E1 要新建用例的读入与匹配，E2 再要 `infy conformance --report` 的
->     **逐分类**通过率（§12.5 明写"只报总数视为不合规"）。该命令现在走"未实现"臂 ⇒ exit 1；D2 轮的同一族
->     教训直接适用（经验库 `infy-unreachable-implementation-branch`：**上游全绿对"命令存不存在"没有预测力**）。
-> (3) **措辞红线**：E3 之前任何文档不得出现"INFY v2.0 兼容"；"两侧装载期校验等价"仍不许讲
->     （F26 前半，清单 = D-42 (a)–(e)）。
+> **下一轮第一件事：E2 —— `infy conformance --report` 的逐分类通过率**（§1 的第一个 `[ ]`）。
+> 地基 E1 轮已打好，E2 只剩命令行那一层，四条现成的路，别重新发明：
+> (1) **数据面已备好**：`conformance::load_cases` / `run_case` / `tally` / `run_corpus` + `Tally.shortfall()`；
+>     `tally` 的返回值**按 `CATEGORIES` 顺序、含空分类**（`conformance::tests::tally_reports_every_declared_category_including_the_empty_ones`
+>     钉住），§12.5 的"只报总数视为不合规"就靠这一条挡。落地点 = `cli.rs` 把 `conformance` 从"未实现"臂里摘出来
+>     （D2 轮 `ifbc` 那一轮的接线形状可照抄：输入形态 + 渲染 + 退出码归属三件套）。
+> (2) **Blocked 不是 Pass 也不是 Fail**：报告必须三档分列（`Status::{Pass,Fail,Blocked}`）并把 `defect` 编号打出来
+>     （现有 6 条挂 F34/F35/F36/F37）。把"缺构建期工具"或"已知未修"折进通过率分子 = 谎报；
+>     `ifbc_empty_region_text` 那一族的教训（**空/缺最容易被读成"查过了没问题"**）在这里同样成立。
+> (3) **退出码归属需要裁定**（§13.4 没给 `conformance` 分配过码）：建议全 Pass = 0 / 有 Fail = 2 /
+>     有 Blocked 时**不许**给 0，并把逐分类数字打全。裁定写进新偏差 **D-48**。
+> (4) **E3 的表可以直接从命令生成**：`--report` 稳定后把逐分类数字落进 `docs/coverage.md` 与 README，
+>     并显式列"距 100% 还差哪些类"。**措辞红线不变**：E3 之前任何文档不得出现"INFY v2.0 兼容"；
+>     "两侧装载期校验等价"仍不许讲（F26 前半，清单 = D-42 (a)–(e)）。
+> **E1 轮留下的现成件（别再造）**：`cli::check_verdict(root, scope) -> Option<Verdict{codes, exit, rendered}>`
+> = `infy check` 的同一条链（`load_scoped` + `analyse` + 干净时 `ingest_b_track`），E2 不要写第二套前端；
+> `CATEGORIES`（20 行）与 `CATEGORY.toml` 的双向锁（改表 → `INFY_REGENERATE_CATEGORIES=1` 重渲染；
+> 不改而漂 → 加载失败）；`conformance::tests::probe_corpus_dump_verdicts` 是**作者工具** =
+> `INFY_CONFORMANCE_PROBE=1 cargo test --offline --lib -- --nocapture conformance::tests::probe_corpus`
+> 每行打 `id / 实得码 / exit / 结论`，新用例的期望先在这里量、再对照它声称的条款**审**，不许盲抄。
+> **E1 轮新登记的缺口 F34–F38**（E2 用不到，但别当已完成）：F34 `Vec::clone` 不在 §10 表里；
+> **F35 任何 derive 都过不了 `infy check`**（生成体调 `std.fmt.format_*` 而 std 表没有 ⇒ derive 的 57 项单测
+> 全是文本断言、生成体从未被 [2]-[4] 回读，`examples/tour` 也没写 derive）；F36 同一根因两阶段各报一次；
+> F37 未知 `@` 前缀级联 8 条 `E-0053`；F38 §1.3 领域扫描零调用点 + `std/domain_terms.txt` 不在仓库。
+> **用例格式的坑**：`.gitattributes` 的 `conformance/cases/** -text` 别删（`core.autocrlf=true` 把行尾变成
+> CRLF，而 §2.1 的 `W-0001` 就把行尾当被测面 ⇒ 每条用例多一条诊断）；B 轨用例的清单写 `@PY_MINOR@`
+> 而不是硬编码 minor（否则用例集在测机器而不是测实现）；`expect = []` 必须显式写（空是声称、缺是漏）；
+> 编号 = 目录名且**只增不复用**（§12 明令"已有用例的编号与期望不得改变"）。
 > **D3 轮留下的 A 轨余项（E1 用不到，但别当已完成）**：**F31**（`#[repr(C)]` struct / ADT 不透明指针没有
 > 跨边界落点 ⇒ §7.6.1 样例自己的 `-> *mut DecHandle` 过不了 = 规范样例不能构建）、
 > **F32**（§7.6.2 工具链发现/注册、`recipe.toml` 审计、版本核对 `E-0604` 与 `--allow-toolchain-drift` 全未接，
@@ -1008,10 +1116,9 @@
 >
 > **推送欠账**：只认现算 `git rev-list --count <远端SHA>..HEAD`；远端 SHA 用
 > `gh api repos/YuanShenNiuBi1314/infinity-lang/git/refs/heads/toolchain --jq .object.sha` 回查，
-> `Everything up-to-date` 不算成功。**D3 轮（cron-19）两次推送全败**（`Recv failure: Connection was reset`
-> → 换 `-c http.version=HTTP/1.1` 后 `Failed to connect to github.com:443`），同一时刻 `gh api` 正常 ⇒
-> 仍是 `github.com:443` 抖动。**远端 `toolchain` = `1bc2206…`（cron-18 那批）** ⇒ 现算欠账 =
-> `e669834`（代码）+ `b785421`（做账）+ 本行的 push 记录提交 = **3** ⇒ **下一轮开头先补推**。
+> `Everything up-to-date` 不算成功。**cron-20 轮开头第 1 次推送即成功**（`1bc2206..ea76ab9`），`gh api` 回查
+> 远端 = 本地 HEAD ⇒ cron-19 欠的 **3** 个提交（`e669834` + `b785421` + `ea76ab9`）已清，
+> 本轮的提交推完再现算。
 > `github.com:443` 仍是**间歇**不通而不是坏：C4/C5/D4(1)/(2)/(3)/cron-17/D2
 > 都第 1 次即成、C3 第 6/7 次、cron-12/cron-16/cron-19 全败 ⇒ 先推一次、失败再试一次即停，连败时首个候选
 > `git -c http.version=HTTP/1.1 push origin HEAD:toolchain`（cron-19 两条都试过，都败）。

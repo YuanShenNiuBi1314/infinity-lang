@@ -1,0 +1,7 @@
+id = "2-lexical-0008"
+category = "2-lexical"
+clause = "§2.2"
+title = "约束名不在 §2.2 的封闭集里 => E-0012；被排除的文件不掺 E-0600"
+kind = "check"
+expect = ["E-0012"]
+exit = 2

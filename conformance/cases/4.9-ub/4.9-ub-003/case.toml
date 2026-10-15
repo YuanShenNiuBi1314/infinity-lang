@@ -1,0 +1,7 @@
+id = "4.9-ub-003"
+category = "4.9-ub"
+clause = "§4.1"
+title = "UB-005 使用未声明的标识符"
+kind = "check"
+expect = ["E-0101"]
+exit = 2

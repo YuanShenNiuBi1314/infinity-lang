@@ -1,0 +1,7 @@
+id = "2-lexical-0012"
+category = "2-lexical"
+clause = "§2.10"
+title = "注释里的方向控制字符仍算不可见字符（字符串之外一律 E-0052）"
+kind = "check"
+expect = ["E-0052"]
+exit = 2

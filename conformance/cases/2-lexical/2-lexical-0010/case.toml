@@ -1,0 +1,8 @@
+id = "2-lexical-0010"
+category = "2-lexical"
+clause = "§2.4"
+title = "保留但未使用的字不能当标识符"
+kind = "check"
+expect = ["E-0020"]
+exit = 2
+defect = "F36"

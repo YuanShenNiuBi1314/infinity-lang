@@ -1,0 +1,7 @@
+id = "3-grammar-0003"
+category = "3-grammar"
+clause = "§3.12"
+title = "match 臂以逗号分隔、尾逗号合法（正例）"
+kind = "check"
+expect = []
+exit = 0

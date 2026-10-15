@@ -1,0 +1,7 @@
+id = "2.8-literals-0002"
+category = "2.8-literals"
+clause = "§2.8"
+title = "小数点后紧跟下划线"
+kind = "check"
+expect = ["E-0041"]
+exit = 2

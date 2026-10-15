@@ -1,0 +1,7 @@
+id = "7.6-a-track-0002"
+category = "7.6-a-track"
+clause = "§7.6.4"
+title = "返回裸指针而不写 #[owns]/#[borrows]（UB-010 的移交判据）"
+kind = "check"
+expect = ["E-0723"]
+exit = 2

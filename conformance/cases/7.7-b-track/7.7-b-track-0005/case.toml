@@ -1,0 +1,8 @@
+id = "7.7-b-track-0005"
+category = "7.7-b-track"
+clause = "§7.7.2"
+title = "动态代码生成 builtin eval => E-0711 而不是能力表缺失"
+kind = "check"
+expect = ["E-0711"]
+exit = 2
+requires = ["python"]

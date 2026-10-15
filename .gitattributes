@@ -3,3 +3,7 @@
 runtime/fixtures/*.bin     binary
 runtime/fixtures/*.can.txt -text
 runtime/fixtures/*.ver.txt -text
+# §12 用例集（E1）：`-text` = 两个方向都不做换行转换。
+# 这台机 core.autocrlf=true，检出时会把 conformance/cases/**/*.infy 变成 CRLF，而 §2.1 的 W-0001
+# 就把行尾本身当被测面 —— 于是每条用例都多出一条诊断、且故意写 CRLF 字节的那两条正反例整个失效。
+conformance/cases/**         -text

@@ -1,0 +1,7 @@
+id = "2-lexical-0001"
+category = "2-lexical"
+clause = "§2.1"
+title = "行尾用裸 CR 而不是 LF"
+kind = "check"
+expect = ["E-0003"]
+exit = 2

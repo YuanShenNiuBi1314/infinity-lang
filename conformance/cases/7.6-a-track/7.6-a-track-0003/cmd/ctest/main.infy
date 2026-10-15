@@ -1,0 +1,22 @@
+#![entry_chain = "Dec"]
+
+package ctest
+
+#[link(name = "decoder", static = true, toolchain = "cc")]
+extern "C" {
+    fn dec_mark(v: u32) -> u32;
+}
+
+chain Dec {
+    step();
+}
+
+fn step() -> u32 {
+    @c(name = "decoder") {
+        #include <stdint.h>
+        uint32_t dec_mark(uint32_t v) {
+            return v + 1;
+        }
+    }
+    dec_mark(41u32)
+}

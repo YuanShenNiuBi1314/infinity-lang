@@ -1,0 +1,8 @@
+id = "6.7-derive-0002"
+category = "6.7-derive"
+clause = "§6.6"
+title = "derive 表之外的名字走属性封闭表的 E-0410；同一形状双报 = F36"
+kind = "check"
+expect = ["E-0410"]
+exit = 2
+defect = "F36"

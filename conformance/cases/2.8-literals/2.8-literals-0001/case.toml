@@ -1,0 +1,7 @@
+id = "2.8-literals-0001"
+category = "2.8-literals"
+clause = "§2.8"
+title = "数字里连续两个下划线"
+kind = "check"
+expect = ["E-0040"]
+exit = 2

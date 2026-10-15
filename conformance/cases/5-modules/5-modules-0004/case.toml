@@ -1,0 +1,7 @@
+id = "5-modules-0004"
+category = "5-modules"
+clause = "§5.3"
+title = "导入清单 [dependencies] 里没有的 module"
+kind = "check"
+expect = ["E-0201"]
+exit = 2

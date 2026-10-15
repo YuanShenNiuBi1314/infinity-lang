@@ -1,0 +1,5 @@
+slug = "11.1-host-protocol"
+table = "§12.5"
+title = "§11.1–§11.4 宿主协议"
+check = "三步握手失败码、串行化锁与 FIFO 不互锁、镜像表 ID 一致性"
+required = "60"

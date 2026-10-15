@@ -1,0 +1,8 @@
+id = "4.7-ownership-0002"
+category = "4.7-ownership"
+clause = "§4.7"
+title = "正例：clone 之后再各自使用（§10 的 std 表里没有 clone = F34）"
+kind = "check"
+expect = []
+exit = 0
+defect = "F34"

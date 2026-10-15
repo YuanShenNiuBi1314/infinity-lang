@@ -1,0 +1,6 @@
+#![infy_version = "2.0"]
+
+package case
+
+fn f(a: u64, b: u32) -> u64 { a + b }
+fn main() { }

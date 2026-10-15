@@ -1,0 +1,7 @@
+id = "2.8-literals-0008"
+category = "2.8-literals"
+clause = "§2.9"
+title = "raw 串没数对分隔符：未闭合 + 语句层的两条后果"
+kind = "check"
+expect = ["E-0010", "E-0053", "E-0053"]
+exit = 2

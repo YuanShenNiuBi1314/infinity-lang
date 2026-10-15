@@ -1,0 +1,7 @@
+id = "4.7-ownership-0005"
+category = "4.7-ownership"
+clause = "§4.7.3"
+title = "返回类型里的裸引用没有可推断的输入生命周期 => E-1003"
+kind = "check"
+expect = ["E-1003"]
+exit = 2

@@ -1,0 +1,7 @@
+id = "8-chains-0002"
+category = "8-chains"
+clause = "§8.2"
+title = "正例：同一形状的 goto 锚点在 §14 导览里存在"
+kind = "check"
+expect = []
+exit = 0

@@ -24,7 +24,7 @@ infy test             # §5.9：测试构建（`*_test.infy` 与 `tests/…` 只
 infy doc              # 未实现：notice + exit 1
 infy ifbc dump <产物|镜像> [--canonical]   # §7.8.4：反汇编；--canonical = 与 C 侧同一份双侧文本（D2 轮）
 infy ifbc verify <产物|镜像> [--all-errors] # §7.8.3 六项装载期校验：默认只报首个（D.10），阻断结论 exit 2；`.inf ifbc` 恒空时明打"0 个 B 轨模块"（F29）
-infy conformance --report   # 未实现：notice + exit 1
+infy conformance --report   # 未实现：notice + exit 1（用例集与运行器已在 E1 轮落地，缺的只是报告层 = E2）
 ```
 
 ## 规范覆盖状态（如实记录）
@@ -53,9 +53,9 @@ infy conformance --report   # 未实现：notice + exit 1
 | §7.8 / 附录 D | IFBC 编码、反汇编、装载期六项校验（`R-0704`…`R-0708`）、UB-019 | 🟡 **D4(1)+D4(2)+D4(3) 已把两侧改成 D-38 裁定的同一份线格式，并且读成同一份文本**：`runtime/fixtures/ifbc_rust_writer.bin` 是 Rust 写入器的逐字节输出，C 侧用生产装载器读回并**执行**其中函数；D4(3) 另加两份规范化文本入口（C 侧 `infy_ifbc_dump_canonical`/`infy_ifbc_verify_canonical`，Rust 侧 `ifbc::dump_canonical`/`ifbc::verify_canonical`）与三份共用夹具 —— **附录 D 全部 opcode 的逐指令反汇编相等**、**校验矩阵 10 条 `(code, func, off)` 逐条相等**（Rust 侧 22 项单测 / C 侧 180 断言）。当场抓到 `coro.resume`/`coro.throw` 的 C 侧操作数个数（= 指令流错位）与 D.9 助记符命名，外加本侧 `verify_func` 的重复报告缺陷，全部记入偏差 **D-42**；**D2 轮把这份比对抬到命令行层** = `infy ifbc dump|verify`（§7.8.4/§12.3），命令的 `--canonical` 输出与 C 侧渲染的夹具逐字节 `cmp`，规范未定的四处（输入形态 / `--canonical` 是哪份文本 / 拒绝的退出码 / 一个区里多模块怎么分帧）记偏差 **D-45**。**仍 🟡**：两侧装载期校验结论仍有 D-42 (a)–(e) 五类不可比（F26 未消）、六条间隙指令在 C 侧装载通过而执行显式拒绝（F27 / 偏差 D-41）、`.inf ifbc` 也仍恒空（阶段 [6a] 已产出镜像，缺阶段 [8] 的调用通道 = F29 ⇒ `infy ifbc verify <产物>` 今天只能报"0 个 B 轨模块"） |
 | §7.6 A 轨（编译型语言嵌入） | `#[link]` 与 `@c` 成对、`infy_binding.h` 反向生成、`infy_e_<name>_<8hex>` 包装、§7.6.4 跨边界类型封闭表、UB-010 移交判据（`E-0720`/`E-0721`/`E-0722`/`E-0723`） | 🟡 D3 轮把 `src/atrack.rs` 从 1 行占位落成绑定的**唯一真值源**（**27 项**单测）：配对两个方向都报 `E-0720`（`sema` 那半边一直在，`#[link]` 落空这半边此前从不报）、`extern "C"` 之外的 ABI 与 `@cpp`/`@rust`/`@zig` 点名拒绝；包装符号哈希按规范化**签名块**（裁定见偏差 **D-46(a)(b)**）；绑定头 + `a_track/<name>.c` 由编译器写、`cc` 编译并**链接进产物**，最小 `@c` 单元端到端被调通（`coverage.md` P25/P26，程序 stdout = `dec_mark(41) -> 42`）。`E-0723` 此前**全仓库零发点**，现在是 UB-010 的移交判据（只落返回方向，D-46(c)）。**仍 🟡**：§7.6.4 里 ptr+len 展开 / null→`Option` / `Result` 出参 / 回调 ctx / `#[repr(C)]` struct 按值这五类**规范允许但没有发射形态**的行以 `§7.6.4` 指名拒绝而不是发码（D-46(e)），于是 §7.6.1 样例自己的 `-> *mut DecHandle` 过不了（**F31**）；§7.6.2 的工具链注册 / `recipe.toml` / 版本核对未接（**F32**）；§7.6.3 项 3 的非标量 thunk 与项 5 的调试映射、§7.6.1 的 `W-0720` 与链接期 `E-0604` 映射、§7.6.5 反向导出（`E-0724`）、§7.6.6 `isolation = "process"` 全未做（**F33**） |
 | §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ⬜ `src/host.rs` 是占位文件 —— **未实现**（偏移表本身已由 `src/hir.rs::env_table` 落成并有金样） |
-| 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32335 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 180 断言 B2 轮起也链生产 `infy_rt.c`（同为 180/180，输出逐字节相同），且 D4(3) 轮起两侧读**同一份规范化文本**。仍不等于 §12 合规：外部用例为 0 |
+| 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32335 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 180 断言 B2 轮起也链生产 `infy_rt.c`（同为 180/180，输出逐字节相同），且 D4(3) 轮起两侧读**同一份规范化文本**。仍不等于 §12 合规：外部用例已有 83 条而 §12 要求 2300（P28/E1） |
 
-`cargo test --offline --lib` 目前 **505 passed / 0 failed**（`cargo check --offline --lib` 0 error / 50 warning；
+`cargo test --offline --lib` 目前 **516 passed / 0 failed**（另有 **83 条 §12 外部用例**：77 Pass / 6 Blocked / 0 Fail，见下）（`cargo check --offline --lib` 0 error / 50 warning；
 D4(1) 轮把 `ifbc` 从 6 项抬到 **19** 项，并删掉 `CodeBuilder` 的一个死字段，告警 −1；D4(2) 轮 +1 = 钉
 "Rust 写入器的字节 == 已提交夹具"；D4(3) 轮 +2 = `ifbc` **22** 项，钉"本侧渲染的规范化文本 == C 侧渲染并
 提交的那份"；D1(1) 轮 +23 = `btrack` 从 **0** 到 **23**、D1(2) 轮到 **30** 项，钉 §7.7.1 探针、§7.7.2 五个扫描项、§7.7.3 版本锁
@@ -73,7 +73,7 @@ D4(1) 轮把 `ifbc` 从 6 项抬到 **19** 项，并删掉 `CodeBuilder` 的一�
 C3 轮新建的 `artifact` 直接带 **18** 项（§7.4 容器逐字段读回、七个拒绝理由各一条、§7.3 九类输入逐个绑定、
 `INFY_META_OFF_*` 钉回冻结头文本），C4/C5 轮把 `cli` 抬到 **16** 项（`infy run`/`infy test` 的端到端退出码与逐字节转发、
 §5.9/§2.2 的文件选择、§5.8 的 dirhash 不随构建范围变、`--cov`/`--arg`/`--feature` 的显式拒绝），仍在进行中或未开始的只剩
-`host`、`conformance`、`doc`（`atrack` 于 D3 轮从 1 行占位新建到 **27** 项，并第一次让 `infy build` 真把 C 源编进产物；
+`host`、`doc`（`conformance` 于 E1 轮从 1 行占位新建到 **11** 项 + 83 条外部用例；`atrack` 于 D3 轮从 1 行占位新建到 **27** 项，并第一次让 `infy build` 真把 C 源编进产物；
 `btrack` 于 D1(1) 轮从 0 抬到 **23** 项，但它锁的是**库内**的
 探针/扫描/降级路径 —— 阶段 [6a] 至今没有 CLI 调用点；`hir` 于 C1 轮补了 20 项声明层金样，语句/表达式级 IFIR 仍未落 ——
 阶段 [8] 是 AST→C 直接发射）。
@@ -86,10 +86,10 @@ C 侧另有两份独立 harness，**两份都直接链生产 `runtime/infy_rt.c`
 相同。两份锁点并存：字节夹具 `runtime/fixtures/ifbc_rust_writer.bin` 交给**生产装载器**读回并执行
 （Rust 写 ↔ C 读+跑），而 `ifbc_all_ops.bin` / `ifbc_verify_matrix.bin` 的 `.can.txt` / `.ver.txt` 由 **C 侧**
 渲染、Rust 侧断言同一份文件（两侧读同一文本，谁漂谁红）。
-以上都只说明"已写用例自洽"，**不等于 §12 合规**（外部用例仍为 0）。
+以上都只说明"已写用例自洽"，**不等于 §12 合规**：外部用例（§12 的 `cases/**`）E1 轮已有 **83 条 / 17 个分类**，对 §12 要求的 2300 是 3.6%，而 `infy conformance --report` 的逐分类通过率是 E2。
 
 明确未实现（不使用即报错，不做静默降级）：
-`src/host.rs`（§11 `HostApi`）、`src/doc.rs`（`infy doc`）、`src/conformance.rs`（§12 用例集）——这三个文件仍是 1 行占位；
+`src/host.rs`（§11 `HostApi`）、`src/doc.rs`（`infy doc`）——这两个文件仍是 1 行占位（`src/conformance.rs` 的占位状态在 E1 轮结束：§12 分类表 + 用例格式 + 运行器，11 项单测 + `conformance/cases/**` 83 条用例）；
 A 轨只落了 `@c` + `cc` + 标量/指针跨边界那一半（§7.6.2 工具链注册、§7.6.5 反向导出、§7.6.6 进程隔离未做，见 **F32/F33**）；
 `infy build` 的阶段 [10]（产物签名/sumdb 校验段与运行时自校验比对，§5.8）**未做** —— 容器里写了依赖 dirhash 清单，但没人拿它去比对；
 `src/hir.rs` 与 `src/codegen.rs` 不再是占位文件：前者只落**声明层**（类型布局、链节点表、`env` 偏移、符号名），
@@ -105,8 +105,7 @@ null→`Option`、`Result` 出参、回调 ctx、struct 按值）、`event` 调�
 `line_map`/`exception_table` 的规范字节格式（缺口 C-7 ①，本实现自行固定并写入 `runtime/IFBC.md`）。
 
 **因此本实现不声称「INFY v2.0 兼容」**：§12 要求 `infy conformance --report` 输出**逐分类**通过率、用例集共 2300 项
-（§12.1 的 1244 + §12.2 的 256 + §12.5 的 800）。当前外部用例为 **0**，`infy conformance` 显式报未实现，
-所以通过率**不可测**；`docs/coverage.md` 现在是逐条款"实现 × 证据"矩阵，合规通过率待 E1/E2 落地后追加。
+（§12.1 的 1244 + §12.2 的 256 + §12.5 的 800）。E1 轮交付的是**用例格式、分类表与运行器**，首批 83 条用例覆盖 17 个分类（3.6%），三个分类结构性地还没有用例（`§1.3` 的领域黑名单 = F38、`§10.9–§10.14` 要运行期而程序没有 stdout 通道 = F19、`§11.1–§11.4` 的 `HostApi` 仍是占位）；`infy conformance --report` 仍是显式未实现（**E2**，exit 1），所以**逐分类通过率还没有对外上报**，`docs/coverage.md` 目前是逐条款"实现 × 证据"矩阵 + P28 的用例集实测行。
 
 ## 目录
 
@@ -114,6 +113,7 @@ null→`Option`、`Result` 出参、回调 ctx、struct 按值）、`event` 调�
 src/            工具链（Rust，零依赖）。测试是各模块内的 `mod tests`，没有顶层 tests/ 目录
 runtime/        内嵌运行时与 IFBC 虚拟机（C11）+ ABI 文档
 capabilities/   §7.7.2 能力表（IFBC-CAP-<lang>-<minor>.toml）
+conformance/    §12 合规用例集：cases/<分类>/<编号>/{case.toml + 源文件}，格式见 conformance/README.md
 spec/           INFY Language Spec v2.0 全文
 docs/           覆盖矩阵（coverage.md）、构建状态（status.md）、规范偏差、运行日志
 examples/       §14 语言导览的可编译样例

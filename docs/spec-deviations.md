@@ -999,3 +999,51 @@ A 轨端到端测试时撞上，报在 `unsafe { … }` 那一行，看起来像
 A 轨现在只驱动 `$CC`/`--cc` 那一个 `cc`）、**F33**（§7.6.3 项 3 的边界 thunk 只有标量转发、项 5 的外部行号→
 INFY 诊断位置未做、§7.6.1 的 `W-0720`（源码导出而签名未声明）与“签名声明而源码未导出 → 链接期 `E-0604`”
 没有映射、§7.6.5 反向导出与 `E-0724`、§7.6.6 的 `isolation = "process"` 全未实现）。
+
+## D-47 §12 给了分类、数量与"检查"列，却从未定义**一个用例长什么样**：目录结构、期望的表示法、编号规则、缺工具时算什么，全部由此条确定
+
+§12 全章（spec:1845–1899）只写了三件事：分类表（§12.1/§12.2/§12.5，合计 2300）、§12.3 的产物与构建
+硬校验、§12.4 的等价性矩阵，以及"`infy conformance --report` 必须输出**逐分类**通过率"。它没有说
+用例是什么形态（单文件还是目录）、期望码怎么写、编号规则（只说了"已有用例的编号与期望不得改变"）、
+也没有说**构建期工具不在场时**一条 §7.7 的用例算通过还是算失败——而 §7.7.3 自己把"解释器在场"列为
+构建期前提。下列八项是本实现选定的唯一确定形态。
+
+1. **(a) 一个用例 = 一个目录**：`conformance/cases/<分类>/<编号>/`，内含 `case.toml`（期望）与
+   源文件。不采用"把期望写进被测源码的注释里"（Rust `compiletest` / CPython 那一流派），因为 §12.1
+   的分类里有"注释"（§2.5），§12.5 的 §9.5 分类里明写要检查"注释保留"——期望若以注释承载，
+   这两个分类的用例会把自己的被测面吃掉一半。
+2. **(b) 分类的真值源是代码不是目录**：`src/conformance.rs::CATEGORIES` 逐字抄三张表
+   （`slug`/`table`/`title`/`check`/`required`，其中 `check` 列去掉 markdown 强调符号），
+   `CATEGORY.toml` 是它的**渲染产物**（`INFY_REGENERATE_CATEGORIES=1` 才重写，方向分工与 IFBC
+   夹具同一族）。加载器两个方向都拦：表里有的分类没有目录 → 报错（空目录靠 `CATEGORY.toml` 存活，
+   git 存不了空目录）；目录不在表里 → 报错（分类名拼错会让整目录用例静默消失，正是 §12.5 要防的）。
+3. **(c) 期望只比较诊断码的排序多重集 + §13.4 退出码**，不比较位置、不比较 §9.2 的文本。
+   位置与文本另有 `diag`/`fmt` 单测钉住；把它们放进用例 = 一处渲染改动红一批无关用例。
+   正例必须显式写 `expect = []` —— 空是**声称**，缺字段是**漏**，加载器拒后者。
+4. **(d) 编号 = 目录名，只增不复用**，且 `case.toml` 的 `id` 必须等于目录名（不一致 = 加载错误）。
+   §12 的"编号不得改变"落在这三条上：移动一个用例=改编号=违规，改名会被拦。
+5. **(e) 构建期工具不在场 = 第三种结论"阻塞"**，既不记通过也不记失败（`requires = ["cc"|"python"|"lua"]`）。
+   §7.7.3/§7.6.2 把工具在场列为前提，而 §12.5 要求逐分类通过率——把缺解释器的 B 轨用例记成通过是
+   谎报，记成失败是把环境说成实现。
+6. **(f) `defect` 标记把"已知未修"与"通过"分开**：挂着 `defect = "F11"` 这类标记的用例，其期望仍是
+   **规范**给的期望（绝不按当前实现写期望），不达期望记为阻塞；一旦它通过了，加载它的那条测试直接变红
+   并要求删标记。这一条是为了禁止"用 用例 记录 缺陷 当 通过"的第二种谎报。
+7. **(g) `kind` 三档**：`check`（阶段 [1]-[5] + 干净时的 [6a]）、`fmt-idempotent`（§9.5 二次格式化
+   逐字节相同）、`ifbc-verify`（§7.8.3 六项校验，退出码沿用 D-45(c) 的归属：有阻断 = 2）。
+   §12.3 的黄金文件/可复现构建与 §12.4 的等价性矩阵**不进 `cases/**`**：它们是命令行为的断言
+   （现有锁点 = `infy build --verify-reproducible`、`infy ifbc dump --canonical` 与 C 侧 `.can.txt` 的
+   `cmp`），塞进用例格式只会造出第二套声称。
+8. **(h) 运行器必须走 `infy check` 自己那条链**：`cli::check_verdict`（`load_scoped` + `analyse` +
+   干净时 `ingest_b_track`）是唯一入口，运行器不复写前端。D1(2)/D2 两轮都实证"模块自己全绿对
+   CLI 能不能走到它没有预测力"，用例集若跑在私有管道上，`infy check` 坏了照样全绿。
+
+锁点 = `conformance::tests::the_category_table_adds_up_to_the_specs_own_totals`（1244/256/800/2300
+与 20 行，直接抄 §12 的合计句）、`category_slugs_and_directories_are_unique_and_complete`、
+`the_corpus_loads_without_a_single_format_error`、`every_case_in_the_corpus_meets_its_expectation_or_is_marked_blocked`、
+`a_case_that_misses_its_expectation_fails_loudly_instead_of_being_skipped`（码表外的期望码由**加载器**拒、
+码表内但不可能产生的期望码由**运行器**判失败——证明这套东西能变红）、
+`an_unknown_category_directory_is_a_load_error_not_a_silent_drop`、
+`a_case_id_that_does_not_match_its_directory_is_a_load_error`、
+`tally_reports_every_declared_category_including_the_empty_ones`、
+`the_default_manifest_is_the_one_the_runner_writes`。
+

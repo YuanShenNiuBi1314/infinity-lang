@@ -1,0 +1,6 @@
+#![infy_version = "2.0"]
+
+package case
+
+macro_rules! pair { ($a:tt, $b:tt) => { ($a, $b) }; }
+fn main() { }

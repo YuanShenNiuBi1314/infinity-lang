@@ -1,0 +1,7 @@
+id = "5-modules-0002"
+category = "5-modules"
+clause = "§3.1"
+title = "同一份源码补上 package 与 fn main => 无诊断"
+kind = "check"
+expect = []
+exit = 0

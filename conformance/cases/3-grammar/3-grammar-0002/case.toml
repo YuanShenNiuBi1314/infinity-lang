@@ -1,0 +1,7 @@
+id = "3-grammar-0002"
+category = "3-grammar"
+clause = "§4.1"
+title = "枚举判别式不是整数字面量"
+kind = "check"
+expect = ["E-0053"]
+exit = 2

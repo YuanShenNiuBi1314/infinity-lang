@@ -1,0 +1,6 @@
+#![infy_version = "2.0"]
+
+package case
+
+fn f() { var x: u32 = 1u32; let a = &mut x; let b = &mut x; }
+fn main() { }

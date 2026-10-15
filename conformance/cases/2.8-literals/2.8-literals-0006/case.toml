@@ -1,0 +1,7 @@
+id = "2.8-literals-0006"
+category = "2.8-literals"
+clause = "§2.9"
+title = "str 字面量里用字节转义反斜杠 x"
+kind = "check"
+expect = ["E-0047"]
+exit = 2

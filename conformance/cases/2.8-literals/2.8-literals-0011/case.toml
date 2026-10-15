@@ -1,0 +1,7 @@
+id = "2.8-literals-0011"
+category = "2.8-literals"
+clause = "§2.8"
+title = "无后缀十进制宽于 i64"
+kind = "check"
+expect = ["E-0042"]
+exit = 2

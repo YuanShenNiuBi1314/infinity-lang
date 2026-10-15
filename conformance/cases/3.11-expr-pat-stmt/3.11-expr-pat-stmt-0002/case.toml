@@ -1,0 +1,7 @@
+id = "3.11-expr-pat-stmt-0002"
+category = "3.11-expr-pat-stmt"
+clause = "§3.12"
+title = "穷尽之后再加 _ 臂：可达性判断报 W-0070"
+kind = "check"
+expect = ["W-0070"]
+exit = 2

@@ -1,0 +1,5 @@
+slug = "7.7-b-track"
+table = "§12.2"
+title = "§7.7 B 轨"
+check = "能力扫描正反例（每类 `E-0712`）、`E-0711` 动态代码生成拒绝、`.pyc` magic 校验（`E-0713`）、行映射回原语言、`dyn` 边界、`infy ingest py-wheel` 端到端"
+required = "96"

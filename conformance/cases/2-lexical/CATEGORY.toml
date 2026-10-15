@@ -1,0 +1,5 @@
+slug = "2-lexical"
+table = "§12.1"
+title = "§2 词法（含 build 约束）"
+check = "编码、标识符、生命周期记法、字面量、注释、约束表达式"
+required = "96"

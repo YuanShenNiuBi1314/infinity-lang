@@ -1,0 +1,24 @@
+#![entry_chain = "Dec"]
+
+package ctest
+
+#[link(name = "decoder", static = true, toolchain = "cc")]
+extern "C" {
+    fn dec_mark(v: u32) -> u32;
+    fn dec_take(p: *const u8) -> *mut u8;
+}
+
+chain Dec {
+    step();
+}
+
+fn step() -> u32 {
+    @c(name = "decoder") {
+        #include <stdint.h>
+        uint32_t dec_mark(uint32_t v) {
+            return v + 1;
+        }
+    }
+    unsafe { dec_take(0 as *const u8); dec_mark(41u32) }
+    0u32
+}

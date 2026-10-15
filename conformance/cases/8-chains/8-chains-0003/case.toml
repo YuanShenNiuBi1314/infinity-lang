@@ -1,0 +1,7 @@
+id = "8-chains-0003"
+category = "8-chains"
+clause = "§8.4 规则 6"
+title = "绝对节点下标越界"
+kind = "check"
+expect = ["E-0301", "N-0800"]
+exit = 2

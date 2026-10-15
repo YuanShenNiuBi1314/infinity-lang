@@ -1,0 +1,5 @@
+slug = "3-grammar"
+table = "§12.1"
+title = "§3 文法"
+check = "每条 EBNF 规则正反例，含 §3.10 消歧"
+required = "288"

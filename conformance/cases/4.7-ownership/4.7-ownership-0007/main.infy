@@ -1,0 +1,7 @@
+#![infy_version = "2.0"]
+
+package case
+
+struct Acc { pub n: u32 }
+fn work() { }
+chain A { var a: Acc = Acc { n: 0u32 }; work(); { start(chain = A); } }

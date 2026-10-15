@@ -1,0 +1,7 @@
+id = "2-lexical-0004"
+category = "2-lexical"
+clause = "§2.2"
+title = "块注释未闭合"
+kind = "check"
+expect = ["E-0004"]
+exit = 2

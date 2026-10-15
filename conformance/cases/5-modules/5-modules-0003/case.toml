@@ -1,0 +1,7 @@
+id = "5-modules-0003"
+category = "5-modules"
+clause = "§7.4"
+title = "既无 #![entry_chain] 也无 fn main 也无链"
+kind = "check"
+expect = ["E-0600"]
+exit = 2

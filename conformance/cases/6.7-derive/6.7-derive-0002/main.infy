@@ -1,0 +1,7 @@
+#![infy_version = "2.0"]
+
+package case
+
+#[derive(Nope)]
+pub enum Phase { Fetch }
+fn main() { }

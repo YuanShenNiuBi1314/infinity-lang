@@ -1,0 +1,8 @@
+id = "7.7-b-track-0002"
+category = "7.7-b-track"
+clause = "§7.7.1 规则 1"
+title = "u128 形参在 §2 的封闭签名表里没有行"
+kind = "check"
+expect = ["E-0712"]
+exit = 2
+requires = ["python"]

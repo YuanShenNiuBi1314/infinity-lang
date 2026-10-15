@@ -1,0 +1,5 @@
+slug = "5-modules"
+table = "§12.1"
+title = "§5 模块/包/`.infib`/校验"
+check = "目录=包、internal、MVS、循环依赖、dirhash、wheel/源码版等价性"
+required = "144"

@@ -1,0 +1,7 @@
+id = "4-types-ops-0002"
+category = "4-types-ops"
+clause = "§4.2"
+title = "混合整数宽度相加"
+kind = "check"
+expect = ["E-0110"]
+exit = 2

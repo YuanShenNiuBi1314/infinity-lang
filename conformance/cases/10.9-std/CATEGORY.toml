@@ -1,0 +1,5 @@
+slug = "10.9-std"
+table = "§12.5"
+title = "§10.9–§10.14 std 补充"
+check = "无偏 shuffle 序列、`Map` 有序迭代、`Rng` 种子可复现、`ParseIntError.idx`"
+required = "84"

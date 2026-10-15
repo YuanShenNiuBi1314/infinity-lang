@@ -1,0 +1,7 @@
+id = "8-chains-0004"
+category = "8-chains"
+clause = "§8.2"
+title = "start 指向不存在的链"
+kind = "check"
+expect = ["E-0800"]
+exit = 2

@@ -1,0 +1,7 @@
+id = "3-grammar-0001"
+category = "3-grammar"
+clause = "§3.11"
+title = "语句缺少终结符"
+kind = "check"
+expect = ["E-0053"]
+exit = 2

@@ -1,0 +1,7 @@
+id = "7.6-a-track-0003"
+category = "7.6-a-track"
+clause = "§7.6.4"
+title = "调用 A 轨函数而不在 unsafe 块内"
+kind = "check"
+expect = ["E-0721"]
+exit = 2

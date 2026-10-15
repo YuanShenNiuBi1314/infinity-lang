@@ -1,0 +1,13 @@
+[module]
+path    = "example/ctest"
+version = "0.1.0"
+infy    = "2.0"
+
+[profile]
+overflow = "panic"
+opt_level = 0
+a_track = "unsafe-trusted"
+
+[[bin]]
+name = "ctest"
+path = "cmd/ctest"

@@ -1,0 +1,7 @@
+id = "7.6-a-track-0004"
+category = "7.6-a-track"
+clause = "§7.6.1"
+title = "正例：配对齐全、调用在 unsafe 内、返回标量且不需要移交标注"
+kind = "check"
+expect = []
+exit = 0

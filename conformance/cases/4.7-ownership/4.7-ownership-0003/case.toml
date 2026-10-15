@@ -1,0 +1,7 @@
+id = "4.7-ownership-0003"
+category = "4.7-ownership"
+clause = "§4.7.2"
+title = "同一作用域里两个可变借用"
+kind = "check"
+expect = ["E-1002"]
+exit = 2

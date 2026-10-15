@@ -1,0 +1,5 @@
+slug = "8-chains"
+table = "§12.1"
+title = "§8 链与控制流"
+check = "`goto` 编译期解析、节点静态编号、FIFO、多焦点"
+required = "128"

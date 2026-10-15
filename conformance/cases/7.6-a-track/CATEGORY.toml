@@ -1,0 +1,5 @@
+slug = "7.6-a-track"
+table = "§12.2"
+title = "§7.6 A 轨"
+check = "绑定生成、符号命名、所有权映射、缺失工具链必须编译期失败、`isolation=\"process\"` 语义等价"
+required = "96"

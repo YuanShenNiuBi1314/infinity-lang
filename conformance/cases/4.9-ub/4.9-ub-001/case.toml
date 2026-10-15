@@ -1,0 +1,7 @@
+id = "4.9-ub-001"
+category = "4.9-ub"
+clause = "§4.2"
+title = "UB-001 隐式宽度转换：u64 + u32"
+kind = "check"
+expect = ["E-0110"]
+exit = 2

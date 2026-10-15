@@ -1,0 +1,7 @@
+id = "4.10-eval-order-0003"
+category = "4.10-eval-order"
+clause = "§4.6"
+title = "env 的读方向：iter 是 u32、platform 是 str"
+kind = "check"
+expect = []
+exit = 0

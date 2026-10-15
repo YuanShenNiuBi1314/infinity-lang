@@ -1,0 +1,5 @@
+slug = "4-types-ops"
+table = "§12.1"
+title = "§4.1–§4.4 类型与运算"
+check = "隐式转换禁令、溢出策略、`as` 位级语义"
+required = "120"

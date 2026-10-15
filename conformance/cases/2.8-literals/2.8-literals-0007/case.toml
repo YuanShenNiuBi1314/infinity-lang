@@ -1,0 +1,7 @@
+id = "2.8-literals-0007"
+category = "2.8-literals"
+clause = "§2.9"
+title = "字符串未闭合：裸换行与缺闭合引号是两条判断，语句再缺终结符是第三条"
+kind = "check"
+expect = ["E-0009", "E-0009", "E-0053"]
+exit = 2

@@ -1,0 +1,7 @@
+id = "2.8-literals-0004"
+category = "2.8-literals"
+clause = "§2.8"
+title = "浮点字面量溢出到无穷"
+kind = "check"
+expect = ["E-0045"]
+exit = 2

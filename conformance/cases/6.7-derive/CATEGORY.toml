@@ -1,0 +1,5 @@
+slug = "6.7-derive"
+table = "§12.5"
+title = "§6.7–§6.8 derive"
+check = "每个 derive 的生成语义（含 `Ord` 字典序、`Hash` 字段判别式前缀）+ `infy expand` 字节稳定"
+required = "72"

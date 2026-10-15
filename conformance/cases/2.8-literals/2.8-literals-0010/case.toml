@@ -1,0 +1,7 @@
+id = "2.8-literals-0010"
+category = "2.8-literals"
+clause = "§2.8"
+title = "带后缀的十进制宽于该类型"
+kind = "check"
+expect = ["E-0043"]
+exit = 2

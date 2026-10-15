@@ -1,0 +1,7 @@
+id = "2.8-literals-0005"
+category = "2.8-literals"
+clause = "§2.9"
+title = "转义封闭表之外的反斜杠 q"
+kind = "check"
+expect = ["E-0046"]
+exit = 2

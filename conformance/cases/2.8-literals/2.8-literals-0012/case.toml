@@ -1,0 +1,7 @@
+id = "2.8-literals-0012"
+category = "2.8-literals"
+clause = "§2.8"
+title = "文档化例外：-128i8 由常量求值折叠（正例）"
+kind = "check"
+expect = []
+exit = 0

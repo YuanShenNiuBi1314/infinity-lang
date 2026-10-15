@@ -1,0 +1,7 @@
+id = "7.7-b-track-0001"
+category = "7.7-b-track"
+clause = "§7.7.1"
+title = "未实现的 B 轨前缀 @lua 点名拒绝，而不是让单元静默消失"
+kind = "check"
+expect = ["E-0712"]
+exit = 2

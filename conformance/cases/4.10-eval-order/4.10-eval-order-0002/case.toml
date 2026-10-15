@@ -1,0 +1,7 @@
+id = "4.10-eval-order-0002"
+category = "4.10-eval-order"
+clause = "§4.13 规则 7"
+title = "正例：同一无后缀字面量取 i32"
+kind = "check"
+expect = []
+exit = 0

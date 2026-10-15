@@ -1,0 +1,7 @@
+id = "8-chains-0005"
+category = "8-chains"
+clause = "§8.2"
+title = "start 的 node 锚点不存在"
+kind = "check"
+expect = ["E-0801"]
+exit = 2

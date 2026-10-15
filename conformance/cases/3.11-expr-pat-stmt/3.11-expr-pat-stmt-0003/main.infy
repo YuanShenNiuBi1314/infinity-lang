@@ -1,0 +1,7 @@
+#![infy_version = "2.0"]
+
+package case
+
+struct S { pub a: u32, pub b: u32 }
+fn f(base: S) -> S { S { a: 1u32, ..base } }
+fn main() { }

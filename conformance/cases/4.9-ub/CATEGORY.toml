@@ -1,0 +1,5 @@
+slug = "4.9-ub"
+table = "§12.1"
+title = "§4.9 UB 清单"
+check = "24 条禁令逐条必须被识别为编译错误或规范 panic"
+required = "120"

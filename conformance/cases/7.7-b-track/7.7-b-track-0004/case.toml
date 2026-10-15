@@ -1,0 +1,8 @@
+id = "7.7-b-track-0004"
+category = "7.7-b-track"
+clause = "§7.7.3"
+title = "声明的 minor 与在场解释器不一致 => E-0713（解释器不在场同码，spec:1051 的字面）"
+kind = "check"
+expect = ["E-0713"]
+exit = 2
+requires = ["python"]

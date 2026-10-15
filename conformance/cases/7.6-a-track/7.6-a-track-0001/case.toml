@@ -1,0 +1,7 @@
+id = "7.6-a-track-0001"
+category = "7.6-a-track"
+clause = "§7.6.1"
+title = "签名块存在而没有任何配对的 @c 源码"
+kind = "check"
+expect = ["E-0720"]
+exit = 2

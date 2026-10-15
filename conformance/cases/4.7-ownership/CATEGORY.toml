@@ -1,0 +1,5 @@
+slug = "4.7-ownership"
+table = "§12.1"
+title = "§4.7 所有权/借用/生命周期"
+check = "E-1001..E-1005 每类正反 20 例；elision 三规则；drop 顺序"
+required = "200"

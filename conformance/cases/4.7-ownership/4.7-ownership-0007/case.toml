@@ -1,0 +1,7 @@
+id = "4.7-ownership-0007"
+category = "4.7-ownership"
+clause = "§8.2"
+title = "正例：同链的第二个焦点不算跨链共享"
+kind = "check"
+expect = []
+exit = 0

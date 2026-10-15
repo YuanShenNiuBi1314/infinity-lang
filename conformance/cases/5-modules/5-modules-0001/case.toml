@@ -1,0 +1,7 @@
+id = "5-modules-0001"
+category = "5-modules"
+clause = "§3.1"
+title = "module 根目录里的文件省略 package 子句"
+kind = "check"
+expect = ["E-0501", "E-0600"]
+exit = 2

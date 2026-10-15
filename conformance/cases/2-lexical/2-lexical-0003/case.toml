@@ -1,0 +1,7 @@
+id = "2-lexical-0003"
+category = "2-lexical"
+clause = "§2.1"
+title = "文件缺末尾 LF => W-0002；§9.6 默认 strict 因此仍阻断"
+kind = "check"
+expect = ["W-0002"]
+exit = 2
