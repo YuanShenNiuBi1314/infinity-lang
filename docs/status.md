@@ -36,9 +36,9 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 516 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 521 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
-Finished `dev` profile  (50 warnings，全部为 unused/dead code，见 BACKLOG F2；D4(1) 清掉一处死字段；E1 轮未新增)
+Finished `dev` profile  (50 warnings，全部为 unused/dead code，见 BACKLOG F2；D4(1) 清掉一处死字段；E1/E2 轮未新增——E2 轮改动前后的告警**集合**逐条 diff 相同)
 $ infy check examples/tour
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)   # exit 0
 $ infy build examples/tour
@@ -112,13 +112,33 @@ $ gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c
 （无输出）                                        # exit 0，0 warning（B3 的验收命令；三项语义已于 B3 轮落地，见下文 B3 一节）
 $ (cd examples/tour && infy fmt --check)
 2 file(s) are not canonical                        # exit 2，见下文"导览源码不是格式化不动点"
+$ infy conformance --report                        # E2 轮起：§12.5 要求的逐分类通过率（下例是真实输出的节选）
+  table    slug                           req cases  pass  fail block    rate short   分类名（§12 原文）
+  §12.1    2-lexical                       96    13    11     0     2    84.6%     83   §2 词法（含 build 约束）  ← 非通过 2 条
+  §12.1    1.3-domain-neutral              52     0     0     0     0      n/a     52   §1.3 领域中立  ← 空分类：整行都是缺口，空不等于通过
+  §12.5    6.7-derive                      72     3     0     0     3     0.0%     69   §6.7–§6.8 derive  ← 非通过 3 条
+  小计 §12.1（9 个分类 / 声明 9 个，其中 0 个未运行）：规范目标 1244 · 用例 46 · Pass 43 · Fail 0 · Blocked 3 · 缺口 1198
+  小计 §12.2（3 个分类 / 声明 3 个，其中 0 个未运行）：规范目标 256 · 用例 12 · Pass 12 · Fail 0 · Blocked 0 · 缺口 244
+  小计 §12.5（8 个分类 / 声明 8 个，其中 0 个未运行）：规范目标 800 · 用例 25 · Pass 22 · Fail 0 · Blocked 3 · 缺口 775
+  合计：用例 83 · Pass 77 · Fail 0 · Blocked 6 · 通过率 92.8% · 规范目标 2300（覆盖 83，缺口 2217）
+  空分类（一条用例都没有，所以 §12 这一行完全没有被检查）：1.3-domain-neutral（缺口 52） · 10.9-std（缺口 84） · 11.1-host-protocol（缺口 60）
+  非通过用例（6 条 · Blocked ≠ Pass ≠ Fail）：… 逐条打 defect=F34 / F35 / F36 / F37 与「期望 … / 实得 …」首行
+conformance report — 83 条用例：Pass 77 · Fail 0 · Blocked 6 ⇒ exit 1
+$ echo $?
+1                                                  # 退出码裁定 = 偏差 D-48(a)：有 Blocked 或覆盖不足 ⇒ 不是 0
+$ infy conformance --category 7.8-ifbc             # 过滤运行只跑 2 条，其余 19 个分类打 `-` / 「未运行」
+conformance report — 2 条用例：Pass 2 · Fail 0 · Blocked 0 ⇒ exit 1        # 过滤运行永远不给 0（D-48(d)）
+$ infy conformance --update-golden                 # §12.4 要求显式授权；带 --i-know-this-is-breaking 仍拒绝（D-48(e)）
+error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权（`--i-know-this-is-breaking`），因为改动黄金文件等于改语义。
 ```
 
-505 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 505；D3 轮实测）：
-`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `pkg` 24 · `btrack` **30**（D1(1) 前是 0，D1(2) 轮 23 → 30） ·
-`atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **26**（D3 轮 22 → 26） ·
-`cli` **33**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → **D3 轮 33**） · `sema` 22 · `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` 20 · `artifact` 18 ·
-`toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = 505。
+521 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 521；E2 轮实测）：
+`lexer` 79 · `derive` 57 · `fmt` 39 · `cli` **38**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → **E2 轮 38**） ·
+`macro_expand` 35 · `btrack` **30**（D1(1) 前是 0，D1(2) 轮 23 → 30） ·
+`atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **26**（D3 轮 22 → 26） · `pkg` 24 · `sema` 22 ·
+`ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` 20 · `artifact` 18 ·
+`toml` 15 · `borrow` 15 · `sha256` 12 · `conformance` **11**（E1 轮新建，此前是 1 行占位） · `codes` 9 ·
+`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = 521。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -129,7 +149,7 @@ $ (cd examples/tour && infy fmt --check)
   §7.7.3 版本锁、附录 E.3 表语法与表体 hash、§7.8.3 的降级自检），它揪出并修掉的三个缺陷见下文 D1(1) 一节。
   `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成独立单测模块（C4 轮 **19** 项 = `goto` 必须转移控制那一条；C5 轮 **22** 项 = §5.9 测试 harness 的 3 条；D3 轮 **26** 项 = A 轨调用走包装符号、没有 `#[link]` 配对的声明被点名拒绝、`()` 返回的 `void` 转发、块状尾表达式的结果临时量作用域），`hir.rs` 的 20 项锁阶段 [7]，
   `artifact.rs`（§7.1 阶段 [9] / §7.3 / §7.4）在 C3 轮新建并直接带 18 项单测 + 一份被 C 侧读取器消费的逐字节夹具，
-  `cli.rs` 从 C4 轮的 9 项到 C5 轮的 16 项、D1(2) 轮的 **20** 项、D2 轮的 28 项、**D3 轮的 33 项**（`infy test` 的三条端到端 + §5.9/§2.2 的文件选择两条 + §5.8 dirhash 不随构建范围变的一条 + `--cov` 拒绝 + [6a] 经命令行的摄取四条 + `infy ifbc dump|verify` 八条 + A 轨的端到端/绑定文件/三条判据五条）。
+  `cli.rs` 从 C4 轮的 9 项到 C5 轮的 16 项、D1(2) 轮的 **20** 项、D2 轮的 28 项、D3 轮的 33 项、**E2 轮的 38 项**（`infy test` 的三条端到端 + §5.9/§2.2 的文件选择两条 + §5.8 dirhash 不随构建范围变的一条 + `--cov` 拒绝 + [6a] 经命令行的摄取四条 + `infy ifbc dump|verify` 八条 + A 轨的端到端/绑定文件/三条判据五条 + §12 逐分类报告五条）。
   `atrack.rs`（§7.6 A 轨）在 **D3 轮**从 1 行占位新建并带 **27** 项：配对两个方向、ABI/前缀支持面、`infy_e_<name>_<8hex>` 的哈希规范化、§7.6.4 封闭表逐行、UB-010 移交四态、绑定头与包装 TU（含一次真 `gcc -std=c11 -Wall -Wextra` 编译）。
 - 先前记为"§9.2 字节级金样"实际是 1 条规范样例逐字节 + 1 条 caret 行规则（`diag` 2 项）；
   `goto` 的三条 `E-0301` 越界路径与 `E-0121` 在 A4 轮之前无测试（**A4 轮已补**，见下）。
@@ -138,7 +158,7 @@ $ (cd examples/tour && infy fmt --check)
 `infy build` **自 C3 轮起跑完 §7.1 阶段 [1]–[9]**：前端 → HIR → C11 → 用 A 轨 `cc` 链成宿主镜像 →
 追加 §7.4 段容器与 64 字节段尾，`infy artifact info` 读得回自己刚产出的文件（P4/P13/P14），故 exit **0**。
 阶段 [10]（sumdb 校验与运行时自校验比对）仍**未做**，`.inf sum` 只是把 `MODULE.infy.lock` 的 dirhash 清单抄进容器；
-`doc`/`lib pack`/`conformance`/`bench` 仍显式报"未实现"（exit 1）；**`infy ifbc dump|verify` 自 D2 轮起可用**（§7.8.4，见下文 D2 一节；今天真产物的 `.inf ifbc` 恒空 = F29，命令对此明打为空而不假称校验过）；**`run` 自 C4 轮起真执行**（§13.4 的
+`doc`/`lib pack`/`bench` 仍显式报"未实现"（exit 1）；**`infy conformance --report` 自 E2 轮起输出 §12.5 要求的逐分类通过率**（83 条用例 = 77 Pass / 6 Blocked / 0 Fail、覆盖 83/2300 ⇒ 仍不是合规声称，见下文 E2 一节与 P29）；**`infy ifbc dump|verify` 自 D2 轮起可用**（§7.8.4，见下文 D2 一节；今天真产物的 `.inf ifbc` 恒空 = F29，命令对此明打为空而不假称校验过）；**`run` 自 C4 轮起真执行**（§13.4 的
 开发态 = [7]-[9] 建到临时目录 + 立即执行，退出码按 §13.4，见下文 C4 一节）；**`test` 自 C5 轮起真执行**（§5.9 的
 测试构建 + 生成的 `#[test]` harness，退出码 0/1/3 按 §13.4，见下文 C5 一节；`bench` 留在未实现里是因为 §13.4
 根本没有这个子命令，它是 `infy test --bench`）；
@@ -151,7 +171,7 @@ A 轨只落了 `@c` + `cc` + 标量/指针那一半（§7.6.2 工具链注册、
 IFBC 断言（B3 轮 79 → 82，D4(2) 轮 **82 → 146**：合并线格式 + 17 条间隙指令 + Rust 写↔C 读执行的夹具；
 D4(3) 轮 **146 → 167**：三份双侧共用文本夹具，D1(2) 轮 **167 → 180**：第四份 = 阶段 [6a] 的真产物）
 **B2 轮起既链 `runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，两侧同为 **180/180**（D1(2) 轮复跑）、
-stdout 逐字节相同。仍未验证的是：`infy conformance --report` 的逐分类通过率（E2；用例集与运行器 E1 轮已落成）与 B 轨的**产物半边**（D1/D2 已把摄取与检视命令接上，
+stdout 逐字节相同。仍未验证的是：§12 逐分类通过率的**对外表格**（= E3：把数字落进 `docs/coverage.md` 与 README 并显式列「距 100% 还差哪些类」；命令行本身 E2 轮已落地，用例集与运行器 E1 轮已落成）与 B 轨的**产物半边**（D1/D2 已把摄取与检视命令接上，
 缺的是阶段 [8] 通往 IFBC VM 的调用通道 ⇒ `.inf ifbc` 恒空 = **F29**）。Rust↔C 的**逐指令反汇编相等**已于 D4(3) 轮落地（偏差 D-42），D2 轮起这份相等也在 CLI 层比对；"两侧校验结论等价"另被 F26 挡着。
 
 ## A2 本轮修掉的真实缺陷（每条都有回归测试）
@@ -747,16 +767,17 @@ rt harness **32335 assertions / 0 failures** exit 0（在 `target/scratch` 里�
 
 ## 仍未实现
 
-`doc`/`lib pack`/`conformance`/`lsp`/`bench`/`ingest`（exit 1）目前明确返回"未实现"而不是假成功
+`doc`/`lib pack`/`lsp`/`bench`/`ingest`（exit 1）目前明确返回"未实现"而不是假成功
 （`infy ifbc dump|verify` **自 D2 轮起可用**：§7.8.4 的检视命令，输入 = §7.4 产物或裸 IFBC 镜像，
 输出 = 反汇编 / `--canonical` 的双侧共用文本 / §7.8.3 的校验结论，见下文 D2 一节。它今天能检视的镜像来自
 `runtime/fixtures`，而**真产物的 `.inf ifbc` 恒空**（F29），命令对此明打"0 个 B 轨模块"而不假称校验过；
 `infy build` 自 C3 轮起 exit **0**：阶段 [1]–[9] 全通，产物容器可被 `infy artifact info` 与 C 侧运行时读回；
 **`infy run` 自 C4 轮起 exit 0/3 真执行**，见上文 C4 一节；**`infy test` 自 C5 轮起 exit 0/1/3 真执行**，
-见上文 C5 一节。`bench` 留在这一列是因为 §13.4 根本没有 `infy bench`，它是 `infy test --bench`；
+见上文 C5 一节。**`infy conformance --report` 自 E2 轮起输出 §12.5 要求的逐分类通过率**（退出码裁定 = 偏差 D-48，见下文 E2 一节；83 条用例只覆盖 §12 目标的 3.6%，所以那份通过率不是合规声称）。`bench` 留在这一列是因为 §13.4 根本没有 `infy bench`，它是 `infy test --bench`；
 `infy test --cov` 同样显式 exit 1 —— §12.4 的 `-O0` 节点表插桩没有任何阶段产出，F22）；
-A 轨的 §7.6.2 工具链发现/注册与 `recipe.toml` 审计（F32）、§7.6.5 反向导出与 §7.6.6 进程隔离（F33）、§11 `HostApi`（`src/host.rs`）、§12 的逐分类通过率报告（`infy conformance --report` = E2；用例集本身 E1 轮已落成 83 条）、
-`infy doc`（`src/doc.rs`）同样未实现 —— 这四个文件当前是 1 行占位。
+A 轨的 §7.6.2 工具链发现/注册与 `recipe.toml` 审计（F32）、§7.6.5 反向导出与 §7.6.6 进程隔离（F33）、§11 `HostApi`（`src/host.rs`）、
+`infy doc`（`src/doc.rs`）同样未实现 —— 这两个文件当前是 1 行占位（`src/atrack.rs` 的占位状态在 D3 轮结束、`src/conformance.rs` 的在 E1 轮结束，`infy conformance` 的命令行在 E2 轮接上）。
+§12 还缺的是**对外表格**：逐分类通过率落进 `docs/coverage.md` 与 README 并显式列「距 100% 还差哪些类」= **E3**。
 HIR（`src/hir.rs`）于 C1 轮落成**声明层**；**语句/表达式级 IFIR 仍没有独立表示**（C2 是 AST→C 直接发射），
 因此后端与阶段 [7] 之间没有可优化的中间层。
 `codegen` 明确拒绝、没有假成功的构造：闭包、`dyn`、`@embed` 的 B 轨半边（F29）、A 轨 §7.6.4 未发射的那五类跨边界类型（F31 / 偏差 D-46(e)）、A 轨 `extern` 调用、
@@ -1033,7 +1054,67 @@ B 轨用例声明 `requires = ["python"]`，清单里写 `@PY_MINOR@` 由运行�
 且两份 stdout `cmp` **无差异**。
 
 **明确未做**（不用假成功掩盖）：`infy conformance --report` 与逐分类通过率的**命令行** = **E2**
-（今天仍走"未实现"臂 exit 1；`tally`/`run_corpus` 已经把数据面备好）；通过率落进 `docs/coverage.md`
+（E1 轮时仍走"未实现"臂 exit 1，`tally`/`run_corpus` 已把数据面备好；**E2 轮已落地**，见下文 E2 一节）；通过率落进 `docs/coverage.md`
 与 README 的"距 100% 还差哪些类" = **E3**；§12.3 的黄金文件（codegen golden / `infy ifbc dump` 逐指令）
 与 §12.4 的等价性矩阵不进 `cases/**`（D-47(g)），它们的现成锁点是 `--verify-reproducible`（C3）与
 `infy ifbc dump --canonical` 的双侧 `cmp`（D2）。
+
+## E2 轮（2026-10-16）：`infy conformance --report` 接进命令行，§12.5 的逐分类通过率第一次由命令输出
+
+数据面一行没动（E1 轮的 `conformance::{CATEGORIES, load_cases, run_case, tally}` 就是全部输入），
+本轮只落 `src/cli.rs` 的**命令层**：`conformance_cmd`（§13.4 的 `[cases/] [--category X] [--update-golden]`
++ §12.5 的 `--report`）/ `conformance_report_text` / `conformance_rate` / `conformance_exit` /
+`conformance_update_golden_refused`，并把 `conformance` 从"未实现"臂摘出来。顺带把那张臂的名单抽成
+`cli::NOT_IMPLEMENTED` 常量 —— 拒绝臂和已接线的命令**可以共享同一个退出码 1**，只有名单本身能让
+"命令又躺回拒绝臂"变红（D2/D1(2) 那两条"上游全绿对 CLI 能不能走到它没有预测力"的第三次应用）。
+
+**验收（逐分类通过率，实测输出见上文"已跑通的端到端验收"的 `infy conformance --report` 段）**：
+20 行逐分类（§12.1 的 9 + §12.2 的 3 + §12.5 的 8）+ 三档小计 + 合计，
+**83 条用例 = Pass 77 · Fail 0 · Blocked 6 · 通过率 92.8% · 规范目标 2300（覆盖 83，缺口 2217）**。
+命令层的这三档数字与 E1 轮 `conformance::tests` 在测试里跑出的**完全相同** —— 这不是巧合而是要求：
+运行器只有 `cli::check_verdict` 一条路径（D-47(h)），所以"命令打的分"与"测试算的分"必须同源。
+
+三条防谎报的形状（都是 D-48 的内容，不是实现细节）：
+1. **空分类打 `n/a`**：`1.3-domain-neutral`（缺 52）/ `10.9-std`（84）/ `11.1-host-protocol`（60）三行
+   一条用例都没有，0/0 若渲染成 100%（或 0%）就把"这一行 §12 完全没被检查"读成"这一行有结论"。
+   同一族的 `infy ifbc` 空区措辞（D2 轮把 `ifbc_empty_region_text` 做成函数因为措辞本身就是断言对象），
+   这里 `conformance_report_text` 同样做成函数并被测试逐子串断言。
+2. **Blocked 进分母、不进分子**：通过率 = `Pass / 用例数`。若分母只算"判完的"（`Pass + Fail`），
+   1 条通过 + 5 条阻塞 = 100% —— 正是 §12.5「只报总数视为不合规」要防的形状的另一半。6 条 Blocked 逐条打
+   `defect=F34 / F35 / F36 / F37` 与「期望 … / 实得 …」首行，所以外部读者不需要读 `case.toml` 就知道缺口挂在谁名下。
+3. **`0` 不发给不完整的套件**：§13.4 从未给 `conformance` 分配退出码，本实现裁 `0` 要求
+   **20 个分类都达到 §12 的 `required`** 且 `Fail=0`、`Blocked=0`；有 `Fail` → `2`；其余 → `1`。
+   今天实得 `1`。这一条单独钉（`conformance_exit_refuses_zero_for_anything_short_of_the_whole_suite`
+   用**合成数字**而不是用例集），否则将来用例涨到 2300 时没人记得"0 曾经是有条件的"。
+
+规范未定 → 选定实现 = **偏差 D-48 (a)–(g)**：(a) 退出码归属、(b) `Fail` 优先于 `Blocked`、
+(c) 通过率的分母与空分类的 `n/a`、(d) `--category` 过滤运行不构成结论（未运行的分类打 `-`/「未运行」
+而不是 0，指向 0 条用例的分类直接报错而不是打空表）、(e) `--update-golden` **两个分支都拒绝**
+（无授权 = §12.4 的授权错误；有授权 = 本实现的 `cases/**` 里没有黄金文件可更新，§12 又明令已有用例的期望
+不得改变，§12.3 的黄金文本由 `runtime/fixtures` 的两侧写入器生成 = D-45(b)，真接还需要 F29 的执行通道）、
+(f) §13.4 未列的开关拒绝而不静默忽略（同 D-35(c)/F19(b) 那一族）、(g) 默认用例根按 `CARGO_MANIFEST_DIR`
+解析而 `[tests/]` 位置参数可覆盖它，`--report` 接受但不改变行为（这条命令只有"跑套件 + 打逐分类表"一种动作）。
+
+**本轮没有修掉任何实现缺陷**（`conformance::*` 与前端行为一字未动，只加命令层）。新增 5 项 `cli` 测试
+（33 → **38**），其中两条钉的是"措辞本身"而不是数字：空分类的 `n/a` 与 `defect=` 必须出现在输出里。
+
+回归全部复跑：`cargo test --offline --lib` **521 passed / 0 failed**（基线 516，+5 全在 `cli`）、
+`cargo check --offline --lib` 0 error / **50 warning**（未新增：改动前后的告警**集合**逐条 `diff` 相同，
+HEAD 用 `git archive` 解到 `target/scratch/basecheck` 全量重检同为 50）、`infy check|run|test examples/tour`
+全 exit 0、`infy build examples/tour` exit 0 且生成 C11 仍 **12513** 字节 / 产物仍 **199975** 字节 /
+`blob 738` / `build-id 4d8250b58122ca2b76132029955e2d2005156dc0a6b021bf5f4ae761e5fd55ba` **逐字节不变**
+（本轮没碰 [7]-[9]）、`--verify-reproducible` exit 0（两个独立构建目录 199975 == 199975）、
+`infy artifact info … --nodes` exit 0、生成 C 的 `gcc -std=c11 -Wall -Wextra -I runtime -c` exit 0
+（**0 error / 0 warning**）、`(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决，未变）；
+**C 侧零改动**（`.c`/`.h` 一行没动）仍复跑四条链：`gcc -c runtime/infy_rt.c` 与 `-c runtime/infy_ifbc.c`
+各 **0 告警** exit 0、rt harness **32335 assertions / 0 failures** rc **0**（在 `target/scratch` 里跑）、
+替身链与生产链 IFBC 各 **180 asserts / 180 pass / 0 FAIL** rc **0** 且两份 stdout `cmp` **无差异**。
+
+**明确未做**（不用假成功掩盖）：§12 的**对外通过率表**（落进 `docs/coverage.md` 与 README + 显式列
+「距 100% 还差哪些类」）= **E3**；§12.3 的黄金文件更新（`--update-golden` 现两分支都拒绝 = D-48(e)）；
+§12.4 的等价性矩阵（wheel ≡ 源码、`-O0` ≡ `-O3`、`lto=false` ≡ `fat`、A 轨同进程 ≡ `isolation="process"`）
+没有任何一档能真跑，因为 F12/F19/F29/F31/F32 都还开着；三个空分类的成因仍是 **F38**（§1.3 扫描零调用点 +
+黑名单文件不在仓库）、**F19**（程序没有 stdout 通道 ⇒ §10.9 的运行期断言不可表达）、`src/host.rs` 占位；
+6 条 Blocked 用例的期望挂的是**规范**期望而不达 = **F34/F35/F36/F37**（一条都没为了让报告变绿而改动期望，
+§12 明令编号与期望不得改变）。**措辞红线**：E3 之前任何文档不得出现「INFY v2.0 兼容」，
+命令报告里那句"不得声称兼容"是它自己的限定语，不是声称。

@@ -1047,3 +1047,39 @@ INFY 诊断位置未做、§7.6.1 的 `W-0720`（源码导出而签名未声明�
 `tally_reports_every_declared_category_including_the_empty_ones`、
 `the_default_manifest_is_the_one_the_runner_writes`。
 
+## D-48 §12.5 要求 `infy conformance --report` 输出逐分类通过率，§13.4 给了它的开关却从未给它任何退出码：通过率的分母、空分类的渲染、`--category` 过滤运行的身份、`--update-golden` 到底更新什么，全部由此条确定
+
+E2 轮（命令行层）落地时定。数据面（分类表、用例格式、运行器、`tally`）是 E1 轮的 D-47，本条只裁命令层。
+
+1. **(a) 退出码归属**（§13.4 的 0–7 里没有一个分配给 `conformance`）：
+   - `0` = 20 个分类**都**达到 §12 该行 `required` 的用例数，且 `Fail = 0`、`Blocked = 0`；
+   - `2` = 有用例 `Fail`（实现给出的诊断与规范期望不符 —— 就是 §13.4 的"诊断阻断"那一档的语义）；
+   - `1` = 其余：有 `Blocked`、或用例数没达到规范目标、或用例集加载失败/用法错。
+   **为什么 `0` 还要求"套件是完整的"**：§12 把套件定义为 2300 个用例；在 83 条上打 `0` 会被 CI 读成
+   "整套过了"。覆盖率不是可以省略的分母，`--report` 的合计行因此同时打通过率与"覆盖 83 / 2300"。
+2. **(b) `Fail` 优先于 `Blocked`**：两者同轮出现 ⇒ `2`。`Blocked` 不是失败，但"实现与规范不符"必须比
+   "没判完"更响。
+3. **(c) 通过率 = `Pass / 用例数`，`Blocked` 进分母、绝不进分子**；`用例数 == 0` 打 `n/a`，不打 `0.0%`
+   也不打 `100.0%`。若分母只算"判完的"（`Pass + Fail`），1 条通过 + 5 条阻塞就是 100%，正是 §12.5 要防的
+   形状；空分类若打 100% 则把"这一行 §12 完全没被检查"读成"这一行全过了"（同 `infy ifbc` 空区那一族的
+   "空最容易被读成查过了没问题"）。
+4. **(d) `--category X` 的过滤运行不构成任何结论**：未运行的分类在表里打 `-`（用例数列）与"未运行"
+   （通过率列），**不打 0**（0 会被读成"查过了，这个分类没有用例"），退出码恒不为 `0`；`--category` 指向
+   一个 0 条用例的分类时命令**报错**，而不是打一份空表冒充跑过。
+5. **(e) `--update-golden` 两个分支都拒绝**。无 `--i-know-this-is-breaking` ⇒ §12.4 的授权错误；
+   **有授权也拒绝**，因为本实现在 `conformance/cases/**` 里没有可更新的黄金文件：§12 明令"已有用例的编号与
+   期望不得改变"（按当前行为重生成期望 = 把实现写成权威），而 §12.3 的黄金文件（`.inf meta` + 反汇编 +
+   `infy ifbc dump`）是 `runtime/fixtures` 那两份两侧各写一半的文本（`.bin` = Rust `INFY_REGENERATE_FIXTURE=1`，
+   `.can.txt`/`.ver.txt` = C `INFY_REGENERATE_CANONICAL=1`），命令行取黄金文本走 `infy ifbc dump --canonical`
+   （D-45(b)）。真要把产物里的 `.inf ifbc` 当黄金还需要阶段 [8] 的执行通道（BACKLOG **F29**）。
+6. **(f) §13.4 未列的开关一律拒绝**（`--json`、`--verbose` 等），不静默忽略 —— 同 D-35(c)/F19(b) 那一族。
+7. **(g) 默认用例根 = 仓库内 `conformance/cases`**（按 `CARGO_MANIFEST_DIR` 解析，与进程 CWD 无关）；
+   §13.4 的 `[tests/]` 只是可覆盖它的位置参数。`--report` 接受但不改变行为：这条命令除了跑套件打逐分类
+   通过率没有别的动作，规范里也没有第二种形态。
+
+锁点 = `cli::tests::{the_conformance_report_prints_every_declared_category_and_keeps_blocked_out_of_the_numerator`（20 行一行都不能少 + 空分类是 `n/a` + `defect` 编号打出来 + 有 Blocked 时不为 0,
+`conformance_exit_refuses_zero_for_anything_short_of_the_whole_suite`（把 (a) 的规则与用例集状态分开钉，
+"全通过但覆盖不足"这一档必须显式钉住，否则将来用例涨到 2300 时没人记得这条）,
+`a_filtered_conformance_run_marks_the_unrun_categories_and_offers_no_verdict`,
+`conformance_refuses_misuse_and_golden_updates_by_name`, `conformance_is_no_longer_a_refused_command}`（拒绝名单与 `usage()` 两处都要红，因为拒绝臂和已接线的命令可以共享同一个退出码）。
+

@@ -2,7 +2,8 @@
 
 这个目录是规范 §12 要求的合规套件。它现在是**首批搬运结果**，不是 §12 的完成量：
 §12.1 + §12.2 + §12.5 的表合计 **2300** 个用例，而这里的用例数与逐分类缺口由
-`infy conformance --report`（BACKLOG **E2**）打印，并落进 `docs/coverage.md`（**E3**）。
+`infy conformance --report` 打印（**E2 轮已接线**：20 行逐分类 + 三档小计 + 合计，退出码裁定 = 偏差 **D-48**），
+并落进 `docs/coverage.md` 与 README（**E3**）。
 **在用例集覆盖到 100% 之前，任何文档不得出现「INFY v2.0 兼容」字样**（§12.4）。
 
 ## 目录结构
@@ -63,13 +64,14 @@ conformance/cases/<分类目录>/CATEGORY.toml             # 该分类的 §12 �
 
 ```sh
 cargo test --offline --lib conformance          # 加载全量用例 + 逐条执行 + 缺口自检
-infy conformance --report                       # 逐分类通过率（E2 落地后可用；现在走"未实现"臂）
+infy conformance --report                       # 逐分类通过率（E2 轮已接线；今天 83 条 ⇒ exit 1，见 D-48(a)）
+infy conformance --category 7.8-ifbc             # 只跑一个分类：其余 19 个分类打 `-`/「未运行」，退出码恒不为 0
 ```
 
 ## 现在有多少条（E1 首批，2026-10-16 实测）
 
 **83 条用例，17 个分类有内容**：77 条 Pass、6 条 Blocked（挂着 `defect` 标记的已知未修项）、**0 条 Fail**。
-逐分类数量与 §12 要求的差额由运行器算（`conformance::tally`），E2 把它打到命令行上：
+逐分类数量与 §12 要求的差额由运行器算（`conformance::tally`），**E2 轮已把它打到命令行**（实测输出 = `docs/coverage.md` P29）：
 
 | 分类 | 已有 | §12 要求 | 分类 | 已有 | §12 要求 |
 | --- | --- | --- | --- | --- | --- |

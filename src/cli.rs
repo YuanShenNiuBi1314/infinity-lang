@@ -12,8 +12,9 @@
 //! `infy ifbc dump|verify` (§7.8.4) inspects IFBC images — a §7.4 artifact's `.inf ifbc` region or a
 //! bare module image — as the human-readable disassembly, the machine-comparable canonical text both
 //! sides of the cross-check render, or the §7.8.3 load-time verdicts.
-//! `infy doc`/`lib pack`/`conformance` still report that the stage behind them is open work rather
-//! than pretending to succeed (see `docs/status.md`).
+//! `infy doc`/`lib pack` still report that the stage behind them is open work rather than pretending
+//! to succeed (see `docs/status.md`). `infy conformance` (E2) runs §12's case corpus through
+//! [`check_verdict`] — the same chain `infy check` runs — and prints §12.5's per-category pass rates.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,14 @@ use crate::ast::{ItemKind, ParsedFile};
 use crate::diag::{Diagnostic, Handler, LintConfig, Phase};
 use crate::span::Position;
 use crate::span::{FileId, Sources};
-use crate::{artifact, atrack, borrow, codegen, derive, hir, ifbc, lexer, macro_expand, parser, pkg, sema};
+use crate::{artifact, atrack, borrow, codegen, conformance, derive, hir, ifbc, lexer, macro_expand, parser, pkg, sema};
+
+/// §13.4's commands this build refuses **by name** instead of pretending (hard constraint (d): a
+/// feature that is not implemented must say so). `conformance` left this list in E2; re-adding a
+/// command whose stage actually exists is what `cli::tests::conformance_is_no_longer_a_refused_command`
+/// forbids, because the refusal arm and a wired command can share an exit code and only the name
+/// list separates them.
+const NOT_IMPLEMENTED: &[&str] = &["bench", "doc", "lib", "ingest", "lsp", "pack", "unpack", "install", "sumdb", "database"];
 
 /// §13.4 exit codes.
 pub mod exit {
@@ -66,20 +74,22 @@ pub fn run(args: &[String]) -> i32 {
         "target" => target_cmd(&positional),
         "artifact" => artifact_cmd(&positional, &rest),
         "ifbc" => ifbc_cmd(&positional, &rest),
+        "conformance" => conformance_cmd(&rest),
         "clean" => clean_cmd(flag("--cache")),
         "run" => run_cmd(&positional, &rest),
         "test" => test_cmd(&positional, &rest),
-        "bench" | "doc" | "lib" | "ingest" | "conformance" | "lsp" | "pack" | "unpack" | "install" | "sumdb" | "database" => {
+        other if NOT_IMPLEMENTED.contains(&other) => {
             eprintln!(
                 "notice: `infy {cmd}` is not implemented in this build — stages [7]-[9] are wired \
-                 (`infy build`, `infy run`), `infy test` runs the §5.9 `#[test]` harness and \
-                 `infy ifbc dump|verify` inspects IFBC images (§7.8.4), but this command still \
+                 (`infy build`, `infy run`), `infy test` runs the §5.9 `#[test]` harness, \
+                 `infy ifbc dump|verify` inspects IFBC images (§7.8.4) and `infy conformance` prints \
+                 §12's per-category pass rates (§12.5), but this command still \
                  needs its own stage: `ingest` = the §7.7.4 wheel→`.infib` path (the stage-[6a] \
                  ingest itself is wired and reachable from `infy check`), `bench` = §13.4 has no \
                  such subcommand (it is `infy test --bench`), \
-                 `doc`/`lib`/`conformance`/`lsp`/… = see docs/status.md. Commands \
+                 `doc`/`lib`/`lsp`/… = see docs/status.md. Commands \
                 that do work: check, build, run, test, fmt, expand, init, mod tidy, toolchain, target, \
-                 artifact info, ifbc dump|verify."
+                 artifact info, ifbc dump|verify, conformance."
             );
             exit::GENERIC
         }
@@ -110,8 +120,9 @@ fn usage() -> String {
         ("target list|add <triple>", "target triples (§7.2)"),
         ("artifact info|sections <file> [--nodes]", ".inf meta and segment layout (§7.4)"),
         ("ifbc dump|verify <file> [--canonical] [--all-errors]", "IFBC image / `.inf ifbc` inspection: disassembly + §7.8.3 load-time checks (§7.8.4/§12.3)"),
+        ("conformance [cases/] [--category X] [--report]", "§12 suite: run every case through `infy check`'s own chain and print per-category pass rates (§12.5); `--update-golden` is refused (§12.4, D-48(e))"),
         ("lib pack|verify|dump|diff", ".infib containers (§13.2) — not implemented yet"),
-        ("bench / doc / conformance / ingest / sumdb / lsp", "not implemented yet (`--cov` is refused outright: no instrumentation stage)"),
+        ("bench / doc / ingest / sumdb / lsp", "not implemented yet (`--cov` is refused outright: no instrumentation stage)"),
         ("clean [--cache]", "remove build output (§5.10)"),
         ("-V, --version", "language, tool, IFABI and IFBC versions"),
     ] {
@@ -2201,6 +2212,290 @@ fn ifbc_cmd(positional: &[String], rest: &[String]) -> i32 {
     exit::OK
 }
 
+// ---------------------------------------------------------------- §12 conformance
+
+/// §13.4's `infy conformance [tests/] [--category X] [--update-golden]` plus §12.5's `--report`.
+///
+/// The data side is E1's (`conformance::{load_cases, run_case, tally}`); this layer only renders the
+/// per-category table and assigns the exit code. §13.4 never gives `conformance` an exit code and
+/// never says what a filtered run means, and §12.4 names `--update-golden` without saying what it
+/// updates here — those choices are `docs/spec-deviations.md` D-48.
+fn conformance_cmd(rest: &[String]) -> i32 {
+    let mut root: Option<String> = None;
+    let mut category: Option<String> = None;
+    let mut update_golden = false;
+    let mut authorized = false;
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i].as_str();
+        if a == "--report" {
+            // §12.5 names the flag; running the suite and printing the per-category report is all
+            // this command does, so it is also the behaviour with no flag at all.
+        } else if a == "--update-golden" {
+            update_golden = true;
+        } else if a == "--i-know-this-is-breaking" {
+            authorized = true;
+        } else if a == "--category" {
+            let Some(v) = rest.get(i + 1) else {
+                eprintln!("error: `--category` 后面要跟一个 §12 的分类目录名（§13.4）");
+                return exit::GENERIC;
+            };
+            if v.starts_with('-') {
+                eprintln!("error: `--category` 后面要跟分类目录名，实得 `{v}`");
+                return exit::GENERIC;
+            }
+            category = Some(v.clone());
+            i += 1;
+        } else if let Some(v) = a.strip_prefix("--category=") {
+            category = Some(v.to_string());
+        } else if a.starts_with('-') {
+            eprintln!(
+                "error: `infy conformance` 不认识开关 `{a}`。§13.4 只列了 `[cases/] [--category X] \
+                 [--update-golden]`，§12.5 另加 `--report`；没有消费者的开关不会被静默忽略（D-48(f)）。"
+            );
+            return exit::GENERIC;
+        } else if root.is_some() {
+            eprintln!("error: `infy conformance` 只接受一个用例根，`{a}` 是第二个位置参数（§13.4）");
+            return exit::GENERIC;
+        } else {
+            root = Some(a.to_string());
+        }
+        i += 1;
+    }
+    if update_golden {
+        return conformance_update_golden_refused(authorized);
+    }
+    let dir = root.map(PathBuf::from).unwrap_or_else(conformance::corpus_root);
+    let cases = match conformance::load_cases(&dir) {
+        Ok(c) => c,
+        Err(errs) => {
+            // No report at all: printing a rate over the cases that did parse would be the "只报能报的"
+            // lie §12.5 is aimed at.
+            eprintln!("error: 用例根 {} 加载失败（{} 条格式问题），没有报告可打：", dir.display(), errs.len());
+            for e in &errs {
+                eprintln!("  {e}");
+            }
+            return exit::GENERIC;
+        }
+    };
+    if let Some(s) = &category {
+        if conformance::CATEGORIES.iter().all(|c| c.slug != *s) {
+            let slugs: Vec<&str> = conformance::CATEGORIES.iter().map(|c| c.slug).collect();
+            eprintln!("error: `--category {s}` 不是 §12 的分类目录名。可用：{}", slugs.join(", "));
+            return exit::GENERIC;
+        }
+    }
+    let ran: Vec<(conformance::Case, conformance::Outcome)> = cases
+        .iter()
+        .filter(|c| category.as_ref().map(|s| c.category.slug == *s).unwrap_or(true))
+        .map(|c| (c.clone(), conformance::run_case(c)))
+        .collect();
+    if ran.is_empty() {
+        // An empty suite is the one shape that reads as "checked and clean" while checking nothing.
+        match &category {
+            Some(s) => eprintln!("error: 分类 `{s}` 里一条用例都没有（目录在场不等于有用例，D-48(d)）。"),
+            None => eprintln!("error: 用例根 {} 里一条用例都没有（§12.5 的通过率没有分母）。", dir.display()),
+        }
+        return exit::GENERIC;
+    }
+    let (text, code) = conformance_report_text(&ran, category.as_deref());
+    print!("{text}");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    code
+}
+
+/// §12.4: "`infy conformance --update-golden` 需要显式授权（写 `--i-know-this-is-breaking`），否则拒绝".
+/// The refusal is implemented; the rewrite is not, because this build has nothing inside
+/// `conformance/cases/**` to rewrite: §12 forbids changing an existing case's expectation at all, and
+/// §12.3's goldens (`.inf meta` + disassembly + `infy ifbc dump`) are the `runtime/fixtures` texts
+/// generated by the two per-side writers (D-47(h)). D-48(e).
+fn conformance_update_golden_refused(authorized: bool) -> i32 {
+    if !authorized {
+        eprintln!(
+            "error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权\
+             （`--i-know-this-is-breaking`），因为改动黄金文件等于改语义。"
+        );
+        return exit::GENERIC;
+    }
+    eprintln!(
+        "error: 已授权，但 `--update-golden` 在本实现里没有可更新的对象，所以仍然拒绝（D-48(e)）：\n  \
+         = §12 明令「已有用例的编号与期望不得改变」⇒ `case.toml` 的期望是 append-only，没有「按当前行为重新生成期望」这一档（那等于把实现写成权威）；\n  \
+         = §12.3 的黄金文件是 `.inf meta` + 反汇编 + `infy ifbc dump`，本仓库里由两份写入器生成：`runtime/fixtures/*.bin` = Rust 侧 `INFY_REGENERATE_FIXTURE=1`，`.can.txt`/`.ver.txt` = C 侧 `INFY_REGENERATE_CANONICAL=1`，都不在 `conformance/cases/**` 里；\n  \
+         = 命令行重新取黄金文本走 `infy ifbc dump --canonical <镜像>`（D2 轮，P22-P24）；真把产物里的 `.inf ifbc` 当黄金还需要阶段 [8] 的执行通道（BACKLOG F29）。\n  \
+         = 本轮既不假装更新，也不假装成功。"
+    );
+    exit::GENERIC
+}
+
+/// §12.5's report: one row per declared category — including the empty ones and, on a filtered run,
+/// the unrun ones. `conformance::tally` is what guarantees no row can be lost.
+fn conformance_report_text(
+    ran: &[(conformance::Case, conformance::Outcome)],
+    selected: Option<&str>,
+) -> (String, i32) {
+    let rows = conformance::tally(ran);
+    let unrun = |slug: &str| selected.map(|s| s != slug).unwrap_or(false);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "conformance report — §12 用例集 {} 条 / {} 个分类（§12.5：必须输出逐分类通过率，只报总数视为不合规）\n",
+        ran.len(),
+        conformance::CATEGORIES.len()
+    ));
+    out.push_str("  运行器 = `infy check` 自己那条链（`cli::check_verdict` = 阶段 [1]-[5] + 干净时的 [6a]），比较面 = 诊断码的排序多重集 + §13.4 退出码（用例格式 = 偏差 D-47）。\n");
+    out.push_str("  rate = pass / cases；Blocked 进分母、绝不进分子。req = §12 的数量目标，short = req - cases。\n\n");
+    out.push_str(&format!(
+        "  {:7}  {:<28} {:>5} {:>5} {:>5} {:>5} {:>5} {:>8} {:>6}   {}\n",
+        "table", "slug", "req", "cases", "pass", "fail", "block", "rate", "short", "分类名（§12 原文）"
+    ));
+    for r in &rows {
+        let skipped = unrun(r.category.slug);
+        let cases_cell = if skipped { String::from("-") } else { r.cases.to_string() };
+        let rate_cell = if skipped {
+            String::from("未运行")
+        } else {
+            conformance_rate(r.pass, r.cases)
+        };
+        out.push_str(&format!(
+            "  {:7}  {:<28} {:>5} {:>5} {:>5} {:>5} {:>5} {:>8} {:>6}   {}",
+            r.category.table,
+            r.category.slug,
+            r.category.required,
+            cases_cell,
+            r.pass,
+            r.fail,
+            r.blocked,
+            rate_cell,
+            r.shortfall(),
+            r.category.title
+        ));
+        if skipped {
+            out.push_str("  ← 本轮被 --category 过滤，没跑（不是「没有用例」）");
+        } else if r.cases == 0 {
+            out.push_str("  ← 空分类：整行都是缺口，空不等于通过");
+        } else if r.fail + r.blocked > 0 {
+            out.push_str(&format!("  ← 非通过 {} 条", r.fail + r.blocked));
+        }
+        out.push('\n');
+    }
+    for table in ["§12.1", "§12.2", "§12.5"] {
+        let mut s = [0usize; 4];
+        let mut short = 0usize;
+        let mut skipped = 0usize;
+        let mut declared = 0usize;
+        for r in &rows {
+            if r.category.table != table {
+                continue;
+            }
+            declared += 1;
+            if unrun(r.category.slug) {
+                skipped += 1;
+                continue;
+            }
+            s[0] += r.cases;
+            s[1] += r.pass;
+            s[2] += r.fail;
+            s[3] += r.blocked;
+            short += r.shortfall();
+        }
+        out.push_str(&format!(
+            "  小计 {table}（{} 个分类 / 声明 {} 个，其中 {skipped} 个未运行）：规范目标 {} · 用例 {} · Pass {} · Fail {} · Blocked {} · 缺口 {}\n",
+            declared - skipped,
+            declared,
+            conformance::required_total(table),
+            s[0],
+            s[1],
+            s[2],
+            s[3],
+            short
+        ));
+    }
+    let pass: usize = rows.iter().map(|r| r.pass).sum();
+    let fail: usize = rows.iter().map(|r| r.fail).sum();
+    let blocked: usize = rows.iter().map(|r| r.blocked).sum();
+    let short_rows = rows.iter().filter(|r| r.shortfall() > 0).count();
+    let req_all: usize = conformance::CATEGORIES.iter().map(|c| c.required).sum();
+    out.push_str(&format!(
+        "\n  合计：用例 {} · Pass {pass} · Fail {fail} · Blocked {blocked} · 通过率 {} · 规范目标 {req_all}（覆盖 {}，缺口 {}）\n",
+        ran.len(),
+        conformance_rate(pass, ran.len()),
+        ran.len(),
+        req_all.saturating_sub(ran.len())
+    ));
+    let empties: Vec<String> = rows
+        .iter()
+        .filter(|r| !unrun(r.category.slug) && r.cases == 0)
+        .map(|r| format!("{}（缺口 {}）", r.category.slug, r.shortfall()))
+        .collect();
+    if !empties.is_empty() {
+        out.push_str(&format!("  空分类（一条用例都没有，所以 §12 这一行完全没有被检查）：{}\n", empties.join(" · ")));
+    }
+    let bad: Vec<&(conformance::Case, conformance::Outcome)> =
+        ran.iter().filter(|(_, o)| o.status != conformance::Status::Pass).collect();
+    if bad.is_empty() {
+        out.push_str("\n  非通过用例：0 条。\n");
+    } else {
+        out.push_str(&format!("\n  非通过用例（{} 条 · Blocked ≠ Pass ≠ Fail）：\n", bad.len()));
+        for (c, o) in &bad {
+            let defect = match &c.defect {
+                Some(d) => d.clone(),
+                None => "-（缺构建期工具：§7.7.3/§7.6.2 把工具在场列为前提）".to_string(),
+            };
+            out.push_str(&format!(
+                "    {}  {}  {}  kind={}  {:?}  defect={}\n",
+                c.id,
+                c.category.slug,
+                c.clause,
+                c.kind.as_str(),
+                o.status,
+                defect
+            ));
+            if let Some(line) = o.detail.lines().next() {
+                out.push_str(&format!("        {line}\n"));
+            }
+        }
+    }
+    let code = conformance_exit(fail, blocked, short_rows);
+    out.push_str(&format!(
+        "\n  §12.4：合规率必须 100% 才能声称「INFY v2.0 兼容」⇒ 本轮通过率 {}、覆盖 {} / {req_all} ⇒ **不得声称兼容**。\n",
+        conformance_rate(pass, ran.len()),
+        ran.len()
+    ));
+    out.push_str("  退出码（§13.4 从未给 `infy conformance` 分配过，裁定 = 偏差 D-48(a)）：0 = 20 个分类都达到 §12 的规范目标且全通过；2 = 有用例 Fail（实现给出的诊断与规范期望不符）；1 = 其余（有 Blocked、或覆盖不足、或用例集加载/用法错）。\n");
+    if let Some(s) = selected {
+        out.push_str(&format!(
+            "  本轮是 `--category {s}` 的过滤运行：其余 {} 个分类未运行 ⇒ 这份数字不构成任何合规结论，只用于单分类调试（D-48(d)）。\n",
+            conformance::CATEGORIES.len() - 1
+        ));
+    }
+    out.push_str(&format!(
+        "\nconformance report — {} 条用例：Pass {pass} · Fail {fail} · Blocked {blocked} ⇒ exit {code}\n",
+        ran.len()
+    ));
+    (out, code)
+}
+
+/// `n/a` for a category with no cases: 0/0 must never render as 100%.
+fn conformance_rate(pass: usize, cases: usize) -> String {
+    if cases == 0 {
+        String::from("n/a")
+    } else {
+        format!("{:.1}%", 100.0 * pass as f64 / cases as f64)
+    }
+}
+
+/// D-48(a). A `0` here is a claim about the whole §12 suite, so it requires the suite to *be* the
+/// suite: every declared category at its `required` count, no Fail, no Blocked.
+fn conformance_exit(fail: usize, blocked: usize, categories_short: usize) -> i32 {
+    if fail > 0 {
+        exit::DIAGNOSED
+    } else if blocked > 0 || categories_short > 0 {
+        exit::GENERIC
+    } else {
+        exit::OK
+    }
+}
+
 fn clean_cmd(cache: bool) -> i32 {
     let root = find_module_root(None).unwrap_or_else(|| PathBuf::from("."));
     let build = root.join(".infy-build");
@@ -3055,5 +3350,120 @@ fn main() { }
             run(&argv(&["ifbc", "verify", "target/scratch/definitely-not-here-ifbc.bin"])),
             exit::GENERIC
         );
+    }
+
+    // -------------------------------------------------------------- E2: §12 conformance report
+
+    /// One row of the report, as printed: `table slug req cases pass fail block rate short 分类名…`.
+    fn report_row(text: &str, slug: &str) -> Vec<String> {
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("  §12.") && l.split_whitespace().nth(1) == Some(slug))
+            .unwrap_or_else(|| panic!("逐分类表里少了 `{slug}` 这一行（§12.5：必须输出逐分类通过率，只报总数视为不合规）"));
+        line.split_whitespace().map(|s| s.to_string()).collect()
+    }
+
+    /// §12.5's requirement is per-category, so the command must show all 20 declared rows with the
+    /// spec's own target counts — and a category with no cases must not be able to read as a pass.
+    #[test]
+    fn the_conformance_report_prints_every_declared_category_and_keeps_blocked_out_of_the_numerator() {
+        let cases = conformance::load_cases(&conformance::corpus_root()).expect("用例集应能加载");
+        let ran: Vec<(conformance::Case, conformance::Outcome)> =
+            cases.iter().map(|c| (c.clone(), conformance::run_case(c))).collect();
+        let (text, code) = conformance_report_text(&ran, None);
+        for cat in conformance::CATEGORIES {
+            let cols = report_row(&text, cat.slug);
+            assert_eq!(cat.table, cols[0], "{} 的来源表", cat.slug);
+            assert_eq!(cat.required.to_string(), cols[2], "{} 的 §12 数量目标", cat.slug);
+        }
+        for table in ["§12.1", "§12.2", "§12.5"] {
+            assert!(text.contains(&format!("小计 {table}")), "少了 {table} 的小计（三张表各有目标数）");
+        }
+        assert!(text.contains("规范目标 2300"), "合计行没有对回 §12 自己的总数目标");
+        let rows = conformance::tally(&ran);
+        let empties: Vec<&str> = rows.iter().filter(|r| r.cases == 0).map(|r| r.category.slug).collect();
+        assert!(!empties.is_empty(), "用例集若已给 20 个分类都补上了用例，这条 n/a 断言要连同 D-48(c) 一起改");
+        for slug in &empties {
+            let cols = report_row(&text, slug);
+            assert_eq!("0", cols[3], "{slug} 应为空分类");
+            assert_eq!("n/a", cols[7], "空分类的通过率必须是 n/a —— 0/0 渲染成 100.0% 或 0.0% 都是谎报");
+        }
+        for d in ["F34", "F35", "F36", "F37"] {
+            assert!(text.contains(&format!("defect={d}")), "阻塞用例没有点名 {d}（§12 的缺口要可追）");
+        }
+        assert!(text.contains("Blocked ≠ Pass ≠ Fail"), "报告没有把 Blocked 与 Pass/Fail 分列");
+        assert!(text.contains("不得声称兼容"), "报告里缺了 §12.4 的那句限制");
+        let pass: usize = rows.iter().map(|r| r.pass).sum();
+        let fail: usize = rows.iter().map(|r| r.fail).sum();
+        let blocked: usize = rows.iter().map(|r| r.blocked).sum();
+        assert_eq!(0, fail, "用例集里有失败的用例（命令行层的数字，`conformance::tests` 也会红）");
+        assert!(pass > 0 && blocked > 0, "Pass/Blocked 的形状变了（{pass}/{blocked}），退出码断言需要一起审");
+        assert_eq!(exit::GENERIC, code, "有 Blocked 时 `infy conformance` 绝不能给 0（D-48(a)）");
+    }
+
+    /// D-48(a)'s rule pinned apart from the corpus state, so a green-but-incomplete suite can never
+    /// turn this test into a licence to exit 0.
+    #[test]
+    fn conformance_exit_refuses_zero_for_anything_short_of_the_whole_suite() {
+        assert_eq!(exit::DIAGNOSED, conformance_exit(1, 0, 0), "有用例 Fail → 2");
+        assert_eq!(exit::DIAGNOSED, conformance_exit(1, 5, 3), "Fail 优先于 Blocked");
+        assert_eq!(exit::GENERIC, conformance_exit(0, 1, 0), "有 Blocked → 1，不是 0");
+        assert_eq!(exit::GENERIC, conformance_exit(0, 0, 1), "全通过但有用例数没达到 §12 目标 → 仍然不是 0");
+        assert_eq!(exit::OK, conformance_exit(0, 0, 0), "套件完整且全通过 → 0");
+    }
+
+    /// A `--category` run is a debugging aid, not a verdict: the unrun categories show `-`/未运行
+    /// rather than 0/100%, and the exit code is never 0.
+    #[test]
+    fn a_filtered_conformance_run_marks_the_unrun_categories_and_offers_no_verdict() {
+        let cases = conformance::load_cases(&conformance::corpus_root()).expect("用例集应能加载");
+        let slug = "7.8-ifbc";
+        let ran: Vec<(conformance::Case, conformance::Outcome)> = cases
+            .iter()
+            .filter(|c| c.category.slug == slug)
+            .map(|c| (c.clone(), conformance::run_case(c)))
+            .collect();
+        assert!(!ran.is_empty(), "{slug} 这一分类应该有 E1 搬运来的用例");
+        let (text, code) = conformance_report_text(&ran, Some(slug));
+        let cols = report_row(&text, slug);
+        assert_eq!("0", cols[5], "{slug} 的 Fail 应为 0");
+        let other = report_row(&text, "2-lexical");
+        assert_eq!("-", other[3], "没跑的分类要打 `-` 而不是 0（0 会被读成「查过了，没有用例」）");
+        assert_eq!("未运行", other[7], "没跑的分类不该有通过率");
+        assert!(text.contains("不构成任何合规结论"), "过滤运行必须自己声明它不是结论（D-48(d)）");
+        assert_eq!(exit::GENERIC, code, "过滤运行永远不给 0：其余分类没跑");
+        assert_eq!(exit::GENERIC, run(&argv(&["conformance", "--category", slug])));
+    }
+
+    /// §13.4 lists `[cases/] [--category X] [--update-golden]` and nothing else. Every deviation from
+    /// that is refused by name, and `--update-golden` refuses even when authorized (D-48(e)).
+    #[test]
+    fn conformance_refuses_misuse_and_golden_updates_by_name() {
+        for args in [
+            vec!["conformance", "--category", "2-lexicali"],
+            vec!["conformance", "--category"],
+            vec!["conformance", "--category", "--report"],
+            vec!["conformance", "--json"],
+            vec!["conformance", "a", "b"],
+            vec!["conformance", "target/scratch/no-such-corpus-e2"],
+            vec!["conformance", "--update-golden"],
+            vec!["conformance", "--update-golden", "--i-know-this-is-breaking"],
+            vec!["conformance", "--update-golden", "--category", "7.8-ifbc"],
+        ] {
+            let mut v = vec!["infy".to_string()];
+            v.extend(args.iter().map(|s| s.to_string()));
+            assert_eq!(exit::GENERIC, run(&v), "{args:?}");
+        }
+    }
+
+    /// The D2/D1(2) lesson, this time for `conformance`: a wired command and the refusal arm can share
+    /// an exit code, so the pin has to be the name list itself, not a code.
+    #[test]
+    fn conformance_is_no_longer_a_refused_command() {
+        assert!(!NOT_IMPLEMENTED.contains(&"conformance"), "`infy conformance` 又躺回拒绝臂里了（E2 已接运行器）");
+        assert!(NOT_IMPLEMENTED.contains(&"doc"), "拒绝臂本身要留着：doc/lib/lsp 仍未实现");
+        let u = usage();
+        assert!(u.contains("conformance [cases/]"), "usage() 缺 §13.4 的 conformance 那一行");
+        assert!(!u.contains("doc / conformance"), "usage() 仍把 conformance 说成未实现");
     }
 }
