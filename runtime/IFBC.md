@@ -426,6 +426,11 @@ against the same files):
 | `ifbc_rust_writer.bin` + `.can.txt` | the D4(2) image: same text, and its verify list is empty on both sides |
 | `ifbc_all_ops.bin` + `.can.txt` | every appendix-D opcode, the 17 gap ops and `switch`'s inline table — one `I` line each, so an operand-count drift mis-scans and fails |
 | `ifbc_verify_matrix.bin` + `.ver.txt` | one function per load-time check both sides implement (R-0704/05/06/07/10/13) |
+| `ifbc_py_unit.bin` + `.can.txt` | **a real stage-[6a] image** (D1(2)): `btrack::ingest_embed_site` lowers an
+`@py` unit by driving CPython, and `test_py_unit_fixture` loads those bytes with the production loader
+(all six §7.8.3 validations) then reads the declared table back out of the `F` line (arity 2, `ret_sig` 13 =
+`f64`) plus the `L` lines (§7.4's original-language map). Regenerating it needs the CPython the image was
+ingested from (§7.7.3 makes the source-language toolchain a **build-time** dependency of B-track) |
 
 This is what caught two divergences the first time it ran (`coro.resume`/`coro.throw` operand count,
 D.9 mnemonic names) — see D-42.
