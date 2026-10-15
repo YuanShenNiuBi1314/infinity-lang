@@ -22,7 +22,7 @@ use crate::ast::{ItemKind, ParsedFile};
 use crate::diag::{Diagnostic, Handler, LintConfig, Phase};
 use crate::span::Position;
 use crate::span::{FileId, Sources};
-use crate::{artifact, borrow, codegen, derive, hir, ifbc, lexer, macro_expand, parser, pkg, sema};
+use crate::{artifact, atrack, borrow, codegen, derive, hir, ifbc, lexer, macro_expand, parser, pkg, sema};
 
 /// §13.4 exit codes.
 pub mod exit {
@@ -325,9 +325,44 @@ pub fn analyse(l: &mut Loaded) -> sema::Program {
     let prog = sema::check_files(&l.sources, &mut l.handler, &l.manifest.module_path, &tuple, a_track, b_tracks, link_units);
     borrow::check(&l.files, &l.sources, &mut l.handler, &prog);
 
+    // §7.6.1 pairing, the other direction: `sema` reports "@c 找不到配对的签名块" (it holds the
+    // source block's own span), and this reports "#[link] 落空 / ABI 不受支持 / 前缀未注册". Both
+    // halves read `atrack::pair`, so "what counts as a pair" exists in exactly one place.
+    let blocks = atrack::signature_blocks(&l.files);
+    let sources = atrack::atrack_sources(&l.files);
+    let pairing = atrack::pair(&blocks, &sources);
+    if !pairing.1.is_empty() {
+        emit_atrack_gaps(l, &pairing.1);
+    }
+
     // §7.4 entry rules: #![entry_chain] > fn main > first chain of the main package
     resolve_entry(l, &prog);
     prog
+}
+
+/// Render an `atrack::Gap` as a diagnostic. Stage [4] has its own emitter inside `sema`; the CLI
+/// needs one because pairing is a whole-module question (the signature block and the `@c` source
+/// may live in different files, so no per-item checker owns the verdict).
+fn emit_atrack_gaps(l: &mut Loaded, gaps: &[atrack::Gap]) {
+    for g in gaps {
+        let p = l.sources.line_col(g.span).0;
+        let mut d = Diagnostic::new(g.code, Phase::Name, g.span.file, p)
+            .titled(g.title.clone())
+            .region(
+                g.span.file,
+                p.line,
+                p.column,
+                p.column + (g.span.end - g.span.start).max(1),
+                g.label.clone(),
+            );
+        if let Some(n) = &g.note {
+            d = d.note(n.clone());
+        }
+        if let Some(h) = &g.help {
+            d = d.help(h.clone());
+        }
+        l.handler.emit(d);
+    }
 }
 
 fn internal_visible(target_rel: &str, importer_rel: &str) -> bool {
@@ -1265,6 +1300,70 @@ fn compute_build_id(l: &Loaded, plan: &LinkPlan, triple: &str) -> [u8; 32] {
 
 /// §7.1 stage [9]: link the emitted C against the runtime sources with the A-track `cc`, then
 /// append the §7.4 blob + trailer to the image in place. Returns the whole container's bytes.
+/// §7.6.3 项 1/2：把绑定头与每个 A 轨单元的翻译单元写进 `<build>/a_track/`，返回要交给编译器的
+/// `.c` 列表（按单元名字典序 —— §7.4 的段顺序要求“依赖拓扑逆序 + 名称字典序”，而链接命令本身也必须
+/// 定序，否则 §7.3 的可复现承诺会在第二次构建里断掉）。
+///
+/// 写文件放在 `stage9` 里而不是 `build_c`，因为 `--verify-reproducible` 用**两个**构建目录各跑一次
+/// 阶段 [9]：只有一份的话第二个目录里就没有这些输入。
+fn a_track_units(l: &Loaded, hc: &hir::HirCrate, work: &Path) -> Result<Vec<PathBuf>, String> {
+    let blocks = atrack::signature_blocks(&l.files);
+    if blocks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sources = atrack::atrack_sources(&l.files);
+    let (units, gaps) = atrack::pair(&blocks, &sources);
+    if !gaps.is_empty() {
+        // Stage [4] already rendered these; reaching here means an A-track declaration survived into
+        // the link stage, which would produce an unresolved reference instead of a diagnosis.
+        return Err(format!(
+            "A 轨配对失败：{}",
+            gaps.iter().map(|g| g.summary()).collect::<Vec<_>>().join(" / ")
+        ));
+    }
+    let dir = work.join("a_track");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return Err(format!("无法创建 A 轨目录 {}: {e}", dir.display()));
+    }
+    let plan = atrack::wrapper_plan(&hc.items, &blocks);
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut all: Vec<atrack::Wrapper> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for u in &units {
+        let (ws, refusals) = plan.get(&u.name).cloned().unwrap_or_default();
+        if !refusals.is_empty() {
+            return Err(format!(
+                "A 轨单元 `{}` 被 §7.6.4 的封闭表拒绝：{}",
+                u.name,
+                refusals.iter().map(|(n, t)| format!("{n}：{t}")).collect::<Vec<_>>().join(" / ")
+            ));
+        }
+        let path = dir.join(format!("{}.c", atrack::unit_file_stem(&u.name)));
+        let text = atrack::unit_c_source(&u.name, &u.source, &ws);
+        if let Err(e) = std::fs::write(&path, &text) {
+            return Err(format!("无法写 {}: {e}", path.display()));
+        }
+        out.push(path);
+        names.push(u.name.clone());
+        all.extend(ws);
+    }
+    if !out.is_empty() {
+        let header = dir.join("infy_binding.h");
+        if let Err(e) = std::fs::write(&header, atrack::binding_header(&names, &all)) {
+            return Err(format!("无法写 {}: {e}", header.display()));
+        }
+        println!(
+            "a_track ok — 阶段 [8] 绑定：{} 个单元（{}）、{} 个包装符号、{} 字节写入 {}（§7.6.3）",
+            units.len(),
+            names.join(", "),
+            all.len(),
+            std::fs::read(&header).map(|v| v.len()).unwrap_or(0),
+            dir.display()
+        );
+    }
+    Ok(out)
+}
+
 fn stage9(
     l: &Loaded,
     hc: &hir::HirCrate,
@@ -1281,6 +1380,10 @@ fn stage9(
         return Err(format!("无法创建构建目录 {}: {e}", work.display()));
     }
     let exe = work.join(host_file_name(stem, triple));
+    // §7.6.3 项 4：A 轨的翻译单元与生成码一起进链接命令（规范不许用户手写胶水，也不许把它留给
+    // `dlopen`）。没有 A 轨单元时链接输入一字不变 —— tour 的 199975 字节 / `build-id 4d8250b5…55ba`
+    // 因此不受本条影响。
+    let a_track_c = a_track_units(l, hc, work)?;
     let mut cmd = std::process::Command::new(&plan.cc);
     cmd.arg("-std=c11")
         .arg(plan.opt)
@@ -1288,10 +1391,18 @@ fn stage9(
         .arg(&plan.runtime_dir)
         .arg(gen_c)
         .arg(plan.runtime_dir.join("infy_rt.c"))
-        .arg(plan.runtime_dir.join("infy_dyn.c"))
-        // §7.3 forbids timestamps in the identity; GNU ld writes one into the COFF header unless
-        // told not to, and a stamped image can never be byte-reproducible.
-        .arg("-Wl,--no-insert-timestamp")
+        .arg(plan.runtime_dir.join("infy_dyn.c"));
+    if !a_track_c.is_empty() {
+        // `@c` 源码里的 `#include "infy_binding.h"` 按同目录规则就能命中，但 `ci.c` 在上一层，
+        // 所以显式给一条 `-I`，让两种包含写法都成立。
+        cmd.arg("-I").arg(work.join("a_track"));
+        for p in &a_track_c {
+            cmd.arg(p);
+        }
+    }
+    // §7.3 forbids timestamps in the identity; GNU ld writes one into the COFF header unless
+    // told not to, and a stamped image can never be byte-reproducible.
+    cmd.arg("-Wl,--no-insert-timestamp")
         .arg("-o")
         .arg(&exe);
     let out = cmd
@@ -2204,6 +2315,126 @@ mod tests {
     }
 
     const CTEST_MOD: &str = "package ctest\n\nfn main() { }\n\npub fn double(x: u32) -> u32 { x + x }\n\nfn work() { }\n";
+
+    /// Same scratch-module builder, with the `[profile] a_track = "unsafe-trusted"` declaration §7.6.6
+    /// makes a precondition of using the A track at all (`E-0722` without it).
+    fn a_track_module(name: &str, sources: &[(&str, &str)]) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("scratch").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cmd").join("ctest")).expect("scratch module dir");
+        std::fs::write(
+            dir.join(pkg::MANIFEST_NAME),
+            "[module]\npath    = \"example/ctest\"\nversion = \"0.1.0\"\ninfy    = \"2.0\"\n\n\
+             [profile]\noverflow = \"panic\"\nopt_level = 0\na_track = \"unsafe-trusted\"\n\n[[bin]]\nname = \"ctest\"\npath = \"cmd/ctest\"\n",
+        )
+        .expect("manifest");
+        for (rel, text) in sources {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().expect("parent dir")).expect("source dir");
+            std::fs::write(&p, text).expect("source");
+        }
+        dir
+    }
+
+    /// The minimal A-track unit for D3's acceptance. The observable is the C side's own `printf`:
+    /// INFY has no construct that writes stdout (F19), while A-track C code legitimately can — so a
+    /// printed line proves the unit was compiled, linked into the image **and** called from it.
+    /// A chain entry rather than `fn main`, because `emit_driver` gives a chain-less module
+    /// `return 1;` without reaching the function.
+    const ATRACK_MOD: &str = "#![entry_chain = \"Dec\"]\n\npackage ctest\n\n#[link(name = \"decoder\", static = true, toolchain = \"cc\")]\nextern \"C\" {\n    fn dec_mark(v: u32) -> u32;\n}\n\nchain Dec {\n    step();\n}\n\nfn step() -> u32 {\n    @c(name = \"decoder\") {\n        #include <stdio.h>\n        uint32_t dec_mark(uint32_t v) {\n            printf(\"dec_mark(%u) -> %u\\n\", (unsigned)v, (unsigned)(v + 1u));\n            return v + 1;\n        }\n    }\n    unsafe { dec_mark(41u32) }\n    // infy-safety: dec_mark 只做算术与打印，不持有跨界指针\n}\n";
+
+    /// D3 的验收：一个最小 `@c` 单元被 gcc 编译、链接、在产物里被调通。
+    #[test]
+    fn an_a_track_unit_is_compiled_linked_and_called() {
+        let dir = a_track_module("cli-atrack", &[("cmd/ctest/main.infy", ATRACK_MOD)]);
+        let p = dir.to_string_lossy().to_string();
+        let out = run_module(&[p], &[], &Scope::default());
+        let so = String::from_utf8_lossy(&out.program_stdout).to_string();
+        let se = String::from_utf8_lossy(&out.program_stderr).to_string();
+        assert_eq!(out.code, exit::OK, "infy run on the A-track module must exit 0\n--- stderr ---\n{se}\n--- stdout ---\n{so}");
+        assert_eq!(
+            so.replace("\r\n", "\n"),
+            "dec_mark(41) -> 42\n",
+            "the wrapper must have been called through, from inside the linked image\n--- stdout ---\n{so}\n--- stderr ---\n{se}"
+        );
+    }
+
+    /// §7.6.3 项 1/2/4：绑定头与包装 TU 是**编译器产出**，落在 `<build>/a_track/`（§7.6.1 点名的路径），
+    /// 且头文件里的包装原型必须与 `ci.c` 调用的符号逐字符相同 —— 不一致是**链接期**错误，
+    /// 任何一侧的单测都看不见（`docs/spec-deviations.md` D-46(a)）。
+    #[test]
+    fn the_build_writes_the_binding_header_and_the_wrapper_unit() {
+        let dir = a_track_module("cli-atrack-files", &[("cmd/ctest/main.infy", ATRACK_MOD)]);
+        let p = dir.to_string_lossy().to_string();
+        // `cli::run` takes the whole argv including argv[0].
+        let code = run(&["infy".to_string(), "build".to_string(), p]);
+        assert_eq!(code, exit::OK, "infy build must accept the A-track module");
+        let at = dir.join(".infy-build").join(host_triple()).join("a_track");
+        let header = std::fs::read_to_string(at.join("infy_binding.h")).unwrap_or_else(|e| panic!("{}: {e}", at.display()));
+        let unit = std::fs::read_to_string(at.join("decoder.c")).expect("a_track/decoder.c");
+        let ci = std::fs::read_to_string(dir.join(".infy-build").join(host_triple()).join("ctest.c")).expect("generated C");
+        // 头文件里两半都在：用户必须定义的符号 + 包装符号。
+        assert!(header.contains("uint32_t dec_mark(uint32_t v);"), "{header}");
+        // §7.6.1：用户源码逐字节进 a_track/<name>.c。
+        assert!(unit.contains("printf(\"dec_mark(%u) -> %u"), "{unit}");
+        assert!(unit.contains("#include \"infy_binding.h\""), "{unit}");
+        // 同一份包装符号：头、包装本体、生成码的调用点三处必须一字不差。
+        let (_, after) = unit.split_once("uint32_t infy_e_dec_mark_").unwrap_or_else(|| panic!("{unit}"));
+        let (hash, _) = after.split_once("(uint32_t v)").unwrap_or_else(|| panic!("{unit}"));
+        let sym = format!("infy_e_dec_mark_{hash}");
+        assert!(header.contains(&sym), "the header must declare {sym}:\n{header}");
+        assert!(ci.contains(&format!("extern uint32_t {sym}")), "the generated C must declare {sym}:\n{ci}");
+        assert!(ci.contains(&format!("{sym}(UINT32_C(41))")), "and call it:\n{ci}");
+    }
+
+    /// §7.6.1: `#[link]` 有块而 `@c` 落空 → `E-0720`，且 `infy check` 以诊断退出码收。
+    /// 这一半此前**从未被报过**：`sema` 只查“源码块找不到签名块”那个方向。
+    #[test]
+    fn a_signature_block_without_a_source_block_is_e0720() {
+        let dir = a_track_module(
+            "cli-atrack-unpaired",
+            &[("cmd/ctest/main.infy", "package ctest\n\n#[link(name = \"decoder\", static = true)]\nextern \"C\" {\n    fn dec_mark(v: u32) -> u32;\n}\n\nfn main() { }\n")],
+        );
+        let mut h = Handler::default();
+        let mut l = load(&dir, &mut h).expect("loads");
+        analyse(&mut l);
+        let codes: Vec<String> = l.handler.diags.iter().map(|d| d.code.clone()).collect();
+        assert!(codes.iter().any(|c| c == "E-0720"), "the other half of §7.6.1 pairing must fire, got {codes:?}");
+        let text = l.handler.render(&l.sources);
+        assert!(text.contains("decoder") && text.contains("@c"), "{text}");
+    }
+
+    /// UB-010: 返回裸指针而不写移交方式 → `E-0723`。这条码在本仓库**此前全仓库零发点**
+    /// （`grep -rn "E-0723" src/` 只剩 `codes.rs` 的码表行），所以这一条是 D3 验收里唯一真正空的判据。
+    #[test]
+    fn a_pointer_return_without_ownership_is_e0723_from_the_cli() {
+        let dir = a_track_module(
+            "cli-atrack-ownership",
+            &[("cmd/ctest/main.infy", "package ctest\n\n#[link(name = \"decoder\", static = true)]\nextern \"C\" {\n    fn dec_open(v: u32) -> *mut u8;\n}\n\n@c(name = \"decoder\") {\n    struct H { int x; };\n    struct H* _dec_open(unsigned v) { (void)v; return 0; }\n}\n\nfn main() { }\n")],
+        );
+        let mut h = Handler::default();
+        let mut l = load(&dir, &mut h).expect("loads");
+        analyse(&mut l);
+        let hits: Vec<String> = l.handler.diags.iter().filter(|d| d.code == "E-0723").map(|d| d.title.clone()).collect();
+        assert_eq!(hits.len(), 1, "exactly one UB-010 finding, got {hits:?}");
+        assert_eq!(l.handler.exit_code(), exit::DIAGNOSED, "E-0723 must be a blocking diagnostic");
+    }
+
+    /// §4.7.5: 调用 A 轨 `extern` 函数不在 `unsafe` 内 → `E-0721`。原来的判据写的是
+    /// `self.link_names().iter().any(|_| true)`（等价于“模块里存在过任何一个 `#[link]`”），
+    /// 这里钉的是修好后的语义：调用点自己决定的那一条。
+    #[test]
+    fn an_unsafe_less_a_track_call_is_e0721() {
+        let dir = a_track_module(
+            "cli-atrack-unsafe",
+            &[("cmd/ctest/main.infy", "package ctest\n\n#[link(name = \"decoder\", static = true)]\nextern \"C\" {\n    fn dec_mark(v: u32) -> u32;\n}\n\nfn main() {\n    dec_mark(1u32);\n}\n")],
+        );
+        let mut h = Handler::default();
+        let mut l = load(&dir, &mut h).expect("loads");
+        analyse(&mut l);
+        let codes: Vec<String> = l.handler.diags.iter().map(|d| d.code.clone()).collect();
+        assert!(codes.iter().any(|c| c == "E-0721"), "a bare A-track call must be E-0721, got {codes:?}");
+    }
 
     /// §5.9 items 1-2 read against the file set: the `mod_test.infy` file is in the test build and
     /// out of `infy check|build|run`. Asserted on `Loaded` directly, because the `run`/`check`

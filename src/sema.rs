@@ -156,6 +156,9 @@ pub struct FnInfo {
     pub must_use: bool,
     /// `#[export("name")]` — A-track reverse export (§7.6.5)
     pub export_symbol: Option<String>,
+    /// §7.6.1: the `#[link(name = "…")]` unit this declaration belongs to. `None` for an ordinary
+    /// function, and also for a `;`-bodied item that no signature block claims.
+    pub link_unit: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -339,6 +342,9 @@ pub struct Checker<'a> {
     pub b_track_versions: Vec<(String, String)>,
     /// Every `#[link(name = "…")]` unit in scope (§7.6.1 pairing).
     pub link_unit_names: Vec<String>,
+    /// The unit whose `extern` block is being registered right now (§7.6.1: the `#[link]` attribute
+    /// is on the block, so its declarations inherit it).
+    cur_link_unit: Option<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -348,6 +354,7 @@ impl<'a> Checker<'a> {
             scopes: vec![Vec::new()], ret_ty: Ty::Unit, in_chain: false, in_defer: false,
             chain_nodes: Vec::new(), cur_node: 0, cur_chain: None, closure_counter: 0, manifest_module: module.to_string(), in_unsafe: false, negated_child: None,
             a_track_declared: false, b_track_versions: Vec::new(), link_unit_names: Vec::new(),
+            cur_link_unit: None,
         }
     }
 
@@ -591,8 +598,12 @@ impl<'a> Checker<'a> {
     fn collect_item(&mut self, it: &Item, package: &str) {
         let span = it.span;
         match &it.kind {
-            ItemKind::Fn { sig, body } => self.register_fn(sig, false, matches!(body, Body::Foreign), it, package, span),
-            ItemKind::Event { sig, body } => self.register_fn(sig, true, matches!(body, Body::Foreign), it, package, span),
+            ItemKind::Fn { sig, body } => {
+                let _ = self.register_fn(sig, false, matches!(body, Body::Foreign), it, package, span);
+            }
+            ItemKind::Event { sig, body } => {
+                let _ = self.register_fn(sig, true, matches!(body, Body::Foreign), it, package, span);
+            }
             ItemKind::Struct { name, fields, .. } => {
                 let generics: BTreeSet<String> = BTreeSet::new();
                 let fs = fields.iter().map(|f| (f.name.clone(), self.ty_from_ast(&f.ty, &generics), f.vis.clone())).collect();
@@ -698,11 +709,23 @@ impl<'a> Checker<'a> {
                 let _ = idx;
             }
             ItemKind::ExternBlock { decls, .. } => {
+                // §7.6.1: `#[link(name = "…")]` sits on the block, so every declaration inside it is
+                // a member of that unit — that is what makes an A-track call require `unsafe`
+                // (§4.7.5) and what the wrapper symbol is grouped by (§7.6.3 item 2).
+                let saved = std::mem::replace(&mut self.cur_link_unit, it.attr("link").and_then(|a| a.str_arg("name")));
                 for d in decls {
                     if let ItemKind::Fn { sig, .. } = &d.kind {
-                        self.register_fn(sig, false, true, d, package, d.span);
+                        let idx = self.register_fn(sig, false, true, d, package, d.span);
+                        // §7.6.4 + UB-010: the closed cross-boundary table is a stage [4] rule. A
+                        // signature the back end could not emit has to be red *here*, not at stage
+                        // [8] — and it must not be papered over at emission time either.
+                        let f = self.prog.fns[idx].clone();
+                        for g in crate::atrack::decl_gaps(d, &f.params, &f.ret, d.span) {
+                            self.emit(g.code, g.span, g.title, g.label, g.note, g.help);
+                        }
                     }
                 }
+                self.cur_link_unit = saved;
             }
             ItemKind::Union { name, .. } => {
                 let idx = self.prog.structs.len();
@@ -713,7 +736,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn register_fn(&mut self, sig: &FnSig, is_event: bool, is_foreign: bool, it: &Item, package: &str, span: Span) {
+    fn register_fn(&mut self, sig: &FnSig, is_event: bool, is_foreign: bool, it: &Item, package: &str, span: Span) -> usize {
         let mut generics: BTreeSet<String> = BTreeSet::new();
         for g in &sig.generics {
             if !g.is_lifetime {
@@ -751,9 +774,13 @@ impl<'a> Checker<'a> {
             // §4.11: every function returning Result/Option carries an implicit `#[must_use]`.
             must_use: returns_fallible(&sig.ret),
             export_symbol,
+            // §7.6.1: a declaration inside a `#[link]` block inherits that unit from the block; a
+            // top-level `;`-bodied item carries it on itself (`#[link(name = "…")] fn f();`).
+            link_unit: self.cur_link_unit.clone().or_else(|| it.attr("link").and_then(|a| a.str_arg("name"))),
         };
-        self.prog.fns.push(f);
         self.prog.by_path.insert((package.to_string(), sig.name.clone()), ResolvedItem::Fn(idx));
+        self.prog.fns.push(f);
+        idx
     }
 
     fn register_fn_for_impl(&mut self, sig: &FnSig, trait_name: String, self_ty: &Ty, is_foreign: bool, it: &Item, package: &str, span: Span) -> usize {
@@ -791,6 +818,7 @@ impl<'a> Checker<'a> {
             name, package: package.to_string(), module: self.manifest_module.clone(), vis: it.vis.clone(),
             params, ret, is_event: false, is_unsafe: sig.is_unsafe, is_foreign, file: span.file, span,
             self_ty: Some(self_ty.clone()), test_kind: None, must_use: returns_fallible(&sig.ret), export_symbol: None,
+            link_unit: None,
         });
         self.self_ty = None;
         let _ = it.vis;
@@ -938,8 +966,13 @@ impl<'a> Checker<'a> {
             Body::Block(b) => self.check_block(b),
             Body::Embed(e) => self.check_embed(e, it),
             Body::Foreign => {
-                // §3.3: `;` means A-track extern or host-provided event.
-                if !it.attrs.iter().any(|a| a.name() == "link") && !self.in_extern_block(it) {
+                // §3.3: `;` means A-track extern or host-provided event. Only *top-level* items
+                // reach here — `check_item` does not descend into an `extern` block's declarations
+                // (they have no body to check), so the old `in_extern_block(it)` helper could only
+                // ever answer for an item that is not in a block. It is deleted rather than kept as
+                // a `false` constant: a constant judge is how the D3 audit found this one
+                // (docs/BACKLOG.md D3 接手要点 (2)).
+                if !it.attrs.iter().any(|a| a.name() == "link") {
                     // host event (§11) — no body is legal for `event`
                     if !matches!(it.kind, ItemKind::Event { .. }) {
                         self.emit("E-0720", sig.span, "无本地实现缺少声明", &sig.name, Some("函数体为 `;` 时必须由 #[link] extern 块或宿主提供（§3.3/§7.6.1）".into()), None);
@@ -970,9 +1003,6 @@ impl<'a> Checker<'a> {
 
     fn package_is_impl(&self, sig: &FnSig) -> bool {
         !sig.params.is_empty() && sig.params[0].name == "self"
-    }
-    fn in_extern_block(&self, _it: &Item) -> bool {
-        false
     }
 
     fn coerce_return(&mut self, ty: &Ty, span: Span, name: &str) {
@@ -1984,9 +2014,13 @@ impl<'a> Checker<'a> {
             }
         }
         let f = self.prog.fns[fi].clone();
-        // §7.6.5 / §4.7.5: calling an A-track extern function requires unsafe.
-        if f.is_foreign && !self.in_unsafe && self.link_names().iter().any(|_| true) {
-            self.emit("E-0721", call.span, "A 轨调用缺少 unsafe", format!("{name}(…)"), Some("§4.7.5 封闭列表第 2 项：调用 extern 函数必须在 unsafe 内".into()), Some("包进 unsafe { } 并写 // infy-safety:".into()));
+        // §7.6.5 / §4.7.5: calling an A-track extern function requires unsafe. The judge is the
+        // callee's own `;`-bodied externness — it used to be `self.link_names().iter().any(|_| true)`,
+        // which is just `!link_names().is_empty()` and made *every* foreign call in a module that
+        // happens to contain one `#[link]` anywhere look like an A-track call (placeholder, not a
+        // judge: docs/BACKLOG.md D3 接手要点 (2)).
+        if f.is_foreign && !self.in_unsafe {
+            self.emit("E-0721", call.span, "A 轨调用缺少 unsafe", format!("{name}(…)"), Some(format!("§4.7.5 封闭列表第 2 项：调用 extern 函数必须在 unsafe 内（{}）", if f.link_unit.is_some() { "A 轨单元成员" } else { "`;` 体外由外部提供" })).into(), Some("包进 unsafe { } 并写 // infy-safety:".into()));
         }
         // argument typing, left to right (§4.10 rule 3)
         let mut named_used: Vec<String> = Vec::new();

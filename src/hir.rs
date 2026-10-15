@@ -456,6 +456,9 @@ pub struct HirFn {
     pub test_kind: Option<TestKind>,
     /// §7.6.5 `#[export("name")]`.
     pub export_symbol: Option<String>,
+    /// §7.6.1: the `#[link(name = "…")]` unit this A-track declaration belongs to (`None` for
+    /// everything else). `atrack` groups a wrapper's signature block by it.
+    pub link_unit: Option<String>,
     /// Set for `impl` methods; the receiver is passed first.
     pub self_ty: Option<(Ty, Layout)>,
     pub params: Vec<HirParam>,
@@ -974,6 +977,7 @@ pub fn lower(prog: &Program, cfg: &HirConfig) -> HirCrate {
                 must_use: f.must_use,
                 test_kind: f.test_kind,
                 export_symbol: f.export_symbol.clone(),
+                link_unit: f.link_unit.clone(),
                 self_ty: self_layout,
                 params,
                 ret,

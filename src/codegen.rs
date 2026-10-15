@@ -118,7 +118,10 @@ pub fn emit<'x>(
 
 /// C keywords and reserved identifiers that §2.4 does **not** reserve, so an INFY name may legally
 /// collide with one. Every AST-derived identifier passes through this.
-const C_KEYWORDS: &[&str] = &[
+///
+/// `atrack` shares the table: a wrapper's C parameter names come out of the same spelling rule, so a
+/// second list would be a second truth (`docs/spec-deviations.md` D-46(e)).
+pub(crate) const C_KEYWORDS: &[&str] = &[
     "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
     "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register",
     "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef",
@@ -126,7 +129,7 @@ const C_KEYWORDS: &[&str] = &[
     "_Complex", "_Generic", "_Noreturn", "_Static_assert",
 ];
 
-fn c_ident(name: &str) -> String {
+pub(crate) fn c_ident(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 2);
     for c in name.chars() {
         out.push(if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' });
@@ -241,6 +244,11 @@ struct Cg<'a> {
     /// Drop shims, keyed by shim symbol so each type gets exactly one (§4.7.4).
     shims: BTreeMap<String, String>,
     protos: BTreeMap<String, String>,
+    /// §7.6.3 项 2: A-track wrapper keyed by the HIR symbol of the declaration it wraps. Built from
+    /// `atrack` so the binding header and the call site cannot disagree about the symbol.
+    atrack: BTreeMap<String, crate::atrack::Wrapper>,
+    /// Same key, the §7.6.4 refusal text for a wrapper that could not be built.
+    atrack_refused: BTreeMap<String, String>,
     fn_defs: Vec<String>,
     chain_defs: Vec<String>,
     /// `const`/`static` definitions, keyed by symbol so redeclaration is impossible.
@@ -324,6 +332,26 @@ impl<'a> Cg<'a> {
                 format!("codegen: 跨 package 重名的 ADT 无法消歧：{}（后端按简单名索引类型）", dup.join(", ")),
             ));
         }
+        // §7.6.3 项 2/3: build the A-track wrapper table once, from `atrack` — the same call `cli`
+        // makes when it writes `infy_binding.h`, so the prototype in the generated C and the one in
+        // the header cannot drift apart (a wrapper symbol mismatch is a *link* error, invisible to
+        // every unit test on either side).
+        let blocks = crate::atrack::signature_blocks_of(files);
+        let mut atrack: BTreeMap<String, crate::atrack::Wrapper> = BTreeMap::new();
+        let mut atrack_refused: BTreeMap<String, String> = BTreeMap::new();
+        for (unit, (ws, refusals)) in crate::atrack::wrapper_plan(&hir.items, &blocks) {
+            let decls = crate::atrack::unit_decls(&hir.items, &unit);
+            for w in ws {
+                if let Some(f) = decls.iter().find(|f| f.name == w.extern_symbol) {
+                    atrack.insert(f.symbol.clone(), w.clone());
+                }
+            }
+            for (name, text) in refusals {
+                for f in decls.iter().filter(|f| f.name == name) {
+                    atrack_refused.insert(f.symbol.clone(), text.clone());
+                }
+            }
+        }
         Cg {
             prog,
             hir,
@@ -337,6 +365,8 @@ impl<'a> Cg<'a> {
             fptr_typedefs: BTreeSet::new(),
             shims: BTreeMap::new(),
             protos: BTreeMap::new(),
+            atrack,
+            atrack_refused,
             fn_defs: Vec::new(),
             chain_defs: Vec::new(),
             data_defs: BTreeMap::new(),
@@ -1215,18 +1245,35 @@ impl<'a> Cg<'a> {
 
     // ------------------------------------------------------------------ functions
 
-    /// A-track `extern` declarations: the signature check belongs to stage [4], the wrapper
-    /// generation to §7.6.3 / `docs/BACKLOG.md` D3, so a *call* is refused but a declaration that
-    /// nothing calls does not block the build.
+    /// A-track `extern` declarations (§7.6.3 项 2/3): the signature check belongs to stage [4], the
+    /// wrapper is emitted by `atrack` into `<build>/a_track/<name>.c`, and here the generated TU only
+    /// needs the `extern` prototype of that wrapper. A declaration whose signature §7.6.4 cannot map
+    /// is refused *when it is called* (see `user_fn_call`), because an uncalled declaration costs
+    /// nothing and refusing it would break a module that merely declares it behind a `//infy:build`.
     fn emit_foreign_decl(&mut self, f: &crate::hir::HirFn) -> Result<(), CgError> {
-        let _ = f;
-        Err(CgError::new(
-            "§7.6.3",
-            format!(
-                "codegen: A 轨 `extern` 函数 `{}` 需要绑定生成（`infy_binding.h` 与 `infy_e_<name>_<8hex>` 包装），属未实现项 D3",
-                f.name
-            ),
-        ))
+        let w = match self.atrack.get(&f.symbol) {
+            Some(w) => w,
+            None => {
+                // Two different reasons for having no wrapper, and the message must name the right
+                // one: §7.6.4's table has rows this back end cannot emit yet (a legal program that
+                // stops here), versus §7.6.1's "a declaration no signature block claims".
+                if let Some(text) = self.atrack_refused.get(&f.symbol) {
+                    return Err(CgError::new("§7.6.4", text.clone()));
+                }
+                return Err(CgError::new(
+                    "§7.6.1",
+                    format!(
+                        "codegen: A 轨声明 `{}` 不在任何 `#[link(name = \"…\")]` 签名块里，没有包装符号可发射（§7.6.1 要求签名块与源码块成对）",
+                        f.name
+                    ),
+                ));
+            }
+        };
+        // The key is the wrapper symbol, not `f.symbol`: the INFY-side symbol is never defined by
+        // anybody, and emitting it would produce an unresolved reference at link time.
+        self.protos
+            .insert(w.symbol.clone(), format!("extern {};", w.prototype()));
+        Ok(())
     }
 
     fn emit_fn(&mut self, f: &crate::hir::HirFn, body: &Block) -> Result<(), CgError> {
@@ -1437,6 +1484,22 @@ impl<'a> Cg<'a> {
             StmtKind::Let { is_var, name, ty, init, .. } => self.stmt_let(*is_var, name, ty.as_ref(), init.as_ref()),
             StmtKind::Assign { target, op, value } => self.stmt_assign(target, *op, value),
             StmtKind::Expr { expr, linkage } => {
+                // §7.6.1/§7.6.3: an A-track `@c` block in statement position *is* the external
+                // source. `cli` writes it verbatim into `<build>/a_track/<name>.c`, so the generated
+                // C must not also try to evaluate it — it contributes a comment, no statement.
+                if let ExprKind::Embed(em) = &expr.kind {
+                    if em.is_a_track() {
+                        self.b(&format!(
+                            "/* §7.6.1 A 轨源码块 `{}`（{}）在 a_track/ 里，不在此处发射 */",
+                            em.unit_name().unwrap_or_default(),
+                            em.lang
+                        ));
+                        for l in linkage {
+                            self.linkage(l)?;
+                        }
+                        return Ok(());
+                    }
+                }
                 let v = self.expr(expr, None)?;
                 self.b(&format!("(void){};", v.text));
                 for l in linkage {
@@ -2270,9 +2333,10 @@ impl<'a> Cg<'a> {
                 .unwrap_or_else(|| Val::of(Ty::Unit, "(InfyUnit){0}".to_string()))),
             ExprKind::Block(b) | ExprKind::Unsafe(b) => {
                 let ty = want.cloned().or_else(|| self.prog.ty(e.span).cloned());
-                self.b("{");
-                self.depth += 1;
-                self.open_scope();
+                // The result temp belongs to the **enclosing** scope: a block used as an expression
+                // hands its value back to the caller, and a `bres_N` declared inside the braces is
+                // out of sight when the caller emits `return bres_N;`. `ExprKind::If` right above
+                // already declares before opening its branches; this arm had it the other way round.
                 let res = match &ty {
                     Some(t) if !matches!(t, Ty::Unit) => {
                         let name = self.fresh("bres");
@@ -2281,6 +2345,9 @@ impl<'a> Cg<'a> {
                     }
                     _ => None,
                 };
+                self.b("{");
+                self.depth += 1;
+                self.open_scope();
                 self.block_into(b, res.as_ref())?;
                 self.close_scope();
                 self.depth -= 1;
@@ -2331,9 +2398,12 @@ impl<'a> Cg<'a> {
                 "§3.8 / §10.10",
                 "codegen: 范围表达式需要 §10.10 的迭代器协议，未实现",
             )),
-            ExprKind::Embed(_) => Err(CgError::new(
-                "§3.6 / §7.5",
-                "codegen: `@embed` 块未实现（B 轨属 D1，A 轨属 D3）",
+            ExprKind::Embed(e) => Err(CgError::new(
+                "§7.6.1 / §7.7.1",
+                format!(
+                    "codegen: `@{}` 块出现在需要值的位置：源码块不产生值（A 轨要取返回值就调它的 `extern` 函数，§7.6.1），B 轨通往 IFBC VM 的调用通道还没有（docs/BACKLOG.md F29）",
+                    e.lang
+                ),
             )),
             ExprKind::MacroCall { name, .. } => Err(CgError::new(
                 "§6.5 / §10.11",
@@ -2738,12 +2808,24 @@ impl<'a> Cg<'a> {
         args: &[crate::ast::CallArg],
     ) -> Result<Val, CgError> {
         let f = self.resolve_fn(name, owner)?;
-        if f.is_foreign {
-            return Err(CgError::new(
-                "§7.6.3",
-                format!("codegen: 调用 A 轨 `extern` 函数 `{name}` 需要绑定包装（未实现项 D3）"),
-            ));
-        }
+        // §7.6.3 项 2: an A-track call goes to the wrapper symbol, never to the bare C name — that
+        // is exactly what keeps two same-named declarations with different signatures apart.
+        let wrapper = if f.is_foreign {
+            match self.atrack.get(&f.symbol) {
+                Some(w) => Some(w.clone()),
+                None => {
+                    return Err(CgError::new(
+                        "§7.6.4",
+                        format!(
+                            "codegen: 调用 A 轨 `extern` 函数 `{name}` 被 §7.6.4 的封闭表拒绝：{}",
+                            self.atrack_refused.get(&f.symbol).cloned().unwrap_or_else(|| "该声明不在任何 `#[link(name = \"…\")]` 签名块里（§7.6.1）".to_string())
+                        ),
+                    ))
+                }
+            }
+        } else {
+            None
+        };
         if f.is_event {
             return Err(CgError::new(
                 "§11",
@@ -2783,7 +2865,20 @@ impl<'a> Cg<'a> {
             None if f.diverges => Ty::Never,
             None => Ty::Unit,
         };
-        let call = format!("{}({})", f.symbol, argv.join(", "));
+        let call = match &wrapper {
+            Some(w) => {
+                let text = w.call(&argv);
+                // A `()`-returning declaration maps to a `void` wrapper (§7.6.4 gives no row for
+                // `()`), and `InfyUnit tmp = void_expr;` is not C. The comma operator keeps the call
+                // an expression without inventing a runtime helper.
+                if w.c_ret.is_none() {
+                    format!("((void){text}, (InfyUnit){{0}})")
+                } else {
+                    text
+                }
+            }
+            None => format!("{}({})", f.symbol, argv.join(", ")),
+        };
         let tmp = self.fresh(name);
         self.decl_stmt(&ret, &tmp, Some(&call))?;
         Ok(Val::of(ret, tmp))
@@ -4271,15 +4366,68 @@ mod tests {
         );
     }
 
-    /// §7.6.3: an A-track declaration cannot be linked by this back end yet, so a *program that
-    /// declares one* fails with the D3 reason instead of emitting an unresolved `extern`.
+    /// §7.6.3 项 2/3: an A-track call is emitted as a call **through the wrapper symbol**, and the
+    /// TU declares that wrapper `extern`. The generated C never mentions the bare C name — that
+    /// indirection is exactly what §7.6.3 item 2 buys (two same-named declarations with different
+    /// signatures must not collide at link time).
     #[test]
-    fn a_track_declaration_is_refused() {
-        let e = emit_try("#[link(name = \"dec\", static = true)]\nextern \"C\" {\n    fn decode(p: *const u8, n: u32) -> i32;\n}\nfn f(x: *const u8) -> i32 { unsafe { decode(x, 1u32) } }").unwrap_err();
-        assert!(
-            e.iter().any(|s| s.contains("§7.6.3") || s.contains("D3")),
-            "{e:?}"
-        );
+    fn an_a_track_call_is_emitted_through_its_wrapper_symbol() {
+        let t = emit_of("#[link(name = \"dec\", static = true)]\nextern \"C\" {\n    fn decode(p: *const u8, n: u32) -> i32;\n}\nfn f(x: *const u8) -> i32 { unsafe { decode(x, 1u32) } }");
+        let (_, after) = t.split_once("extern ").expect("an extern wrapper declaration");
+        let (proto, _) = after.split_once(";\n").expect("prototype ends at the newline");
+        assert!(proto.starts_with("int32_t infy_e_decode_"), "{proto}");
+        let sym = proto.split('(').next().expect("paren").split_whitespace().last().expect("name").to_string();
+        let hash = sym.strip_prefix("infy_e_decode_").unwrap_or_else(|| panic!("unexpected symbol {sym}"));
+        assert_eq!(hash.len(), 8, "ABI §2 wants four hash bytes: {hash}");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "{hash}");
+        assert!(t.contains(&format!("{sym}(x_1, UINT32_C(1))")), "the call site must use the wrapper:\n{t}");
+        assert!(!t.contains(" decode("), "the bare C name must never be referenced:\n{t}");
+    }
+
+    /// 块状表达式（`{}` / `unsafe {}`）作尾值时的结果临时量必须落在**外层**作用域：
+    /// 先前它被声明在花括号里面，于是 `return bres_1;` 引用了一个已经出视线的变量（gcc：
+    /// `'bres_1' undeclared`）。`ExprKind::If` 一直是对的，这一臂把顺序写反了。
+    #[test]
+    fn a_block_tail_expression_declares_its_result_in_the_function_scope() {
+        let t = emit_of("fn g() -> u32 { 7u32 }\nfn f() -> u32 { unsafe { g() } }");
+        let body = t.split_once("uint32_t infy_p_f(void) {").expect("f's body").1;
+        let body = body.split_once("/* ---- ").map(|(b, _)| b).unwrap_or(body);
+        let decl_at = body.find("uint32_t bres_").expect("the result temp must be declared:\n{body}");
+        let brace_at = body.find('{').expect("the block opens after it");
+        assert!(decl_at < brace_at, "the temp must be outside the braces:\n{body}");
+        assert!(body.contains("return bres_"), "{body}");
+    }
+    /// §7.6.4 行 2 的 `&[u8]` 是规范允许的跨边界类型，本实现只是还没把实参摊成 `ptr, len`。
+    /// 合法程序 + 未实现 = 阶段 [8] 以条款号指名拒绝（`docs/spec-deviations.md` D-46(e)），
+    /// 而**不是**在阶段 [4] 发 `E-0723` 假装这个程序不合规。
+    #[test]
+    fn an_unmappable_but_legal_a_track_signature_is_refused_at_build_by_name() {
+        let e = emit_try("#[link(name = \"dec\")]\nextern \"C\" {\n    fn dec_read(b: &[u8]) -> u32;\n}\nfn f() { }\n")
+            .unwrap_err()
+            .join("\n");
+        assert!(e.contains("§7.6.4") && e.contains("dec_read"), "{e}");
+        assert!(!e.contains("E-0723"), "an unimplemented row must not be reported as a compliance error: {e}");
+    }
+
+    /// §7.6.1: a `;`-bodied declaration that no `#[link]` block claims has no wrapper, so calling it
+    /// is refused by name at stage [8] instead of being emitted as an unresolved reference.
+    #[test]
+    fn an_extern_declaration_outside_a_link_block_is_refused_by_name() {
+        let e = emit_try("extern \"C\" {\n    fn decode(p: *const u8) -> i32;\n}\nfn f(x: *const u8) -> i32 { unsafe { decode(x) } }")
+            .unwrap_err()
+            .join("\n");
+        assert!(e.contains("§7.6.1") && e.contains("decode"), "{e}");
+    }
+
+    /// A `()`-returning declaration maps to a `void` wrapper (§7.6.4 gives no row for `()`), so the
+    /// call must not be assigned directly — `InfyUnit t = void_call();` is not C. The comma
+    /// operator keeps it an expression without inventing a runtime helper.
+    #[test]
+    fn a_void_a_track_call_keeps_the_call_an_expression() {
+        let t = emit_of("#[link(name = \"dec\")]\nextern \"C\" {\n    fn close(h: *mut u8);\n}\nfn f(x: *mut u8) { unsafe { close(x) } }");
+        assert!(t.contains("= ((void)infy_e_close_"), "{t}");
+        assert!(t.contains("(InfyUnit){0})"), "{t}");
+        assert!(t.contains("void infy_e_close_"), "the wrapper itself must be declared void:\n{t}");
     }
 
     // ------------------------------------------------------------ §5.9 test harness

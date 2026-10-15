@@ -1635,7 +1635,13 @@ impl<'a> P<'a> {
                     break;
                 }
                 let terminated = self.eat_p(Punct::Semi);
-                let blockish = matches!(e.kind, ExprKind::If { .. } | ExprKind::Match { .. } | ExprKind::Block(_) | ExprKind::Unsafe(_) | ExprKind::StructLit { .. });
+                // §3.6: an embed block may appear as `expr_stmt`, and §7.6.1/§14 write it **without**
+                // a `;` — it is brace-delimited like a block, so it belongs in this list. Leaving it
+                // out made the spec's own A-track sample fail with `E-0053` at the next token.
+                let blockish = matches!(
+                    e.kind,
+                    ExprKind::If { .. } | ExprKind::Match { .. } | ExprKind::Block(_) | ExprKind::Unsafe(_) | ExprKind::StructLit { .. } | ExprKind::Embed(_)
+                );
                 if !terminated && !blockish {
                     let t = self.peek().clone();
                     self.err_at(&t, "E-0053", "语句缺少终结符".to_string(), "该表达式既不是块表达式，也不是函数体的尾表达式", Some("补 `;`（§2.11：无自动分号插入）".to_string()));
@@ -3009,6 +3015,29 @@ enum E { A = yes }
                 panic!("expected a function");
             }
         }
+    }
+
+    /// §3.6 明写嵌入块可以“作为 `expr_stmt` 出现”，而 §7.6.1 / §14 的 A 轨样例把它写成一条**不带 `;`**
+    /// 的语句。它是花括号开头的块状表达式，属于 §2.11 里不需要终结符的那一档；此前两处“块状表达式”
+    /// 判定都漏了 `Embed`，于是规范自己的样例报 `E-0053`，而且 span 落在**下一条**语句的开头。
+    #[test]
+    fn an_embed_block_statement_needs_no_semicolon() {
+        let src = "package main\n\nfn f() {\n    @c(name = \"dec\") {\n        int x = 1;\n    }\n    0u32\n}\n";
+        let (ast, codes) = parse_str(src);
+        assert!(!codes.iter().any(|c| c == "E-0053"), "{codes:?}");
+        let ItemKind::Fn { body, .. } = &ast.items[0].kind else {
+            panic!("expected a function, got {:?}", ast.items[0].kind);
+        };
+        let Body::Block(b) = body else { panic!("expected a block body") };
+        assert_eq!(b.stmts.len(), 1, "the embed is one statement, not two");
+        let StmtKind::Expr { expr, .. } = &b.stmts[0].kind else { panic!("expected an expression statement") };
+        let ExprKind::Embed(e) = &expr.kind else { panic!("expected an embed, got {:?}", expr.kind) };
+        assert_eq!(e.lang, "c");
+        assert_eq!(e.unit_name().as_deref(), Some("dec"));
+        assert!(e.body.contains("int x = 1;"), "body must stay verbatim: {}", e.body);
+        // The `;` form stays legal (it is just a terminated statement).
+        let (_, codes2) = parse_str("package main\n\nfn f() {\n    @c(name = \"dec\") {\n        int x = 1;\n    };\n    0u32\n}\n");
+        assert!(!codes2.iter().any(|c| c == "E-0053"), "{codes2:?}");
     }
 }
 
