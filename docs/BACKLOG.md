@@ -1008,12 +1008,13 @@
 >
 > **推送欠账**：只认现算 `git rev-list --count <远端SHA>..HEAD`；远端 SHA 用
 > `gh api repos/YuanShenNiuBi1314/infinity-lang/git/refs/heads/toolchain --jq .object.sha` 回查，
-> `Everything up-to-date` 不算成功。**D2 轮（cron-18）两个提交（代码 `d6c26a1` + 做账 `68a792a`）第 1 次
-> 推送即 exit 0**（`5e93c7c..68a792a`），`gh api` 回查远端 = 本地 HEAD = `68a792a…` ⇒ **现算欠账 0**
-> （cron-16 欠的 3 个早在 cron-17 开头就补清了）。本行的做账提交再让欠账 = 1，下一轮仍只认现算。
+> `Everything up-to-date` 不算成功。**D3 轮（cron-19）两次推送全败**（`Recv failure: Connection was reset`
+> → 换 `-c http.version=HTTP/1.1` 后 `Failed to connect to github.com:443`），同一时刻 `gh api` 正常 ⇒
+> 仍是 `github.com:443` 抖动。**远端 `toolchain` = `1bc2206…`（cron-18 那批）** ⇒ 现算欠账 =
+> `e669834`（代码）+ `b785421`（做账）+ 本行的 push 记录提交 = **3** ⇒ **下一轮开头先补推**。
 > `github.com:443` 仍是**间歇**不通而不是坏：C4/C5/D4(1)/(2)/(3)/cron-17/D2
-> 都第 1 次即成、C3 第 6/7 次、cron-12 与 cron-16 全败 ⇒ 先推一次、失败再试一次即停，连败时首个候选
-> `git -c http.version=HTTP/1.1 push origin HEAD:toolchain`。
+> 都第 1 次即成、C3 第 6/7 次、cron-12/cron-16/cron-19 全败 ⇒ 先推一次、失败再试一次即停，连败时首个候选
+> `git -c http.version=HTTP/1.1 push origin HEAD:toolchain`（cron-19 两条都试过，都败）。
 >
 > 未修只登记：D-18、D-19/F7、F8、F9/F10/F11、F12…F15、F16/F17/F18、F19/F20、F21/F22/F23/F24、F25、
 > F26（"把 verify 结论也比一遍"那半已做）、F27、F28、**F29**（阶段 [8] 没有通往 IFBC VM 的调用通道 ⇒
