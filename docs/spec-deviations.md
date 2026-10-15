@@ -934,3 +934,68 @@ F26 前半），C 侧不报同样的集合 ⇒ 两侧装载期校验等价的这
 还是首条**结论**。裁定 = 首个失败函数返回时手上已有的全部结论（`ifbc::verify(.., false)` 的既有语义，
 与运行时"首失败项映射 R-码后整体拒绝该模块"一致：模块级拒绝不需要也不应拿到别的函数的结论）。
 实测 = 矩阵镜像默认报 1 条（`R-0704 func #0 @ 0x0005`），`--all-errors` 报 10 条。
+
+## D-46 D3 轮（A 轨绑定落地）的六处规范未定/自相矛盾，选定确定实现
+
+**为什么需要这一条**：§7.6 把 A 轨的胶水全部判给编译器（§7.6.3“用户不得手写以下任何一项”），但它只写了
+**做什么**（生成头、生成包装、生成 thunk、下链接指令），没写任何一处**怎么做才算确定**。本轮第一次从
+`infy build` 走到链接，六条都必须当场定下来；其中 (f) 是本轮撞上的规范自己的矛盾（样例过不了自己的文法判据）。
+
+**(a) `<8hex>` 的规范化算法**。§7.6.3 项 2 与 `docs/internals/runtime-abi.md` §2 只说“`<8hex>` = 签名块规范化
+哈希 / the first 4 bytes of `SHA-256` of the normalised `extern` signature block”，没定义“规范化”。裁定 =
+`infy-a-track-v1 <单元名>\n` + 成员行 `<name><签名>` 按 `(package, name)` **字典序**、`\n` 连接，取 SHA-256
+前 4 字节的小写十六进制。理由：同一个签名块的声明可以写在相邻两行，也可以拆进 `//infy:build` 门后的两个文件
+（§5.1 允许一个 package 跨文件），而**声明序**会随“哪个文件先被读到”变化 ⇒ §7.3 的可复现承诺会依赖文件系统。
+落点 = `atrack::normalized_block`；锁点 = `the_normalised_block_is_independent_of_declaration_order`
+（成对断言：换声明序同哈希、多一个成员必换哈希 —— 后者正是 §7.6.3 项 2 要防的“同名不同签名撞车”）。
+
+**(b) 哈希是块级还是函数级**。规范写“签名块规范化哈希”（块级），而 `src/hir.rs` 早就准备了**逐函数**的
+`HirFn::signature_text()`（§11 / ABI §2 那一列，且此前**零调用点**）。裁定 = 哈希按块（规范原文优先），
+逐函数签名作为块规范化的成员行，`infy_e_<name>_<8hex>` 的 `<name>` 是函数名 ⇒ **同一块内所有函数共享后缀**。
+这条让 `signature_text` 第一次变成活的（`the_normalised_block_uses_the_hir_signature_column`）。
+
+**(c) UB-010 的移交判据落在哪个方向**。§8 的属性表（spec:995）写 `#[owns]/#[borrows('a)]` 适用于
+“`extern_decl` **返回/参数**”，而 §7.6.1 的规范样例只在返回裸指针的那条声明上写属性：
+`dec_open(path: *const u8, len: u64, err: *mut i32)` 与 `dec_close(h: *mut DecHandle)` 的**形参**都是裸指针而
+没有属性。若“参数也算”，规范自己的样例就自犯 `E-0723`。裁定 = 判据只落**返回方向**（含 `Option<指针>`），
+参数位置的借出按 §7.6.4 行 2 的“借用仅在调用期间有效”不需要属性；行 2 那句“外部**保存**该指针必须
+`#[borrows]` 显式声明生命周期”读的也是这个方向。同时：`#[owns]` 与 `#[borrows]` 并存 = `E-0723`
+（规范写的是二选一，并存等于没写）；`#[borrows]` 不带生命周期 = `E-0723`。
+锁点 = `a_pointer_returning_declaration_without_ownership_is_e0723` +
+`an_explicit_ownership_annotation_is_accepted`（放行的一半，形参裸指针不报）+
+`a_void_declaration_needs_no_ownership_attribute`（`dec_close` 的形状）+
+`both_ownership_annotations_together_are_still_e0723` + `borrows_without_a_lifetime_is_e0723`。
+
+**(d) 长度的 C 拼写**。§7.6.4 行 2/行 3 给切片与 `&str` 的长度写 `uint64_t`，而 INFY 侧 `usize` 在
+`codegen::prim_c` 里已经是 `size_t`。裁定 = 绑定头继续写 `size_t`（§7.2 的每个内建 target 上两者是同一类型；
+写 `uint64_t` 会让同一值在 ci.c 与头文件里出现两个类型名，换回来的是 `-Wall` 下的不兼容声明）。
+`bool`/`char` 则相反：规范写的 `uint8_t`/32 位枚举与 `infy_rt.h:41-42` 的 `InfyBool`/`InfyChar` 本就是同一类型，
+所以照规范写而不是照 typedef 写。锁点 = `the_scalar_rows_map_to_their_c11_spelling`。
+
+**(e) §7.6.4 的表里“规范禁止”与“本实现没做”必须分道**。这一族的码表只有 `E-0723`（跨边界指针移交未声明），
+但表里既有**禁止传递**的行（`Rc<T>`、`[T]` 的容量、任何 INFY 分配器的裸内存 → 程序不合规），也有
+**允许但还没有发射形态**的行（`&[u8]`/`&str` 的 ptr+len 展开、`Option<&T>` 的 null→`None` thunk、
+`Result<T,i32>` 的出参 thunk、`dyn Fn` 回调 ctx、`#[repr(C)]` struct 按值）。裁定：
+禁止项在阶段 [4] 发 `E-0723`（`atrack::decl_gaps` 只对 `Boundary::Forbidden` 出码），
+未实现的行**不占任何诊断码**，在阶段 [8] 以条款号 `§7.6.4` 指名 `CgError`（与 F15/F19/F29 那一族同形）。
+理由：拿“程序不合规”的码去报一条规范允许的签名，是假称不合规 —— 比拒绝更坏的失败，而且它会写进
+§12 的合规通过率里。锁点 = `a_legal_signature_without_emission_shape_is_not_an_e0723`（阶段 [4] 必须干净）
++ `codegen::tests::an_unmappable_but_legal_a_track_signature_is_refused_at_build_by_name`（阶段 [8] 必须红）
++ `the_boundary_table_is_enforced_at_stage_four`（`Vec<u8>` 形参 = 禁止项，必须在 [4] 红）。
+
+**(f) `@c` 作为语句要不要 `;`：§3.6 与 §7.6.1 打架，实现此前站在错的一半**。§3.6 明写“一个嵌入块**必须**绑定到
+一个 `event`/`fn` 声明体，或作为 `expr_stmt` 出现”，而 §7.6.1（spec:1113）与 §14（spec:2143）的 A 轨样例把
+`@c(name = "decoder") { … }` 写成一条**不带 `;`** 的语句。`parser.rs` 的两处“块状表达式”判定
+（`block()` 的 1638 与 `stmt()` 的 1843）列了 `If`/`Match`/`Block`/`Unsafe`/`StructLit`/`Closure` 而**没有
+`Embed`** ⇒ 规范的样例自己报 `E-0053 语句缺少终结符`，且 span 落在**下一条**语句的开头（本轮第一次写
+A 轨端到端测试时撞上，报在 `unsafe { … }` 那一行，看起来像是 `unsafe` 的问题）。裁定 = `Embed` 是花括号
+开头的块状表达式，属于 §2.11“不需要终结符”那一档，两处判定同时补上；`;` 形式继续合法。
+锁点 = `parser::tests::an_embed_block_statement_needs_no_semicolon`（无 `;` 与有 `;` 两种都断言，并断言 AST
+形状：一条 `StmtKind::Expr`、`ExprKind::Embed`、`body` 逐字节原文）。
+
+**同轮登记**：`docs/BACKLOG.md` **F31**（`#[repr(C)]` struct 与 ADT 的不透明指针跨边界：绑定头只能携带标量与
+标量指针，于是 §7.6.1 样例自己的 `-> *mut DecHandle` 过不了 —— 规范样例不能构建，与 F30 同族）、
+**F32**（§7.6.2 的工具链发现/注册、`recipe.toml` 审计、版本核对 `E-0604`/`--allow-toolchain-drift` 全未接；
+A 轨现在只驱动 `$CC`/`--cc` 那一个 `cc`）、**F33**（§7.6.3 项 3 的边界 thunk 只有标量转发、项 5 的外部行号→
+INFY 诊断位置未做、§7.6.1 的 `W-0720`（源码导出而签名未声明）与“签名声明而源码未导出 → 链接期 `E-0604`”
+没有映射、§7.6.5 反向导出与 `E-0724`、§7.6.6 的 `isolation = "process"` 全未实现）。

@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 468 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 505 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
 Finished `dev` profile  (50 warnings，全部为 unused/dead code，见 BACKLOG F2；D4(1) 清掉一处死字段)
 $ infy check examples/tour
@@ -114,21 +114,23 @@ $ (cd examples/tour && infy fmt --check)
 2 file(s) are not canonical                        # exit 2，见下文"导览源码不是格式化不动点"
 ```
 
-468 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 468；D2 轮实测）：
+505 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 505；D3 轮实测）：
 `lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `pkg` 24 · `btrack` **30**（D1(1) 前是 0，D1(2) 轮 23 → 30） ·
-`sema` 22 · `codegen` 22 · `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` 20 · `artifact` 18 ·
-`cli` **28**（C5 轮 16 → D1(2) 轮 20 → **D2 轮 28** = `infy ifbc dump|verify` 的八条） · `toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `parser` 8 · `base64` 7 · `stdlib` 4 · `diag` 2。
+`atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **26**（D3 轮 22 → 26） ·
+`cli` **33**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → **D3 轮 33**） · `sema` 22 · `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` 20 · `artifact` 18 ·
+`toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = 505。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
   借用检查（`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006`/`E-0121` 正反例）、哈希与 base64 与 TOML 往返、
   `infy` CLI 自身、IFBC Rust 侧编码/解码/反汇编：都有上表的测试。
-- **仍没有一项独立单测**：1 行占位的 `host.rs`/`atrack.rs`/`doc.rs`/`conformance.rs`。
+- **仍没有一项独立单测**：仍是 1 行占位的 `host.rs`/`doc.rs`/`conformance.rs`（`atrack.rs` 的占位状态在 D3 轮结束，27 项）。
   `btrack.rs`（§7.7 B 轨）的零单测状态在 **D1(1) 轮**结束（23 项，D1(2) 轮 → **30** 项，锁 §7.7.1 探针、§7.7.2 五个扫描项、
   §7.7.3 版本锁、附录 E.3 表语法与表体 hash、§7.8.3 的降级自检），它揪出并修掉的三个缺陷见下文 D1(1) 一节。
-  `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成独立单测模块（C4 轮 **19** 项 = `goto` 必须转移控制那一条；C5 轮 **22** 项 = §5.9 测试 harness 的 3 条），`hir.rs` 的 20 项锁阶段 [7]，
+  `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成独立单测模块（C4 轮 **19** 项 = `goto` 必须转移控制那一条；C5 轮 **22** 项 = §5.9 测试 harness 的 3 条；D3 轮 **26** 项 = A 轨调用走包装符号、没有 `#[link]` 配对的声明被点名拒绝、`()` 返回的 `void` 转发、块状尾表达式的结果临时量作用域），`hir.rs` 的 20 项锁阶段 [7]，
   `artifact.rs`（§7.1 阶段 [9] / §7.3 / §7.4）在 C3 轮新建并直接带 18 项单测 + 一份被 C 侧读取器消费的逐字节夹具，
-  `cli.rs` 从 C4 轮的 9 项到 C5 轮的 16 项、D1(2) 轮的 **20** 项、**D2 轮的 28** 项（`infy test` 的三条端到端 + §5.9/§2.2 的文件选择两条 + §5.8 dirhash 不随构建范围变的一条 + `--cov` 拒绝 + [6a] 经命令行的摄取四条 + `infy ifbc dump|verify` 八条）。
+  `cli.rs` 从 C4 轮的 9 项到 C5 轮的 16 项、D1(2) 轮的 **20** 项、D2 轮的 28 项、**D3 轮的 33 项**（`infy test` 的三条端到端 + §5.9/§2.2 的文件选择两条 + §5.8 dirhash 不随构建范围变的一条 + `--cov` 拒绝 + [6a] 经命令行的摄取四条 + `infy ifbc dump|verify` 八条 + A 轨的端到端/绑定文件/三条判据五条）。
+  `atrack.rs`（§7.6 A 轨）在 **D3 轮**从 1 行占位新建并带 **27** 项：配对两个方向、ABI/前缀支持面、`infy_e_<name>_<8hex>` 的哈希规范化、§7.6.4 封闭表逐行、UB-010 移交四态、绑定头与包装 TU（含一次真 `gcc -std=c11 -Wall -Wextra` 编译）。
 - 先前记为"§9.2 字节级金样"实际是 1 条规范样例逐字节 + 1 条 caret 行规则（`diag` 2 项）；
   `goto` 的三条 `E-0301` 越界路径与 `E-0121` 在 A4 轮之前无测试（**A4 轮已补**，见下）。
 
@@ -144,8 +146,8 @@ B 轨 `src/btrack.rs` 的**库内**链路（探针→扫描→降级→本侧装
 **D2 轮**再把 §7.8.4 的 `infy ifbc dump|verify` 命令接上（`cli` 20 → **28**，双侧文本第一次在命令层比对）。
 B 轨剩下的缺口在**产物那半边**：阶段 [8] 没有通往 IFBC VM 的调用通道 ⇒ `.inf ifbc` 恒空、含 `@py` 的 module 走不到 [9]（**F29**），§7.7.1 样例本体也被能力表红着拒（**F30**）；
 C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（C3 轮复跑 **32335 断言 / 0 失败**，直接链生产 `infy_rt.c`）；
-`src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs` 是 1 行占位文件（`src/artifact.rs` 已于 C3 轮从"不存在"落成 §7.4 容器写入器 + 读取器 + §7.3 build-id，18 项独立单测）（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
-A 轨绑定、`std.net` TLS、`infy lsp` 未实现。
+`src/host.rs`、`src/doc.rs`、`src/conformance.rs` 是 1 行占位文件（`src/artifact.rs` 已于 C3 轮从"不存在"落成 §7.4 容器写入器 + 读取器 + §7.3 build-id，18 项独立单测）（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
+A 轨只落了 `@c` + `cc` + 标量/指针那一半（§7.6.2 工具链注册、§7.6.5 反向导出、§7.6.6 进程隔离未实现 = F32/F33）、`std.net` TLS、`infy lsp` 未实现。
 IFBC 断言（B3 轮 79 → 82，D4(2) 轮 **82 → 146**：合并线格式 + 17 条间隙指令 + Rust 写↔C 读执行的夹具；
 D4(3) 轮 **146 → 167**：三份双侧共用文本夹具，D1(2) 轮 **167 → 180**：第四份 = 阶段 [6a] 的真产物）
 **B2 轮起既链 `runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，两侧同为 **180/180**（D1(2) 轮复跑）、
@@ -431,7 +433,7 @@ stdout 逐字节相同）；`cargo test --offline --lib` **333 passed / 0 failed
 
 **明确未做**（不用假成功掩盖）：阶段 [10] 的 sumdb 校验段与运行时自校验比对（`.inf sum` 只是 `lock.dirh` 的抄写，
 tour 无依赖 → 实例上是 0 条）；`ResourceKeys`/`EnvOffsets` 区写空集（前端不收集 `std.chain.lock` 键名）；
-`.inf ifbc` 恒为空（D1）；A 轨 `#[link]` 目标码与 §7.2 的 LTO 编排、`infyl` 独立链接器驱动；
+`.inf ifbc` 恒为空（D1）；§7.2 的 LTO 编排与 `infyl` 独立链接器驱动（A 轨 `@c` 的 `.c` 自 D3 轮起已进链接命令）；
 `infy artifact dump --nodes`/`diff` 的其余形态；C 侧 `infy_art_dump_meta` 那行 `meta off=0 len=0` 是**写死的显示值**
 （不是容器内容错，是打印错），本轮未改，登记在 RUNLOG 下一步。
 
@@ -753,11 +755,11 @@ rt harness **32335 assertions / 0 failures** exit 0（在 `target/scratch` 里�
 **`infy run` 自 C4 轮起 exit 0/3 真执行**，见上文 C4 一节；**`infy test` 自 C5 轮起 exit 0/1/3 真执行**，
 见上文 C5 一节。`bench` 留在这一列是因为 §13.4 根本没有 `infy bench`，它是 `infy test --bench`；
 `infy test --cov` 同样显式 exit 1 —— §12.4 的 `-O0` 节点表插桩没有任何阶段产出，F22）；
-A 轨绑定生成（`src/atrack.rs`）、§11 `HostApi`（`src/host.rs`）、§12 合规用例集（`src/conformance.rs`）、
+A 轨的 §7.6.2 工具链发现/注册与 `recipe.toml` 审计（F32）、§7.6.5 反向导出与 §7.6.6 进程隔离（F33）、§11 `HostApi`（`src/host.rs`）、§12 合规用例集（`src/conformance.rs`）、
 `infy doc`（`src/doc.rs`）同样未实现 —— 这四个文件当前是 1 行占位。
 HIR（`src/hir.rs`）于 C1 轮落成**声明层**；**语句/表达式级 IFIR 仍没有独立表示**（C2 是 AST→C 直接发射），
 因此后端与阶段 [7] 之间没有可优化的中间层。
-`codegen` 明确拒绝、没有假成功的构造：闭包、`dyn`、`@embed`（B 轨 D1 / A 轨 D3）、A 轨 `extern` 调用、
+`codegen` 明确拒绝、没有假成功的构造：闭包、`dyn`、`@embed` 的 B 轨半边（F29）、A 轨 §7.6.4 未发射的那五类跨边界类型（F31 / 偏差 D-46(e)）、A 轨 `extern` 调用、
 `event` 调用、`for`/`defer`/`const_assert`、128 位算术与字面量、窄位宽移位、`overflow = "saturate"`、
 含 NUL 的 `str` 字面量、字节串字面量、owned 值的移动（F12）。逐条见 `src/codegen.rs` 的 `CgError` 与偏差 D-26…D-31。
 
@@ -871,3 +873,93 @@ rt harness **32335 assertions / 0 failures** exit 0（在 `target/scratch` 里�
 **C 侧零改动**（`.c`/`.h` 一行没动）仍复跑四条链：`gcc -c runtime/infy_rt.c` 与 `-c runtime/infy_ifbc.c` 各
 **0 告警** exit 0、rt harness **32335 assertions / 0 failures** exit 0（在 `target/scratch` 里跑）、
 替身链 IFBC **180/180**、生产链 IFBC **180/180**、两份 stdout `cmp` **无差异**。
+
+## D3 轮（2026-10-16）：`src/atrack.rs` 落成 A 轨绑定的唯一真值源，最小 `@c` 单元第一次被编译、链接、在产物里调通
+
+**这一轮补的是 §1 阶段 D 里最后一块"从零写真东西"的地**：`atrack.rs` 是 1 行占位（不像 `btrack` 那样有
+半成品可收敛），而验收命令要求**真链接** —— `E-0723` 在全仓库**零发点**（只有 `codes.rs` 的码表行），
+`sema.rs:974` 的 `in_extern_block()` 是恒 `false` 的占位，`sema.rs:1988` 的 `E-0721` 判据写的是
+`self.link_names().iter().any(|_| true)`（等价于"模块里存在过任何一个 `#[link]`"，不是判据），
+`codegen.rs:1226` 对 A 轨调用发指名 `CgError` = 本轮的发射落点。
+
+**落地面**
+
+- `src/atrack.rs`（新建，**27 项单测**，每项 doc comment 指名条款）：
+  §7.6.1 的读取与配对（`signature_blocks` / `atrack_sources` / `pair`，两个方向都出 `E-0720`；
+  `extern "C"` 之外的 ABI 与 `@cpp`/`@rust`/`@zig` 点名拒绝）；§7.6.4 的封闭表（`boundary_c`，
+  把"规范禁止"与"规范允许但没发射形态"分成 `Forbidden`/`Unsupported` 两半，见偏差 D-46(e)）；
+  UB-010 的移交四态（`ownership_of`）；§7.6.3 项 2 的符号（`normalized_block` + `sig_hash` +
+  `wrapper_symbol`）；项 1 的 `binding_header` 与 `unit_c_source`。
+- `src/cli.rs`：`analyse()` 里接 `atrack::pair` 的另一半方向（`emit_atrack_gaps`）；
+  `a_track_units()` 把 `infy_binding.h` 与 `a_track/<name>.c` 写进**每个**构建目录（`--verify-reproducible`
+  跑两个目录，所以写文件的动作必须在 `stage9` 里面而不是外面）；`stage9` 的 `cc` 命令加
+  `-I <work>/a_track` 与逐单元的 `.c`，顺序按单元名字典序（§7.4 段顺序 + §7.3 可复现）。
+- `src/sema.rs`：`FnInfo::link_unit`（§7.6.1 的 `#[link]` 挂在块上，块内声明继承它）；
+  `register_fn` 改为返回索引，`extern` 块注册时对每条声明跑 `atrack::decl_gaps` ⇒ **`E-0723` 第一次有发点**；
+  `E-0721` 的判据换成被调者自己的 `is_foreign`；删掉恒假的 `in_extern_block`（它此前只在"顶层 `;` 体"这条
+  路径上被读，那条路径的答案本来就是 `false`，留着一个常量假判据是下一轮误判的来源）。
+- `src/hir.rs`：`HirFn::link_unit` 透传；`signature_text()`（§11 / ABI §2 那一列）**此前零调用点**，
+  现在是包装哈希的输入 ⇒ 由 `the_normalised_block_uses_the_hir_signature_column` 钉成活的。
+- `src/codegen.rs`：`emit_foreign_decl` 从"指名拒绝"变成发射 `extern <原型> <wrapper>;`（键是**包装符号**，
+  不是那个从没人定义的 INFY 符号）；`user_fn_call` 对 A 轨被调者改用 `wrapper.call(argv)`，
+  `()` 返回走 `((void)w(a), (InfyUnit){0})`；`StmtKind::Expr` 里 A 轨 `@c` 语句**不发射任何东西**
+  （它的 C 原文活在 `a_track/<name>.c` 里），B 轨半边与 §7.6.4 未发射的行继续以条款号拒绝。
+- `src/parser.rs`：两处"块状表达式"判定补 `ExprKind::Embed`（偏差 D-46(f)，见下"本轮修掉的真实缺陷"）。
+
+**本轮修掉的三条真实缺陷（都不是规范歧义，各有回归锁点）**
+
+1. **`@c` 作语句时解析失败**（`parser.rs`）。§3.6 明写嵌入块"或作为 `expr_stmt` 出现"，§7.6.1（spec:1113）
+   与 §14（spec:2143）的样例把它写成**不带 `;`** 的一条语句；而 `block()` 与 `stmt()` 的"块状表达式"清单
+   （列 `If`/`Match`/`Block`/`Unsafe`/`StructLit`/`Closure`）漏了 `Embed` ⇒ 规范自己的样例报
+   `E-0053 语句缺少终结符`，且 span 落在**下一条**语句的开头（本轮第一次写 A 轨端到端测试时被报在
+   `unsafe { … }` 那一行，第一眼像是 `unsafe` 的问题）。修 = 两处补 `Embed`，`E-0722`/配对才轮到显形。
+   锁点 = `parser::tests::an_embed_block_statement_needs_no_semicolon`（无 `;` 与有 `;` 两种都断言 + AST 形状）。
+2. **块状尾表达式的结果临时量声明在内层作用域**（`codegen.rs`）。`{}`/`unsafe {}` 作函数尾值时，
+   `bres_N` 被声明在 `self.b("{")` **之后**，于是 `return bres_N;;` 引用一个已经出视线的变量 ——
+   gcc 报 `'bres_1' undeclared`，产物根本链不出来。旁边的 `ExprKind::If` 分支一直是对的（先声明再开分支），
+   这一臂把顺序写反。这条缺陷存在了很久：`infy check`/`infy build` 到阶段 [9] 才需要真编译，而 tour 里
+   没有"块作尾值"的写法，所以**从未被执行面暴露**。修 = 结果临时量移到开括号之前。
+   锁点 = `codegen::tests::a_block_tail_expression_declares_its_result_in_the_function_scope`。
+3. **`E-0721` 的判据是占位**（`sema.rs`）。原判据 `self.link_names().iter().any(|_| true)` 与"被调者是不是
+   A 轨 extern"无关：模块里只要出现过任何一条 `#[link]`，所有 `is_foreign` 调用都被判要 `unsafe`；
+   一条 `#[link]` 都没有时，真正的 A 轨调用反而**不报**。修 = 判被调者自己的 `is_foreign`，
+   并把"是不是 A 轨单元成员"写进诊断的 note（`link_unit`）。
+   锁点 = `cli::tests::an_unsafe_less_a_track_call_is_e0721`。
+
+**端到端（D3 的验收命令本身）**：`target/scratch/cli-atrack` 那份最小 module（`#[link(name = "decoder",
+static = true, toolchain = "cc")] extern "C" { fn dec_mark(v: u32) -> u32; }` + 一个 `@c(name = "decoder")`
+的 C 定义 + 链节点里 `unsafe { dec_mark(41u32) }`）→ `infy run` **exit 0**，程序 stdout 逐字节 =
+`dec_mark(41) -> 42`（观察通道是 C 侧的 `printf`：INFY 侧没有任何构造能写 stdout = F19，所以非空输出必须
+由 A 轨的 C 代码提供）。`infy build` 同一 module 多打一行 `a_track ok — 阶段 [8] 绑定：1 个单元（decoder）、
+1 个包装符号、475 字节写入 …\a_track（§7.6.3）`，目录里是 `infy_binding.h` 与 `decoder.c`。
+**三处符号逐字符一致**被 `the_build_writes_the_binding_header_and_the_wrapper_unit` 钉住（头 / 包装本体 /
+`ci.c` 的 `extern` 与调用点）——不一致只会以链接错误现形，两侧各自的单测都看不见，所以比较的是符号本身
+而不是"两边都能编译"。`atrack::tests::the_generated_header_and_wrapper_compile` 另用
+`gcc -std=c11 -Wall -Wextra -c` 直接编译生成的头 + 假用户实现，断言 **0 error / 0 warning**。
+
+**规范未定 → 选定实现**：偏差 **D-46 (a)–(f)**（`<8hex>` 的规范化算法 / 哈希是块级而 `signature_text` 是函数级 /
+UB-010 只判返回方向 / `usize` 写 `size_t` 而不是规范文中的 `uint64_t` / 禁止项与未发射项分道 /
+`@c` 语句不需要 `;`）。
+
+**回归（全部本轮实测，非引用）**：`cargo test --offline --lib` **505 passed / 0 failed**（基线 468，+37：
+`atrack` 0 → 27、`cli` 28 → 33、`codegen` 22 → 26、`parser` 8 → 9）；`cargo check --offline --lib` 0 error /
+**50 warning**（未新增 —— 本轮把改动前后的告警**集合**逐条 `diff` 过，同一棵树 fresh 检出也是 50，
+`BACKLOG` 里那句"50"与本文件的"50"是同一口径）；`infy check examples/tour` exit **0**、
+`infy build examples/tour --verify-reproducible` exit **0**（生成 C11 仍 **12513** 字节 / 产物仍 **199975** 字节 /
+`blob 738` / `build-id 4d8250b5…55ba` 逐字节不变：tour 没有 A 轨源 ⇒ `a_track/` 不创建、链接输入一字不变，
+这正是 BACKLOG §2 事先约定的判据）、`infy run`/`infy test examples/tour` exit **0**、
+`infy artifact info … --nodes` exit **0**、生成 C 的 `gcc -std=c11 -Wall -Wextra -I runtime -c` exit **0**
+（0 error / 0 warning）、`(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决，未变）；
+**C 侧本轮零改动**（`.c`/`.h` 一行没动）仍复跑四条链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警** exit 0、
+rt harness **32335 assertions / 0 failures** exit 0、替身链与生产链 IFBC 各 **180/180 pass / 0 FAIL**
+exit 0 且两份 stdout `cmp` **无差异**。
+
+**明确未做**（不用假成功掩盖，全部登记）：**F31** = §7.6.4 行 7 的 `#[repr(C)]` struct 与 ADT 的不透明指针
+跨边界没有落点（绑定头只携带标量与标量指针），于是 §7.6.1 样例自己的 `-> *mut DecHandle` 过不了 ——
+与 F30 同族：**规范的样例不能构建**；**F32** = §7.6.2 的工具链发现/注册（`TOOLCHAIN.infy.toml`、
+`infy toolchain probe/add`）、`<build>/a_track/<name>/recipe.toml` 审计、版本核对 `E-0604` 与
+`--allow-toolchain-drift`/`W-0604`/`unreproducible` 标记全未接，A 轨现在只驱动 `--cc`/`$CC` 那一个 `cc`；
+**F33** = §7.6.3 项 3 的非标量边界 thunk（长度/对齐/null→`Option`、`R-0720` 借用有效性、`R-0722`/`R-0723`）
+只有标量转发、项 5 的外部行号→INFY 诊断位置（`decoder.c:41`）未做、§7.6.1 的 `W-0720`
+（源码导出了而签名未声明）与"签名声明了但源码未导出 → 链接期 `E-0604`"没有映射（今天由 `cc` 的
+undefined reference 原文冒出来）、§7.6.5 反向导出与 `E-0724`、§7.6.6 的 `isolation = "process"` 全未实现。

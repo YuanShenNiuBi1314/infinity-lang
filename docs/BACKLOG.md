@@ -483,8 +483,65 @@
       `cmp`、1/10 条阻断与 exit 2、12513/199975/`4d8250b5…55ba` 未变、四条 C 链（32335/0、180/180×2、
       `-c` 各 0 告警、两份 stdout `cmp`）全部为该提交上的实测复跑，非引用；本节的做账行与 RUNLOG 的
       cron-18 行在其后的提交里。
-- [ ] D3 `src/atrack.rs`：`#[link]` + `@c` 配对、`infy_binding.h` 生成、`infy_e_<name>_<8hex>` 包装、缺 `unsafe` 报 `E-0721`、缺 `#[owns]/#[borrows]` 报 `E-0723`。
+- [x] D3 `src/atrack.rs`：`#[link]` + `@c` 配对、`infy_binding.h` 生成、`infy_e_<name>_<8hex>` 包装、缺 `unsafe` 报 `E-0721`、缺 `#[owns]/#[borrows]` 报 `E-0723`。
       验收：一个最小 `@c` 单元被 gcc 编译、链接、在产物里被调通。
+      **D3 轮（2026-10-16）落地并勾 `[x]`**（`atrack.rs` 从 1 行占位新建 = 绑定的唯一真值源，**27 项**单测）。
+      (1) **配对 §7.6.1 两个方向**：`atrack::signature_blocks` / `atrack_sources` / `pair` —— `sema` 一直只报
+          "`@c` 找不到签名块"那一半，本轮补上 "`#[link]` 落空" 与 ABI/前缀支持面（`extern "C"` 之外的
+          `"system"`/`"infy-unwind"` 点名拒绝；`@cpp`/`@rust`/`@zig` 因 §7.6.2 没有消费者而拒绝，见 **F32**）。
+      (2) **`E-0723` 第一次有发点**（开工前 `grep -rn "E-0723" src/ | grep -v codes.rs` 为空）：UB-010 的移交判据
+          四态（缺属性 / `#[owns]`+`#[borrows]` 并存 / `#[borrows]` 无生命周期 / `()` 不要求）+ §7.6.4 末条的
+          禁止传递（`Rc<T>`、`Vec`/`String` 的容量与裸内存）。**判据只落返回方向** —— 规范样例的
+          `dec_open(path: *const u8, …)` 与 `dec_close(h: *mut DecHandle)` 形参都是裸指针而没有属性，
+          若"参数也算"则规范自犯 `E-0723`（偏差 **D-46(c)**）。
+      (3) **§7.6.3 项 1/2/4 的产物**：`infy_binding.h`（反向生成的用户符号声明 + 包装原型）与
+          `a_track/<name>.c`（用户源码逐字节 + `infy_e_<name>_<8hex>` 本体）由 `cli::a_track_units` 写进
+          **每个**构建目录（`--verify-reproducible` 跑两个目录 ⇒ 写文件必须在 `stage9` 里面），
+          `stage9` 的 `cc` 命令加 `-I <work>/a_track` 与逐单元 `.c`，顺序按单元名字典序（§7.4 + §7.3）。
+          哈希 = 规范化签名块 SHA-256 前 4 字节；规范化裁定 = 块名 + 成员按 `(package, name)` 字典序
+          （声明序会随文件系统变 ⇒ §7.3 的承诺断掉），**D-46(a)/(b)**；`hir::HirFn::signature_text`
+          此前**零调用点**，现在是它的输入。
+      (4) **发射面接上**：`codegen::emit_foreign_decl` 发 `extern <原型> <wrapper>;`（键是包装符号，不是那个
+          从没人定义的 INFY 符号），`user_fn_call` 改调 `wrapper.call(argv)`，`()` 返回走
+          `((void)w(a), (InfyUnit){0})`；`StmtKind::Expr` 里的 A 轨 `@c` 语句不发射任何东西（C 原文活在
+          `a_track/` 里）。§7.6.4 里**规范允许但还没发射形态**的五类（ptr+len 展开 / null→`Option` /
+          `Result` 出参 / 回调 ctx / struct 按值）以条款号 `§7.6.4` 指名 `CgError` 而**不发码** ——
+          拿"程序不合规"的码去报一条规范允许的签名 = 假称不合规，且会写进 §12 的通过率（**D-46(e)**）。
+      **端到端实测**：最小 `@c` 单元（`#[link(name = "decoder", static = true, toolchain = "cc")]` +
+      `extern "C" { fn dec_mark(v: u32) -> u32; }` + `@c(name = "decoder")` 的 C 定义 + 链节点里
+      `unsafe { dec_mark(41u32) }`）→ `infy run` **exit 0**，程序 stdout 逐字节 = `dec_mark(41) -> 42`
+      （观察通道是 C 侧 `printf`：INFY 没有任何构造能写 stdout = F19，非空输出必须来自 A 轨的 C）；
+      `infy build` 多打 `a_track ok — 阶段 [8] 绑定：1 个单元（decoder）、1 个包装符号、475 字节写入 …\a_track`。
+      **头 / 包装本体 / `ci.c` 三处符号逐字符一致**被 `cli::tests::the_build_writes_the_binding_header_and_the_wrapper_unit`
+      钉住（不一致只会以链接错误现形，两侧各自的单测都看不见）；`atrack::tests::the_generated_header_and_wrapper_compile`
+      用 `gcc -std=c11 -Wall -Wextra -c` 真编译生成的头 + 假实现 ⇒ **0 error / 0 warning**。
+      **接线当场揪出三条真实缺陷**（都不是规范歧义，各带回归锁点，细节见 `docs/status.md` 的 D3 一节）：
+      (a) `parser` 的两处"块状表达式"判定漏了 `Embed` ⇒ **规范自己的 A 轨样例**（§7.6.1/§14 不带 `;`）报
+          `E-0053`，span 还落在下一条语句上（`an_embed_block_statement_needs_no_semicolon`，偏差 **D-46(f)**）；
+      (b) `codegen` 把块状尾表达式的结果临时量声明在**内层**作用域 ⇒ `return bres_1;` 引用已出视线的变量，
+          真链接时 gcc 报 `'bres_1' undeclared`（旁边的 `ExprKind::If` 分支一直是对的，这一臂顺序写反；
+          `a_block_tail_expression_declares_its_result_in_the_function_scope`）；
+      (c) `E-0721` 的原判据是 `link_names().iter().any(|_| true)` 的占位 —— 与"被调者是不是 A 轨"无关，
+          改成被调者自己的 `is_foreign`（`an_unsafe_less_a_track_call_is_e0721`）。
+      同时删掉恒假的 `sema::in_extern_block`（它只在"顶层 `;` 体"这条路上被读，答案本来就是 `false`；
+      留一个常量假判据是下一轮误判的来源）。
+      回归：`cargo test --offline --lib` **505 passed / 0 failed**（基线 468，+37 = `atrack` 27 + `cli` +5 +
+      `codegen` +4 + `parser` +1），`cargo check --offline --lib` 0 error / **50 warning**（改动前后告警**集合**
+      逐条 diff 相同，且同一棵树 fresh 检出同为 50 ⇒ 未新增），`infy check|build|run|test examples/tour` 全
+      exit 0 且 `--verify-reproducible` 0、生成 C11 仍 **12513** 字节 / 产物仍 **199975** 字节 / `blob 738` /
+      `build-id 4d8250b5…55ba` **逐字节不变**（tour 无 A 轨源 ⇒ `a_track/` 不创建、链接输入一字不变，
+      正是开工前定的判据）、`infy artifact info … --nodes` 0、生成 C 的 `gcc -c` 0/0、
+      `(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决）；**C 侧零改动**仍复跑四条链：
+      `-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警**、rt **32335/0**、替身链与生产链 IFBC 各 **180/180**
+      且两份 stdout `cmp` **无差异**。
+      **明确未做**（登记，不假成功）：**F31**（§7.6.4 行 7 的 `#[repr(C)]` struct / ADT 不透明指针没有跨边界落点
+      ⇒ §7.6.1 样例自己的 `-> *mut DecHandle` 过不了，规范样例不能构建，与 F30 同族）、
+      **F32**（§7.6.2 工具链发现/注册、`recipe.toml` 审计、版本核对 `E-0604`/`--allow-toolchain-drift` 全未接）、
+      **F33**（§7.6.3 项 3 的非标量 thunk 与项 5 的调试映射、§7.6.1 的 `W-0720` 与"声明了但未导出 →
+      链接期 `E-0604`"映射、§7.6.5 反向导出与 `E-0724`、§7.6.6 `isolation = "process"`）。
+      证据提交：**`e669834`**（`feat(D3)`）—— 上述 505/0、0/50、端到端 exit 0 + `dec_mark(41) -> 42`、
+      12513/199975/`4d8250b5…55ba` 未变、四条 C 链（32335/0、180/180×2、`-c` 各 0 告警、stdout `cmp`）
+      全部为该提交上的实测复跑，非引用；本节的做账行与 RUNLOG 的 cron-19 行在其后的提交里。
 - [x] D4 **Rust 编码 ↔ C 虚拟机操作数个数对齐**（A2 本轮静态比对发现，未修；D2 的交叉验证必然踩到）：
       `push` Rust 2 个操作数（池索引 + 类型，`DEV-IFBC-13`）vs `runtime/infy_ifbc.c` 的 `OPS[OP_PUSH].nops = 1`；
       `box.dyn` Rust 1 vs C 0（附录 D.7 与 `runtime/IFBC.md` 都写 0 操作数，Rust 侧不符规范）；
@@ -827,33 +884,69 @@
       （F27 的迭代器载体是前置），要么把 §7.7.1/§14.2 的样例改成可摄取形态并请维护者在规范里勘误；
       裁定写进 `docs/spec-deviations.md`，在此之前任何文档不得声称"§7.7.1 样例可构建"。
 
+- [ ] F31 **§7.6.4 行 7 的 struct / ADT 不透明指针没有跨边界落点，于是 §7.6.1 的样例自己过不了**（D3 轮确认）：
+      绑定头只携带**标量与标量指针**（`uint32_t`/`double`/`const uint8_t*`…），因为按值跨边界的
+      `#[repr(C)]` struct 需要类型定义同时出现在头与生成码里，而生成码的 ADT typedef
+      （`infy_<pkg>_<Name>`）是 ci.c 私有的 —— 两侧各写一份就是 `-Wall` 下的不兼容声明。
+      后果实测：§7.6.1 的 `fn dec_open(...) -> *mut DecHandle` 与 `dec_close(h: *mut DecHandle)` 在阶段 [8]
+      被 `§7.6.4` 指名拒绝（D-46(e) 的第二半），所以那一条 A 轨样例**不能构建** —— 与 F30 同族。
+      验收：`DecHandle` 这类 ADT 的指针能跨边界（头里给 `struct DecHandle;` + 同名 `typedef`，生成码用同一个
+      tag，或按 §4.8 把 `#[repr(C)]` 的布局表导出成头），并让 §7.6.1 的样例通过
+      `infy check` + `infy build` + gcc；在此之前任何文档不得声称"§7.6.1 样例可构建"。
+
+- [ ] F32 **§7.6.2 的工具链发现/注册与审计面全未接**（D3 轮确认）：`TOOLCHAIN.infy.toml`（module 根或
+      `%LOCALAPPDATA%/Infinity/toolchain/`）、`infy toolchain probe` / `infy toolchain add <kind> --path <exe>`、
+      构建期**版本核对**（实际编译器版本必须与 `.infib` 记录的 major/minor 一致，否则 `E-0604`；
+      `--allow-toolchain-drift` 降级为 `W-0604` 并把产物标 `unreproducible`）、
+      `<build>/a_track/<name>/recipe.toml`（编译命令行 / 环境变量 / 输入哈希，供复放与审计）都没有实现。
+      现状：A 轨只驱动 `link_plan` 的 `--cc`/`$CC`（缺 → `E-0602` + exit 6，P15 已钉），而
+      `#[link(toolchain = "…", flags = [...], isolation = "…")]` 的三个参数**被读出来却没有任何消费者**。
+      验收：要么接上（`recipe.toml` 落文件 + 版本核对走 `E-0604`/`W-0604` + `flags` 进命令行），
+      要么在偏差里记"这三个参数在本实现无对应语义"，不许静默忽略。
+
+- [ ] F33 **§7.6.3 项 3/5 与 §7.6.1 的 `W-0720`、§7.6.5 反向导出、§7.6.6 进程隔离未做**（D3 轮确认）：
+      项 3 的边界 thunk 现在只有"标量原样转发"一种形态，规范列的检查（长度 / 对齐 / null→`Option` /
+      调用期借用有效性 `R-0720` / 错误码→`NativeErr` / 外部忘写 `err` → `R-0722` / 回调计数不为 0 时卸载 →
+      `R-0723`）一条都没有落点；项 5 的调试映射（外部行号 → INFY 诊断位置，使 `R-` panic 能报
+      `decoder.c:41`）未做；§7.6.1 的 `W-0720`（源码导出而签名未声明且无人引用）没有 C 侧符号扫描，
+      而"签名声明了但源码未导出 → **链接期** `E-0604`"也没有映射 —— 今天由 `cc` 的 undefined reference
+      原文冒出来（退出码 6，不是 `E-0604`）；§7.6.5 的 `#[export("name")]` 反向导出表进 `.inf meta` 与
+      `E-0724`；§7.6.6 的 `#[link(isolation = "process")]`（独立子进程 + 长度前缀 IPC）全未实现。
+      验收：逐条落地，或逐条在 `docs/spec-deviations.md` 记"无对应语义"，禁止假成功。
+
 ## 2. 当前指针
 
-> **下一轮第一件事：D3 —— `src/atrack.rs` 的 A 轨绑定**（§1 阶段 D 的第一个 `[ ]`；D2 已在 D2 轮勾掉，
-> 证据写在该条目里）。与 D1 不同，这里**没有半成品**：`src/atrack.rs` 是 1 行占位（`wc -l` = 1），
-> "先补测试再收敛"的手法不适用，要真写；但上游把判据算好了大半，先 grep 再动手：
-> (1) `sema` 已带 `is_foreign`（`sema.rs:150`/`748`/`792`，来自 §3.3 的 `;` 体），已发 **`E-0720`** 两处
->     （体为 `;` 而既无 `#[link]` 也不在 extern 块；§7.6.1 的 `@c` `name` 找不到配对的 `#[link(name = "…")]`）、
->     **`E-0721`**（`sema.rs:1988`：A 轨调用不在 `unsafe` 内）、**`E-0722`**（缺 `[profile] a_track`）；
->     **`E-0723` 在全仓库没有任何发点**（`grep -rn "E-0723" src/ | grep -v codes.rs` 为空）⇒ 缺
->     `#[owns]/#[borrows]` 的判定要新写，这是 D3 验收里唯一真正空的码。
-> (2) **三条先审再动的坏味道**（都是"判据写死 / 占位"那一族，认法见经验库
->     `infy-unreachable-implementation-branch`）：`sema.rs:974` 的 `in_extern_block(&self, _it) -> bool { false }`
->     **恒为假** ⇒ extern 块里的 `;` 体函数只靠 item 上挂没挂 `#[link]` 才不被误报 `E-0720`；
->     `sema.rs:1988` 的条件里写 `self.link_names().iter().any(|_| true)` —— 等价于 `!link_names().is_empty()`，
->     是占位不是判据；`codegen.rs:1226` 对 A 轨 `extern` 调用发指名 `CgError`，那就是 D3 的发射落点
->     （消息里已经把 `infy_binding.h` 与 `infy_e_<name>_<8hex>` 的名字写死）。
-> (3) 现成的命名/形状件：`hir.rs:467` 已有"wrapper 要 hash 的那一列签名"（§11 / ABI §2），
->     `lexer.rs:3475` 的 `@c` 不透明区样例带 `#include "infy_binding.h"` 且 `lexer.rs` 有断言认它 ⇒
->     建议 `atrack.rs` 出**唯一真值源**（`wrapper_symbol(name, sig_hash)` + `binding_header(…)`），
->     codegen 与测试都从它取，别再出现第二份命名规则（`infy-doc-claims-vs-evidence` 那一族）。
-> (4) 验收会碰**链接**：一个最小 `@c` 单元要"被 gcc 编译、链接、在产物里被调通"，而 `cli.rs::stage9()`
->     现在只链 `ci.c + infy_rt.c + infy_dyn.c` ⇒ 要把 A 轨 `.c` 加进链接命令。tour 没有 A 轨源，所以只要
->     tour 的链接输入不变，199975 / `blob 738` / `build-id 4d8250b5…55ba` 就应逐字节不变；若动了必须同步
->     status/coverage/README 与本节，不留旧数字。缺 `cc` 时先查 PATH（`gcc` 在 `/c/msys64/ucrt64/bin`）。
+> **下一轮第一件事：E1 —— `conformance/cases/**` 的 §12 用例集**（§1 的第一个 `[ ]`；阶段 A/B/C/D 全部
+> 已勾，E 是"唯一能声称兼容的东西"）。三条现成的路，别重新发明：
+> (1) **用例来源就是已有的 505 项单测**：E1 写的就是"从已有的单元测试里搬运成外部用例"，而每条测试的
+>     doc comment 已经指名条款（§4.1/§4.2/§8.2/§7.6.4/§7.7.2…）⇒ 先做一份"码 → §12 分类"的搬运清单；
+>     **分类目录是文件名的真值源，不是测试模块名**（§12.1/§12.2/§12.5 才是分类）。
+> (2) `src/conformance.rs` 是 1 行占位 ⇒ E1 要新建用例的读入与匹配，E2 再要 `infy conformance --report` 的
+>     **逐分类**通过率（§12.5 明写"只报总数视为不合规"）。该命令现在走"未实现"臂 ⇒ exit 1；D2 轮的同一族
+>     教训直接适用（经验库 `infy-unreachable-implementation-branch`：**上游全绿对"命令存不存在"没有预测力**）。
+> (3) **措辞红线**：E3 之前任何文档不得出现"INFY v2.0 兼容"；"两侧装载期校验等价"仍不许讲
+>     （F26 前半，清单 = D-42 (a)–(e)）。
+> **D3 轮留下的 A 轨余项（E1 用不到，但别当已完成）**：**F31**（`#[repr(C)]` struct / ADT 不透明指针没有
+> 跨边界落点 ⇒ §7.6.1 样例自己的 `-> *mut DecHandle` 过不了 = 规范样例不能构建）、
+> **F32**（§7.6.2 工具链发现/注册、`recipe.toml` 审计、版本核对 `E-0604` 与 `--allow-toolchain-drift` 全未接，
+> A 轨只驱动 `--cc`/`$CC` 那一个 `cc`；`#[link(toolchain=…, flags=[…], isolation=…)]` 三个参数**读出来但没有消费者**）、
+> **F33**（§7.6.3 项 3 非标量 thunk、项 5 外部行号→INFY 位置、§7.6.1 的 `W-0720` 与"声明了但未导出 →
+> 链接期 `E-0604`"映射、§7.6.5 `E-0724`、§7.6.6 `isolation = "process"`）。
+> **D3 轮的现成件（别再造）**：A 轨的命名 / 类型表 / 产物文本一律从 `atrack::*` 取（`wrapper_symbol`、
+> `normalized_block`、`boundary_c`、`decl_gaps`、`binding_header`、`unit_c_source`、`pair`、`wrapper_plan`）——
+> `codegen` 与 `cli` 从同一批函数取，所以头里的原型与 `ci.c` 的调用点不可能不一致；
+> `sema::FnInfo::link_unit` 与 `hir::HirFn::link_unit` 是"这条声明属于哪个 `#[link]` 单元"的唯一来源。
+> 加 A 轨源会**动**链接输入 ⇒ 产物字节与 build-id 会变（预期变化，须同步 status/coverage/README/本节）；
+> 不加 A 轨源则 12513 / 199975 / `4d8250b5…55ba` 必须逐字节不变，D3 轮已按这条验过。
+> **仍有效的 D3 手法（写 A 轨相关的任何东西前先看）**：判据"写死 / 恒假 / 占位"那一族本轮清了三个 ——
+> `sema::in_extern_block`（恒 `false`，且它只在顶层 `;` 体那条路上被读，答案本来就是 `false` ⇒ 删除而不是
+> "修好"）、`E-0721` 的 `link_names().iter().any(|_| true)`（与"被调者是不是 A 轨"无关 ⇒ 换成 `is_foreign`）、
+> `hir::HirFn::signature_text`（零调用点 ⇒ 现在是包装哈希的输入）。认法见经验库
+> `infy-unreachable-implementation-branch`。缺 `cc` 时先查 PATH（`gcc` 在 `/c/msys64/ucrt64/bin`）。
 > **D2 轮的现成件（别再造）**：`infy ifbc dump|verify` 已可用（P22/P23/P24），§12.3 的黄金文件现在能直接从
-> 命令行取；`--canonical` 是双侧共用文本且此时 stdout 是纯的。D3 用不到 IFBC，但若要与 C 侧对表形状，
-> `docs/internals/ifbc-encoding-rust.md` 与 `runtime/IFBC.md` 那两份镜像表是参照。
+> 命令行取；`--canonical` 是双侧共用文本且此时 stdout 是纯的 ⇒ **E2/E3 的期望文件可以直接用命令生成**，
+> 不必再进 C 目录跑 harness；要与 C 侧对表形状时，`docs/internals/ifbc-encoding-rust.md` 与
+> `runtime/IFBC.md` 那两份镜像表是参照。
 > **仍然不许讲的话**："两侧装载期校验等价"（**F26 前半**，清单 = D-42 (a)–(e)）—— D2 的实现把这句 note
 > 直接打进命令输出了，措辞照 `docs/coverage.md` 的"被测对象是生产运行时吗"那一行。
 >
@@ -924,10 +1017,12 @@
 >
 > 未修只登记：D-18、D-19/F7、F8、F9/F10/F11、F12…F15、F16/F17/F18、F19/F20、F21/F22/F23/F24、F25、
 > F26（"把 verify 结论也比一遍"那半已做）、F27、F28、**F29**（阶段 [8] 没有通往 IFBC VM 的调用通道 ⇒
-> `.inf ifbc` 恒空）、**F30**（§7.7.1 的推导式样例过不了能力扫描，规范样例不能构建）；
+> `.inf ifbc` 恒空）、**F30**（§7.7.1 的推导式样例过不了能力扫描，规范样例不能构建）、
+> **F31/F32/F33**（D3 轮的 A 轨余项：`#[repr(C)]` struct 跨边界 / §7.6.2 工具链注册与审计 /
+> §7.6.3 项 3·5 与 §7.6.5/§7.6.6）；
 > `main` 与本地分叉（另一会话推了 `faa34ad` / `05da606`），**合并主干由人决定**。
-> 优先级最高的已知地雷：**D3**（A 轨绑定 = §1 第一个 `[ ]`，但 `src/atrack.rs` 是 1 行占位、`E-0723`
-> 全仓库无发点、`sema.rs:974` 的 `in_extern_block` 恒为假 ⇒ 是"从零写真东西 + 先审三处占位"，不是收敛），
+> 优先级最高的已知地雷：**E1/E2/E3**（§1 唯一的下一个 `[ ]` = 阶段 E：§12 用例集与逐分类通过率，
+> 在它落地前"通过率"不可测、任何文档不得声称兼容），A 轨余项 **F31/F32/F33**，
 > **F26 的前半**（"两侧校验等价"仍不许讲）、
 > **F12**（移动语义没有运行时入口，`String`/`Vec` 的真实程序写不出来）、**F15**（`fmt!` 被阶段 [4] 挡住，
 > §14.2 样例不能 `check`）、**F19**（没有任何 INFY 构造能写 stdout ⇒ `infy run` 的程序输出对现有一切实例
