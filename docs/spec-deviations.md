@@ -766,3 +766,55 @@ D-38 (b)–(i) 与 D-40 把"哪侧改什么"钉死了，但没有（也无法）
 的 `(code, func, off)` 逐条相等**；(a)–(e) 之内仍不许讲"两侧装载期校验等价"，`docs/coverage.md`
 的"被测对象是生产运行时吗"一行按此写。消掉 (a)(b) 需要本侧的能力表扩容（§7.7.2），登记在
 BACKLOG **F26**；(c)(d) 属"本侧更严"，若要合并需与 C 侧同批改并在这一条下追加裁定。
+
+## D-43 D1(1) 轮（B 轨探针 + 能力扫描落地时）：附录 E.3 的三处未写明之处，选定确定实现
+
+**为什么需要这一条**：`btrack.rs` 之前 0 项单测，本轮补到 23 项后一次跑出 10 红，其中三条不是"测试写错"，
+而是规范把形态写在**文档注释**里、实现按字面读，两边在字节上没有相遇过。附录 E.3 是能力表的规范式，
+§7.7.2 是扫描的规范条款，两者都留了口子。
+
+**(a) `arg:` 派发项的取值域**。E.3 头部（`src/btrack.rs` 的 `CapTable::mapping` 文档与三份表的注释块）
+把行写成两层：
+
+```
+value := "-" | "ignore" | mnemonic | "arg:" case ("," case)* ("," "else=" value)?
+case  := key "->" mnemonic
+```
+
+`case` 那行只写了 `mnemonic`，而 shipped 三份表的实际写法是 `arg:+->add._,…,//->-,%->-,**->-,@->-,else->-`
+—— 分支值就是 `-`。实现（`parse_single`）照 `case` 那行的字面，把分支值一律送进 `check_mnemonic`，
+于是 `else->-` **让整行解析失败**；扫描器把"行解析失败"报成"该 opcode 未映射"，于是
+`BINARY_OP`/`CALL`/`COMPARE_OP`/`CONTAINS_OP`/`IS_OP`/`LOAD_ATTR`/`STORE_ATTR` 这七个家族**无论子操作是否被覆盖**
+都拒绝构建，`lower_named` 永远进不到发射（py-3.14 表 154 行中 7 行、py-3.13 表 14 行受影响）。
+**裁定 = `-` 与 `ignore` 是"值"，在任何位置都合法**（顶层、派发分支、`a|b` 候选表），因为
+`value := "-" | …` 已经把 `-` 定义为值，而 `case` 行里的 `mnemonic` 是对值的一句话简称而不是第二套文法。
+落点：`parse_single` 先认 `-`/`ignore` 再走 `check_mnemonic`；锁点 =
+`btrack::tests::the_mapping_grammar_covers_every_form_the_tables_use`（含 `else->-` 与 `//->-` 两种写法）
+与 `every_row_of_a_shipped_table_parses_under_the_grammar`（三份表的 `unparseable` 必须为空）。
+
+**(b) `co_names` 索引的低 1 位在 3.12+ 是标志位**。§7.7.2 扫描项 2 只写 "`co_names` ∩ `LOAD_GLOBAL`"，
+没写 CPython 3.12 起 `LOAD_GLOBAL`/`LOAD_ATTR`/`STORE_ATTR` 的 `oparg` 打包了标志位
+（`LOAD_GLOBAL`：`oparg = namei*2 + do_call`；`LOAD_ATTR`：`oparg = namei*2 + method`）。
+本机 CPython 3.14.6 实测：`input()` → `LOAD_GLOBAL arg=1` 且 `names=['input']`；`x.foo` → `arg=0`、
+`x.bar` → `arg=2`、`x.bar()` → `arg=1`。实现按原值 `name_at(arg)` 取 ⇒ 单元里**只有一个**全局名时索引越界、
+扫描静默 `continue`（`E-0711` 与 `E-0712 builtin` 两个分支从不触发），有**两个**名字时解析成**邻居**
+（`input` 被当成 `eval`，方向反了）。**裁定 = 统一走 `CodeObj::operand_name()`，对这五个 opname 取 `arg >> 1`**，
+扫描项 2 与 lowering 的 `LOAD_GLOBAL`/`LOAD_ATTR`/`STORE_ATTR` 共用同一入口（不许两侧各自解包）。
+锁点 = `btrack::tests::eval_is_e0711_and_not_a_capability_gap`、
+`gaps_inside_nested_code_objects_are_reported_with_their_own_name`（`<lambda>` 里的 `eval` 仍报）、
+`a_builtin_the_table_refuses_is_e0712_naming_it`（`input` 不被读成邻居）。
+
+**(c) `IMPORT_NAME`/`IMPORT_FROM` 的参数是 `co_names` 索引，不是 `co_consts` 索引**。
+`PyInstr::const_name` 的文档注释自称"服务 `IMPORT_NAME`/`LOAD_ATTR`"，实现却读 `co.const_at(arg)`，
+而这两个 opname 的参数都索引 `co_names`（本机实测 `import numpy` → `IMPORT_NAME arg=0`、
+`names=['numpy']`、`co_consts=[0, None]`）。后果 = §7.7.2 扫描项 3 从不触发：`import numpy`（deny 段里明写的
+原生扩展）的 violations 是**空**；lowering 还把模块名 intern 成空串。**裁定 = 删除 `const_name`，
+`IMPORT_NAME`/`IMPORT_FROM` 与属性形式共用 `operand_name`**（`IMPORT_*` 无标志位，取原值）。
+锁点 = `btrack::tests::a_denied_import_is_e0712_naming_the_module`（真 dump 的 `import(numpy)` 必须被拒）。
+
+**顺带登记的规范性缺口（不是本条的裁定，见 BACKLOG F28）**：E.3 规定 `[opcode]` 行以数值键 `0xNN` 为
+规范式并附 `OPNAME` 别名，但随版本发布的三份表里只有 `IFBC-CAP-py-3.14.toml` 有数值键（154 行），
+`IFBC-CAP-py-3.13.toml` 与 `IFBC-CAP-lua-5.4.toml` **一个都没有** ⇒ `check_alias_agreement` 对这两张表永不触发。
+本机没有 3.13 / lua 解释器，数值不能凭记忆填（§12.2 的可复核要求，B1 轮"编造常数"那一族的教训），
+所以只登记不补数；`the_name_keyed_tables_still_map_every_row` 里留了一条**补上数值键就会变红**的断言，
+强迫改动者把表移进数值键测试并消掉 F28。

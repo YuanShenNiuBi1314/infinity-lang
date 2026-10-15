@@ -51,19 +51,21 @@ infy conformance --report   # 未实现：notice + exit 1
 | §7.4 / §7.3 | 产物容器：宿主可执行文件 + `INFYART2` 段尾 + `.inf meta/rodata 索引/ifbc/sum`；`build-id` | 🟡 C3 轮落地：`src/artifact.rs` 写 + 读，`infy build` 阶段 [9] 产出 199975 字节容器并 exit 0，`infy artifact info --nodes` 读回自家产物（节点表 6 行 = §8.4 金样），`--verify-reproducible` 两个独立目录字节相同，`build-id` 绑满 §7.3 的九类输入。**仍 🟡**：阶段 [10] 的 sumdb 校验/运行时自校验未做（`.inf sum` 只是 `lock.dirh` 的抄写，tour 无依赖 = 空集）、`.inf ifbc` 恒空（D1）、`ResourceKeys`/`EnvOffsets` 写空集、A 轨 `#[link]` 目标码与 LTO 编排没有；另裁掉一条规范级缺陷 **D-33**（重复段尾扫描范围会否掉每个真产物），偏差表见 **D-32** |
 | §7.8 / 附录 D | IFBC 编码、反汇编、装载期六项校验（`R-0704`…`R-0708`）、UB-019 | 🟡 **D4(1)+D4(2)+D4(3) 已把两侧改成 D-38 裁定的同一份线格式，并且读成同一份文本**：`runtime/fixtures/ifbc_rust_writer.bin` 是 Rust 写入器的逐字节输出，C 侧用生产装载器读回并**执行**其中函数；D4(3) 另加两份规范化文本入口（C 侧 `infy_ifbc_dump_canonical`/`infy_ifbc_verify_canonical`，Rust 侧 `ifbc::dump_canonical`/`ifbc::verify_canonical`）与三份共用夹具 —— **附录 D 全部 opcode 的逐指令反汇编相等**、**校验矩阵 10 条 `(code, func, off)` 逐条相等**（Rust 侧 22 项单测 / C 侧 167 断言）。当场抓到 `coro.resume`/`coro.throw` 的 C 侧操作数个数（= 指令流错位）与 D.9 助记符命名，外加本侧 `verify_func` 的重复报告缺陷，全部记入偏差 **D-42**。**仍 🟡**：两侧装载期校验结论仍有 D-42 (a)–(e) 五类不可比（F26 未消）、六条间隙指令在 C 侧装载通过而执行显式拒绝（F27 / 偏差 D-41）、`.inf ifbc` 也仍恒空（D1） |
 | §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ⬜ `src/host.rs` 是占位文件 —— **未实现**（偏移表本身已由 `src/hir.rs::env_table` 落成并有金样） |
-| 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32335 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 146 断言 B2 轮起也链生产 `infy_rt.c`（同为 146/146，输出逐字节相同）。仍不等于 §12 合规：外部用例为 0，逐指令交叉验证是 D4 余项 (3) |
+| 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32335 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 167 断言 B2 轮起也链生产 `infy_rt.c`（同为 167/167，输出逐字节相同），且 D4(3) 轮起两侧读**同一份规范化文本**。仍不等于 §12 合规：外部用例为 0 |
 
-`cargo test --offline --lib` 目前 **426 passed / 0 failed**（`cargo check --offline --lib` 0 error / 50 warning；
+`cargo test --offline --lib` 目前 **449 passed / 0 failed**（`cargo check --offline --lib` 0 error / 50 warning；
 D4(1) 轮把 `ifbc` 从 6 项抬到 **19** 项，并删掉 `CodeBuilder` 的一个死字段，告警 −1；D4(2) 轮 +1 = 钉
 "Rust 写入器的字节 == 已提交夹具"；D4(3) 轮 +2 = `ifbc` **22** 项，钉"本侧渲染的规范化文本 == C 侧渲染并
-提交的那份"）。
+提交的那份"；D1(1) 轮 +23 = `btrack` 从 **0** 到 **23** 项，钉 §7.7.1 探针、§7.7.2 五个扫描项、§7.7.3 版本锁
+与附录 E.3 的表语法/表体 hash —— 它们当场揪出三个把 D1 整条路挡死的缺陷，见 `docs/status.md` 的 D1(1) 一节）。
 "绿灯"只表示已写测试的模块自洽：A4 轮之后 `sema`(22) 与 `pkg`(24，C5 轮 +5) 已不再是零单测，C2 轮之后 `codegen` 也不再是
 （**22** 项 = 19 + C5 轮的 3 项 harness 断言，锁 §4.1/§4.8 布局自检、§4.9/§7.2 检查永不关、§4.11 `?`、§3.12 `match`、
 §4.7.4 清理序、§8.4 节点表、§8.2 `goto` 转移控制、§5.3 调用解析、§5.9 测试 harness、§7.3 字节稳定），
 C3 轮新建的 `artifact` 直接带 **18** 项（§7.4 容器逐字段读回、七个拒绝理由各一条、§7.3 九类输入逐个绑定、
 `INFY_META_OFF_*` 钉回冻结头文本），C4/C5 轮把 `cli` 抬到 **16** 项（`infy run`/`infy test` 的端到端退出码与逐字节转发、
 §5.9/§2.2 的文件选择、§5.8 的 dirhash 不随构建范围变、`--cov`/`--arg`/`--feature` 的显式拒绝），仍在进行中或未开始的只剩
-`host`、`btrack`、`atrack`、`conformance`、`doc`（`hir` 于 C1 轮补了 20 项声明层金样，语句/表达式级 IFIR 仍未落 ——
+`host`、`atrack`、`conformance`、`doc`（`btrack` 于 D1(1) 轮从 0 抬到 **23** 项，但它锁的是**库内**的
+探针/扫描/降级路径 —— 阶段 [6a] 至今没有 CLI 调用点；`hir` 于 C1 轮补了 20 项声明层金样，语句/表达式级 IFIR 仍未落 ——
 阶段 [8] 是 AST→C 直接发射）。
 C 侧另有两份独立 harness，**两份都直接链生产 `runtime/infy_rt.c`**：`runtime/test_rt.c` →
 **32335 assertions / 0 failures**（B1 轮收敛，`-Wall -Wextra` 零告警；C3 轮起其中 27 项是把 **Rust 写入器**的

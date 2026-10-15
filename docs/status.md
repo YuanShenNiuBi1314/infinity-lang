@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 423 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 449 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
 Finished `dev` profile  (50 warnings，全部为 unused/dead code，见 BACKLOG F2；D4(1) 清掉一处死字段)
 $ infy check examples/tour
@@ -114,16 +114,18 @@ $ (cd examples/tour && infy fmt --check)
 2 file(s) are not canonical                        # exit 2，见下文"导览源码不是格式化不动点"
 ```
 
-423 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 423）：
-`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `pkg` 24 · `sema` 22 · `codegen` 22 ·
-`hir` 20 · `ifbc` **19**（D4(1) 前是 6） · `artifact` 18 · `cli` 16 · `toml` 15 · `borrow` 15 ·
-`sha256` 12 · `codes` 9 · `parser` 8 · `base64` 7 · `stdlib` 4 · `diag` 2。
+449 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 449；D1(1) 轮实测）：
+`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `pkg` 24 · `btrack` **23**（D1(1) 前是 0） ·
+`sema` 22 · `codegen` 22 · `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` 20 · `artifact` 18 ·
+`cli` 16 · `toml` 15 · `borrow` 15 · `sha256` 12 · `codes` 9 · `parser` 8 · `base64` 7 · `stdlib` 4 · `diag` 2。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
   借用检查（`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006`/`E-0121` 正反例）、哈希与 base64 与 TOML 往返、
   `infy` CLI 自身、IFBC Rust 侧编码/解码/反汇编：都有上表的测试。
-- **仍没有一项独立单测**：`btrack.rs`（§7.7 B 轨）。它的证据目前只有"对 `examples/tour` 跑完 §7.1 阶段 [1]–[5] 且 exit 0"这一条端到端。
+- **仍没有一项独立单测**：1 行占位的 `host.rs`/`atrack.rs`/`doc.rs`/`conformance.rs`。
+  `btrack.rs`（§7.7 B 轨）的零单测状态在 **D1(1) 轮**结束（23 项，锁 §7.7.1 探针、§7.7.2 五个扫描项、
+  §7.7.3 版本锁、附录 E.3 表语法与表体 hash、§7.8.3 的降级自检），它揪出并修掉的三个缺陷见下文 D1(1) 一节。
   `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成独立单测模块（C4 轮 **19** 项 = `goto` 必须转移控制那一条；C5 轮 **22** 项 = §5.9 测试 harness 的 3 条），`hir.rs` 的 20 项锁阶段 [7]，
   `artifact.rs`（§7.1 阶段 [9] / §7.3 / §7.4）在 C3 轮新建并直接带 18 项单测 + 一份被 C 侧读取器消费的逐字节夹具，
   `cli.rs` 从 C4 轮的 9 项到 C5 轮的 **16** 项（`infy test` 的三条端到端 + §5.9/§2.2 的文件选择两条 + §5.8 dirhash 不随构建范围变的一条 + `--cov` 拒绝）。
@@ -138,13 +140,16 @@ $ (cd examples/tour && infy fmt --check)
 开发态 = [7]-[9] 建到临时目录 + 立即执行，退出码按 §13.4，见下文 C4 一节）；**`test` 自 C5 轮起真执行**（§5.9 的
 测试构建 + 生成的 `#[test]` harness，退出码 0/1/3 按 §13.4，见下文 C5 一节；`bench` 留在未实现里是因为 §13.4
 根本没有这个子命令，它是 `infy test --bench`）；
-B 轨 lowering(`src/btrack.rs`) 尚未收敛；C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（C3 轮复跑 **32335 断言 / 0 失败**，直接链生产 `infy_rt.c`）；
+B 轨 `src/btrack.rs` 的**库内**链路（探针→扫描→降级→本侧装载自检）已于 **D1(1) 轮**跑通并带 23 项单测，
+但阶段 [6a] 仍**没有任何 CLI 调用点**、产出的镜像还没被 C 侧 `infy_ifbc.c` 装载过 ⇒ D1 端到端仍未收敛；
+C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（C3 轮复跑 **32335 断言 / 0 失败**，直接链生产 `infy_rt.c`）；
 `src/host.rs`、`src/atrack.rs`、`src/doc.rs`、`src/conformance.rs` 是 1 行占位文件（`src/artifact.rs` 已于 C3 轮从"不存在"落成 §7.4 容器写入器 + 读取器 + §7.3 build-id，18 项独立单测）（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
 A 轨绑定、`std.net` TLS、`infy lsp` 未实现。
-IFBC 断言（B3 轮 79 → 82，D4(2) 轮 **82 → 146**：合并线格式 + 17 条间隙指令 + Rust 写↔C 读执行的夹具）
-**B2 轮起既链 `runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，两侧同为 146/146、
-stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 Rust↔C 的**逐指令反汇编相等**
-（D4 余项 (3)；"两侧校验结论等价"另被 F26 挡着）。
+IFBC 断言（B3 轮 79 → 82，D4(2) 轮 **82 → 146**：合并线格式 + 17 条间隙指令 + Rust 写↔C 读执行的夹具；
+D4(3) 轮 **146 → 167**：三份双侧共用文本夹具）
+**B2 轮起既链 `runtime/test_ifbc_stubs.c`（harness 替身）也链生产 `infy_rt.c`**，两侧同为 **167/167**（D1(1) 轮复跑）、
+stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 B 轨的端到端（D1 剩下那半边：CLI 接线 +
+C 侧装载夹具）。Rust↔C 的**逐指令反汇编相等**已于 D4(3) 轮落地（偏差 D-42）；"两侧校验结论等价"另被 F26 挡着。
 
 ## A2 本轮修掉的真实缺陷（每条都有回归测试）
 
@@ -169,10 +174,11 @@ stdout 逐字节相同。仍未验证的是：`infy conformance`（E1/E2）与 R
 `lexer`、`formatter`、`rt-core`(C 侧 harness)、`ifbc-rust`(B 轨摄取) 四个并行子任务曾撞到 agent 轮次上限被截断。
 A2 轮收敛了 `formatter` 与词法/语法侧的缺口；`lexer` 的 E-0020 保留字集经核与 §2.4 一致（含
 `use`/`mod`/`union`/`linkage` 这组"保留但本版文法未用"的字）。**仍未收敛**：
-`src/btrack.rs` 的端到端 lowering（D1）。`runtime/test_rt.c`（B1）已于 B1 轮收敛。已完成的 C 侧里程碑不变：`ifbc-vm`(`runtime/test_ifbc.c`) **146** 项断言通过（B3 轮 79 → 82，D4(2) 轮 → 146），
+`src/btrack.rs` 的端到端 lowering（D1 —— D1(1) 轮已把探针/扫描/降级测到位，剩 CLI 接线与 C 侧装载夹具）。
+`runtime/test_rt.c`（B1）已于 B1 轮收敛。已完成的 C 侧里程碑不变：`ifbc-vm`(`runtime/test_ifbc.c`) **167** 项断言通过（B3 轮 79 → 82，D4(2) 轮 → 146，D4(3) 轮 → 167），
 含六项装载校验、逐字节截断、单字节变异、800 轮 fuzz；`codes`、`infra`(哈希/TOML) 已交付。
 （A3 轮当时的限定"这些项链的是替身不是生产运行时"已于 **B2 轮解除**：同一 harness 现在也链生产
-`runtime/infy_rt.c` 跑通 146/146，见上文 P11。）
+`runtime/infy_rt.c` 跑通 167/167，见上文 P11。）
 
 新发现（未修，已记入 BACKLOG 阶段 D）：Rust 侧 IFBC 编码与 C 侧虚拟机的**操作数个数**不一致 —
 `push`（Rust 2 个：池索引 + 类型；C 表 `nops=1`）、`box.dyn`（Rust 1；C `nops=0`，附录 D.7 与 `runtime/IFBC.md` 也是 0）、
@@ -675,6 +681,66 @@ Rust 侧的编码器、`btrack.rs`、codegen/artifact 一行未动。
   `fmt --check` 仍 exit **2**（F6 未裁决）；四条 C 链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各
   **0 告警**、rt harness **32335/0**、替身链 IFBC **167/167**、生产链 **167/167** 且两份 stdout
   `cmp` 无输出。
+
+## D1(1) 轮（2026-10-15）：B 轨「探针 + 能力扫描」段收敛 —— `btrack` 0 → 23 项单测，修掉三个将 D1 整条路挡死的缺陷
+
+本轮取 BACKLOG §1 第一个 `[ ]` = **D1**，按 §2 指针的建议拆成两段中的第一段（探测 + 能力扫描）；
+`src/btrack.rs` 是 4476 行 / 75 个 `pub fn` / **0 项单测**的截断模块，做法是**收敛而不是重写**：
+先补测试，再用一次性探针把 CPython 自己的 `dis` 形态打出来对照。
+
+**测试一上手就红的 10 项，根因是实现不是测试**。三条根因（全部有回归锁点）：
+
+1. **`arg:` 派发行的分支值 `-` 被判成非法助记符**（`parse_single` 只在顶层认 `-`/`ignore`）。
+   后果是 `BINARY_OP`/`CALL`/`COMPARE_OP`/`CONTAINS_OP`/`IS_OP`/`LOAD_ATTR`/`STORE_ATTR` **整行**
+   解析失败 → 扫描按"该 opcode 未映射"报 `E-0712`，即任何含算术/比较/属性/调用的 `@py` 单元
+   都过不了 §7.7.2，`lower_named` 永远进不到发射 —— **D1 被这一条挡死**（py-3.14 表 154 行里 7 行、
+   py-3.13 表 14 行、lua 表若干行受影响）。修 = `-`/`ignore` 在任何位置都是**值**（E.3 头部的
+   `value := "-" | "ignore" | mnemonic | …` 本来就是这意），记偏差 **D-43**(a)。
+2. **CPython 3.12+ 把标志位打包进 `co_names` 索引**：`LOAD_GLOBAL` 的 `arg = namei*2 + do_call`、
+   `LOAD_ATTR` 的 `arg = namei*2 + method`。代码按原值取 `name_at(arg)` ⇒ 单元里只有一个全局名时
+   **越界**（`scan` 静默 `continue`，`E-0711`/`E-0712 builtin` 分支从不触发），有两个名字时**解析成邻居**
+   （`input` 被当成 `eval`）。本机实测：`input()` → `LOAD_GLOBAL arg=1 names=['input']`；
+   `x.foo`→0、`x.bar`→2、`x.bar()`→1。修 = 新增 `CodeObj::operand_name()` 统一解包（`>> 1`），
+   扫描项 2 与 lowering 的 `LOAD_GLOBAL`/`LOAD_ATTR`/`STORE_ATTR`/`IMPORT_FROM` 四处共用它，记 **D-43**(b)。
+3. **`IMPORT_NAME` 的参数是 `co_names` 索引，代码从 `co_consts` 取**（`PyInstr::const_name`，其文档注释
+   自称服务 `IMPORT_NAME`/`LOAD_ATTR`，两者其实都是 names 索引）⇒ 扫描项 3 **从不触发**：
+   `import numpy` 的 violations 是**空**（deny 段形同不存在），lowering 还会把模块名 intern 成空串。
+   修 = 删掉 `const_name`，统一走 `operand_name`，记 **D-43**(c)。
+
+顺带把 `CapTable::load` 里"按 E.3 规则重算 `table_hash`"的换行分隔符从**跨行字符串字面量**改成
+`"\n"` 转义 —— 这台机 `core.autocrlf=true`，字面量里的裸换行会随检出变成 `\r\n`，让 hash 对不上；
+`each_table_hash_matches_the_body_it_claims_to_cover` 钉住三份表的 hash 不变（本机实测仍 == 表内声明值）。
+
+**新登记的规范符合性缺口 F28**：附录 E.3 规定 `[opcode]` 行以**数值键**（`0xNN`）为规范式并附 `OPNAME`
+别名，而 shipped 的三份表里只有 `IFBC-CAP-py-3.14.toml` 有数值键（154 行 + 别名，逐行两式同值由
+`the_number_keyed_table_agrees_between_its_number_and_name_rows` 钉死）；`IFBC-CAP-py-3.13.toml` 与
+`IFBC-CAP-lua-5.4.toml` **0 行数值键** ⇒ `check_alias_agreement` 对这两张表永远不会触发，也无法与
+`dis.opmap` 对账。本机没有 3.13/lua 解释器，**数值不能凭记忆填**（§12.2 禁编造常数），故只登记不补数。
+`the_name_keyed_tables_still_map_every_row` 里有一条**会变红的断言**：一旦有人补上数值键，它要求把该表
+移进数值键那条测试并消掉 F28。
+
+**23 项测试**（每项的条款写在 doc comment 里）覆盖：§7.7.1 探针往返 / `unit_code()` 取的是嵌套 wrapper
+而不是 `<module>`、§7.4 行映射、§7.7.1 规则 1 的 `wrap_embed_unit` 重缩进与 `unit_signature` 优先取声明、
+§7.7.2 五个扫描项（含 `BINARY_OP(**)` 这种**子操作**级点名、`E-0711 builtin(eval)` 不被表的 `eval = "-"`
+降级、`<lambda>` 里的缺口仍报且 `code_name` 指明所在 code object、异常表 `push/setup/with/bare` 四分类、
+扫描列出**全部**缺口且有序）、§7.7.3 版本锁双向（声明 3.13 而本机 3.14 ⇒ `E-0713`，声明实际版本 ⇒ 放行；
+`.pyc` magic 与补丁级归一；无声明 ⇒ `E-0715`）、§7.7.4 import 三判 + 真 dump 的 `import(numpy)` 拒绝、
+附录 E.3 语法与表体 hash、以及 §7.8.2/§7.8.3 的"一个已覆盖单元 lowering 成镜像、过本侧装载自检、
+`encode` ↔ `dump_canonical` 往返"。
+
+**明确未做**（不用假成功掩盖，D1 保持 `[ ]`）：阶段 [6a] 仍**没有任何 CLI 调用点**（`btrack` 只被测试与
+`artifact::crc32` 引用；`infy check/build` 不跑摄取，`@py` 单元到阶段 [8] 仍是 codegen 的显式拒绝）；
+产出的镜像还没交给 C 侧 `runtime/infy_ifbc.c` **装载并执行**（那是 D1 验收第 1 项，做法 = 新增一份
+`@py` 夹具挂进 D4(3) 的双侧文本锁点）；`.inf ifbc` 仍恒空。下一轮从这三条继续。
+
+**回归（全部为本轮实测，非引用）**：`cargo test --offline --lib` **449 passed / 0 failed**（基线 426，+23 全在 `btrack`）、
+`cargo check --offline --lib` 0 error / **50 warning**（未新增）、`infy check examples/tour` exit **0**（仍 2 files）、
+`infy build examples/tour` exit **0**、`--verify-reproducible` exit **0**（199975 == 199975）、
+`infy test examples/tour` exit **0**（程序 stdout 42 字节 `test result: 0 passed, 0 failed, 0 total`）、
+`(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决，未变）。**C 侧本轮零改动**（没动 `.c`/`.h`/夹具），
+四条链仍按纪律复跑：`gcc -c runtime/infy_rt.c` 与 `-c runtime/infy_ifbc.c` 各 **0 告警** exit 0、
+rt harness **32335 assertions / 0 failures** exit 0（在 `target/scratch` 里跑）、替身链 IFBC **167/167**、
+生产链 IFBC **167/167**、两份 stdout `cmp` **无差异**。
 
 ## 仍未实现
 

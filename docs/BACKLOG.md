@@ -368,6 +368,45 @@
 
 - [ ] D1 `src/btrack.rs` 收敛（子任务被截断）：CPython 探测 → 能力扫描 → lowering → IFBC。
       验收：`@py` 的 tour 片段产出可被 `infy_ifbc.c` 装载的模块；`eval` 触发 `E-0711`；未映射 opcode 触发 `E-0712` 并点名具体项；声明 `py = "3.13"` 而本机是 3.14 触发 `E-0713`。
+      **D1(1) 轮（2026-10-15）= 两段增量的第一段（探测 + 能力扫描）已落地，D1 保持 `[ ]`**。
+      按 §2 的建议没有重写，做法是**先补测试**：`btrack` **0 → 23 项**（每项 doc comment 指名条款）。
+      验收四项里 **后三项已有实测锁点**（都是真 dump 上的扫描结果，不是手搓 code object）：
+      `eval` ⇒ `E-0711 builtin(eval)`（`eval_is_e0711_and_not_a_capability_gap`，含"表的 `eval = "-"` 不把它降级成
+      `E-0712`"这半条）；未映射 opcode ⇒ `E-0712` **点名到子操作** `BINARY_OP(**)` 与带号形式 `BINARY_OP (0x2c)`
+      （两条测试分别走"表里是 `-`"和"表里根本没有这一行"）；声明 `py = "3.13"` 而本机 3.14.6 ⇒ `E-0713`
+      （`a_declared_minor_that_is_not_the_interpreter_is_e0713`，成对断言"声明实际版本 ⇒ 放行"）。
+      **测试一上手就红的 10 项里，三条是实现根因**（全部有回归锁点，裁定记偏差 **D-43**）：
+      (1) `arg:` 派发行的分支值 `-` 被 `check_mnemonic` 判成非法助记符 ⇒ `BINARY_OP`/`CALL`/`COMPARE_OP`/
+      `CONTAINS_OP`/`IS_OP`/`LOAD_ATTR`/`STORE_ATTR` **整行**解析失败、扫描按"整个 opcode 未映射"报 `E-0712`
+      —— **任何含算术/比较/属性/调用的 `@py` 单元都过不了 §7.7.2，D1 被这一条挡死**（py-3.14 表 154 行里 7 行、
+      py-3.13 表 14 行受影响）；(2) CPython 3.12+ 把标志位打包进 `co_names` 索引（`arg = namei*2 + flag`，
+      本机实测 `input()` → `arg=1`、`x.foo`→0 / `x.bar`→2 / `x.bar()`→1），按原值取名字 ⇒ 只有一个全局名时
+      **越界→扫描静默跳过**（`E-0711` 分支从不触发）、有两个名字时**解析成邻居**（`input` 被当 `eval`），
+      修 = 新增 `CodeObj::operand_name()` 统一 `>> 1`，扫描项 2 与 lowering 四处共用；
+      (3) `IMPORT_NAME` 的参数是 `co_names` 索引而 `const_name()` 从 `co_consts` 取 ⇒ **扫描项 3 从不触发**
+      （`import numpy` 的 violations 是**空**，deny 段形同不存在），修 = 删 `const_name` 统一走 `operand_name`。
+      顺带把 `CapTable::load` 里重算 `table_hash` 的裸换行字面量改成 `"\n"` 转义（这台机 `core.autocrlf=true`，
+      裸换行会随检出变成 `\r\n` 让 hash 对不上），`each_table_hash_matches_the_body_it_claims_to_cover` 钉住。
+      **新登记 F28**：三份 shipped 能力表里只有 `IFBC-CAP-py-3.14.toml` 有 E.3 的数值键，3.13 与 lua 表一个都没有
+      ⇒ `check_alias_agreement` 对这两张表永不触发；本机无 3.13/lua 解释器，数值不凭记忆填。
+      证据：`cargo test --offline --lib` **449 passed / 0 failed**（基线 426，+23 全在 `btrack`）、
+      `cargo check --offline --lib` 0 error / **50 warning**（未新增）、`infy check|build|test examples/tour` 全
+      exit 0 且 `--verify-reproducible` 0（199975 == 199975）、生成 C11 仍 12513 字节、`fmt --check` 仍 exit 2（F6）、
+      **C 侧零改动仍复跑四条链**：`-c infy_rt.c` / `-c infy_ifbc.c` 各 0 告警、rt **32335/0**、
+      替身链与生产链 IFBC 各 **167/167** 且两份 stdout `cmp` 无差异。
+      **余项（下一轮的起点，两条都不需要重新审计）**：
+      (a) **阶段 [6a] 没有任何 CLI 调用点** —— 全仓对 `btrack` 的引用只有 `artifact.rs` 的 `crc32` 与本模块的测试，
+      `frontend()`/`build_c()` 从不跑摄取，`@py` 单元到阶段 [8] 仍是 `codegen.rs:2334` 的显式拒绝。
+      接线点在 `cli.rs::frontend` 之后、`hir::lower` 之前（§7.1 的 [6a] 就在那儿），入口已备好 =
+      `btrack::build_embed_unit(body, params, unit_name, manifest, python, hosts, file, pos, handler)`；
+      要现造的是 `HostSigTable` 里该单元那一行（§7.7.1 规则 1：参数表来自 **INFY 侧**声明的类型 ⇒ 需要
+      `sema::Ty` → `ifbc::TyKind` 的映射，`hir::hir_ty_from_ast` 是最接近的现成件）。
+      (b) **产出的镜像还没被 C 侧 `infy_ifbc.c` 装载过** —— 做法 = 新增 `runtime/fixtures/ifbc_py_unit.bin`
+      挂进 D4(3) 的双向锁点（`.bin` 由 Rust 写入器生成、`.can.txt` 由 C 侧 `INFY_REGENERATE_CANONICAL=1` 渲染，
+      两侧各断言同一份文件），并让 `test_ifbc.c` 用生产装载器读它 + 过六项校验；带属性访问/迭代的片段
+      会被 **F27** 挡在执行那一半（装载通过而执行显式 `R-0710`），那是**预期的显式失败**，不要去绕。
+      (c) `.inf ifbc` 恒空（`artifact.rs` 写 0 个 B 轨模块）；真接上之后 C3 轮钉的 199975 字节 /
+      `build-id 4d8250b5…55ba` / `blob 738` 三处数字会一起动 —— 预期变化，须同步改 status/coverage/README 与本节。
 - [ ] D2 `infy ifbc dump|verify` 接线（Rust 侧编码 ↔ C 侧虚拟机**交叉验证**：同一镜像两边读出的反汇编一致）。
 - [ ] D3 `src/atrack.rs`：`#[link]` + `@c` 配对、`infy_binding.h` 生成、`infy_e_<name>_<8hex>` 包装、缺 `unsafe` 报 `E-0721`、缺 `#[owns]/#[borrows]` 报 `E-0723`。
       验收：一个最小 `@c` 单元被 gcc 编译、链接、在产物里被调通。
@@ -673,12 +712,38 @@
       **执行成功**的 harness 断言（今天的锁点只断言"装载通过 + 执行被显式拒绝"，见
       `test_ifbc.c::test_model_refusal_is_explicit`）。
 
+- [ ] F28 **随发布的三份能力表里，只有 `IFBC-CAP-py-3.14.toml` 满足附录 E.3 的数值键规范式**（D1(1) 轮补
+      `btrack` 单测时确认）：E.3 明写 `[opcode]` 行以 `0xNN`（该 minor 的 `dis.opmap` 值）为规范式、
+      `OPNAME` 只是别名，且 `CapTable::check_alias_agreement` 要求两式同值；实测
+      `IFBC-CAP-py-3.13.toml` 与 `IFBC-CAP-lua-5.4.toml` 的 `[opcode]` 段**一行数值键都没有**（只有别名），
+      而扫描器的查找顺序是"先数值、后别名"，所以对这两张表 `check_alias_agreement` **永不触发**，
+      也没有任何一条断言能把表与那版本的 `dis.opmap` 对账（E.3 的可审计要求落空）。
+      py-3.14 表是合规的（154 行数值键 + 别名，`the_number_keyed_table_agrees_between_its_number_and_name_rows`
+      逐行钉两式同值）。
+      **为什么不直接补数**：本机只有 CPython 3.14.6 与无 lua —— 3.13/lua 的 opcode 数值必须来自**那版本的
+      解释器**，凭记忆填等于编造常数（B1 轮 `xxh64`/`golden_perm` 那一族的教训，§12.2 要求能力表可复核）。
+      验收：在有 CPython 3.13（或取其 `dis.opmap` 的权威发布件）与 lua 5.4 的机器上跑一次表生成，
+      把两份表重写成"数值键 + 别名"双式；然后把 `btrack::tests::the_name_keyed_tables_still_map_every_row`
+      里那条"补上数值键就变红"的断言指向本条，把两张表移进 `the_number_keyed_table_agrees_…` 的列表，
+      并确认 `check_alias_agreement` 对它们真的会触发（加一条人为造矛盾的测试）。
+
 ## 2. 当前指针
 
-> **下一轮第一件事：D1（`src/btrack.rs` 收敛，§1 阶段 D 的第一个 `[ ]`）**。
+> **下一轮第一件事：D1 的余项**（§1 阶段 D 的第一个 `[ ]` 仍是 **D1**）。D1(1) 轮（代码提交 `96b5da4`）已把
+> 「探测 + 能力扫描」这一段收敛：`btrack` **0 → 23 项**、验收四项的后三项拿到实测锁点、三条挡死整条路
+> 的实现根因修掉（裁定 = 偏差 **D-43**）。剩下的两半写在 D1 条目的"余项"里，都不需要重新审计：
+> **(a) 阶段 [6a] 的 CLI 接线** —— 全仓对 `btrack` 的引用只有 `artifact.rs` 的 `crc32` 与它自己的测试，
+> 入口 `btrack::build_embed_unit(...)` 已备好，接在 `cli.rs::frontend()` 之后、`hir::lower` 之前；
+> 要现造的只有 `HostSigTable` 里该单元那一行（§7.7.1 规则 1：参数表来自 **INFY 侧**声明的类型，
+> 即 `sema::Ty` → `ifbc::TyKind` 的映射，`hir::hir_ty_from_ast` 是最接近的现成件）。
+> **(b) 让 C 侧 `infy_ifbc.c` 真装载一份 `@py` 镜像** —— 新增 `runtime/fixtures/ifbc_py_unit.bin`，
+> 直接挂 D4(3) 的双向锁点（`.bin` 由 Rust 写入器生成 / `.can.txt` 由 C 侧 `INFY_REGENERATE_CANONICAL=1` 渲染），
+> `test_ifbc.c` 用**生产装载器**读它并过六项校验；带属性访问或迭代的片段被 **F27** 挡在执行那一半
+> （装载通过而执行显式 `R-0710`），那是**预期的显式失败**，不要去绕、不要当成编码 bug。
 > 阶段 D 的线格式债已清完：D4 的 (1) Rust 侧 `d7d8991`、(2) C 侧 `e5555dc`、(3) 双侧文本交叉验证
 > `1f8988d` 都落地；裁决在 **D-38**，动手时补裁的在 **D-40**（Rust）/ **D-41**（C）/ **D-42**
-> （交叉验证本身，含它当场抓到的三处分叉）。两份形状文档 =
+> （交叉验证本身，含它当场抓到的三处分叉）/ **D-43**（B 轨：E.3 的取值域 + 3.12+ 的 `co_names` 索引打包 +
+> `IMPORT_NAME` 读错表）。两份形状文档 =
 > `docs/internals/ifbc-encoding-rust.md`（Rust，§6 是 D4(3) 新增的"双侧共用文本"）与
 > `runtime/IFBC.md`（C，§6.1 = 行语法）。
 >
@@ -768,7 +833,14 @@
 > **间歇**不通而不是坏了：照协议先推一次、失败再试一次即停，不预先加变体、不循环轰炸；若连败，
 > 首个候选是 `git -c http.version=HTTP/1.1 push origin HEAD:toolchain`。
 >
-> 已验证事实（**D4(3) 轮复跑，非引用**）：`cargo test --offline --lib` **426 passed / 0 failed**
+> **D1(1) 轮实测（本轮复跑，非引用）**：`cargo test --offline --lib` **449 passed / 0 failed**（`btrack`
+> 0 → **23**；分布 79/57/39/35/24/**23**/22/22/22/20/18/16/15/15/12/9/8/7/4/2 = 449）、
+> `cargo check --offline --lib` 0 error / **50 warning**（未新增）、`infy check|build|test examples/tour`
+> 全 exit **0**、`--verify-reproducible` exit **0**（199975 == 199975、生成 C11 仍 12513 字节 —— 本轮只动
+> `src/btrack.rs`，阶段 [9] 的输入没变）、`(cd examples/tour && infy fmt --check)` 仍 exit **2**（F6 未裁决）、
+> **C 侧零改动仍复跑四条链**：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警**、rt harness **32335/0**、
+> 替身链与生产链 IFBC 各 **167/167**、两份 stdout `cmp` **无差异**。
+> 已验证事实（**D4(3) 轮复跑，历史快照**）：`cargo test --offline --lib` **426 passed / 0 failed**
 > （`lexer` 79 · `derive` 57 · `fmt` 39 · `macro_expand` 35 · `pkg` 24 · `sema` 22 · `ifbc` **22**
 > （+2 = 双侧文本锁点）· `codegen` 22 · `hir` 20 · `artifact` 18 · `cli` 16 · `toml` 15 · `borrow` 15 ·
 > `sha256` 12 · `codes` 9 · `parser` 8 · `base64` 7 · `stdlib` 4 · `diag` 2 = 426）；
