@@ -397,6 +397,20 @@ impl CodeObj {
     pub fn name_at(&self, idx: u32) -> Option<&str> {
         self.names.get(idx as usize).map(|s| s.as_str())
     }
+    /// The `co_names` entry an instruction's argument selects. Since CPython 3.12 the global and
+    /// attribute forms pack a flag into bit 0 of that argument (`LOAD_GLOBAL` = "also call it",
+    /// `LOAD_ATTR` = "bound method"), so the name index is `arg >> 1` there — measured on this host
+    /// (`x.foo` → 0, `x.bar` → 2, `x.bar()` → 1). Using the packed value as an index resolves to the
+    /// *neighbouring* name when there is one and to nothing otherwise, which silently drops a
+    /// builtin out of scan item 2.
+    pub fn operand_name(&self, i: &PyInstr) -> Option<&str> {
+        let arg = i.arg?;
+        let idx = match i.opname.as_str() {
+            "LOAD_GLOBAL" | "LOAD_ATTR" | "STORE_ATTR" | "DELETE_ATTR" | "LOAD_METHOD" => arg >> 1,
+            _ => arg,
+        };
+        self.name_at(idx)
+    }
     pub fn instr_at(&self, offset: u32) -> Option<&PyInstr> {
         self.instrs.iter().find(|i| i.offset == offset)
     }
@@ -1231,8 +1245,7 @@ impl CapTable {
             .lines()
             .filter(|l| !l.trim_start().starts_with("table_hash"))
             .collect::<Vec<_>>()
-            .join("
-");
+            .join("\n");
         let computed = format!("sha256:{}", sha256::hex(canon.as_bytes()));
         if !t.table_hash.is_empty() && t.table_hash != computed {
             return Err(IngestErr::CapTable(format!(
@@ -1577,7 +1590,7 @@ fn scan_code_obj(co: &CodeObj, cap: &CapTable, out: &mut Vec<ScanViolation>) {
         if i.opname != "LOAD_GLOBAL" {
             continue;
         }
-        let Some(nm) = co.name_at(i.arg.unwrap_or(NONE32)) else { continue };
+        let Some(nm) = co.operand_name(i) else { continue };
         let nm = nm.to_string();
         if DYNAMIC_CODE_NAMES.contains(&nm.as_str()) {
             out.push(ScanViolation::new(
@@ -1631,7 +1644,7 @@ fn scan_code_obj(co: &CodeObj, cap: &CapTable, out: &mut Vec<ScanViolation>) {
         if i.opname != "IMPORT_NAME" {
             continue;
         }
-        let Some(nm) = i.const_name(co) else { continue };
+        let Some(nm) = co.operand_name(i) else { continue };
         let nm = nm.to_string();
         if DYNAMIC_CODE_NAMES.contains(&nm.as_str()) || nm == "importlib" {
             out.push(ScanViolation::new(
@@ -1739,11 +1752,10 @@ fn scan_code_obj(co: &CodeObj, cap: &CapTable, out: &mut Vec<ScanViolation>) {
 }
 
 impl PyInstr {
-    /// The name an `IMPORT_NAME`/`LOAD_ATTR` argument points at.
-    pub fn const_name<'a>(&self, co: &'a CodeObj) -> Option<&'a str> {
-        self.arg
-            .and_then(|a| co.const_at(a))
-            .and_then(|c| if let PyConst::Str(s) = c { Some(s.as_str()) } else { None })
+    /// The name this instruction's argument selects, unpacking CPython's bit-0 flag (§7.7.2 scan
+    /// items 2/3 — see [`CodeObj::operand_name`]).
+    pub fn operand_name<'a>(&self, co: &'a CodeObj) -> Option<&'a str> {
+        co.operand_name(self)
     }
 }
 
@@ -1792,6 +1804,17 @@ fn parse_mapped(raw: &str, context: &str) -> Result<Mapped, IngestErr> {
 }
 
 fn parse_single(raw: &str, context: &str) -> Result<Mapped, IngestErr> {
+    let raw = raw.trim();
+    // E.3's grammar makes `-` and `ignore` *values*, so they are legal in a dispatch branch too —
+    // `arg:+->add._,…,else->-` is how a table says "this one sub-operation is covered, the rest are
+    // gaps". Treating the branch value as a mnemonic made every such row a table-parse error, which
+    // the scan then reported as `E-0712` on the whole opcode instead of the one missing branch.
+    if raw == "-" {
+        return Ok(Mapped::Reject);
+    }
+    if raw == "ignore" {
+        return Ok(Mapped::Ignore);
+    }
     if let Some(host) = raw.strip_prefix("host:") {
         if host.is_empty() {
             return Err(IngestErr::CapTable(format!("{context}: host: 后必须给出 std 路径")));
@@ -3009,7 +3032,12 @@ impl<'a> Lowerer<'a> {
                     );
                     return Err(());
                 }
-                let nm = self.m.intern(&at.argrepr);
+                let interned = self
+                    .co
+                    .operand_name(at)
+                    .unwrap_or(at.argrepr.as_str())
+                    .to_string();
+                let nm = self.m.intern(&interned);
                 if name == "LOAD_ATTR" {
                     let v = self.pop(at)?;
                     self.push_val(&v, at)?;
@@ -3028,7 +3056,7 @@ impl<'a> Lowerer<'a> {
             "LOAD_GLOBAL" => {
                 let nm = self
                     .co
-                    .name_at(arg)
+                    .operand_name(at)
                     .ok_or_else(|| self.err("LOAD_GLOBAL", "co_names 索引越界".to_string(), at))?
                     .to_string();
                 match self.cap.builtin(&nm) {
@@ -3121,7 +3149,7 @@ impl<'a> Lowerer<'a> {
             }
             "IMPORT_NAME" => {
                 let modname = at
-                    .const_name(self.co)
+                    .operand_name(self.co)
                     .unwrap_or("")
                     .to_string();
                 let idx = self.m.intern_module_import(&modname);
@@ -3130,7 +3158,12 @@ impl<'a> Lowerer<'a> {
                 Ok(1)
             }
             "IMPORT_FROM" => {
-                let nm = self.m.intern(&at.argrepr);
+                let interned = self
+                    .co
+                    .operand_name(at)
+                    .unwrap_or(at.argrepr.as_str())
+                    .to_string();
+                let nm = self.m.intern(&interned);
                 let top = match self.stack.last().cloned() {
                     Some(v) => v,
                     None => {
@@ -4497,4 +4530,526 @@ pub fn build_embed_unit(
 /// 原语言"). `None` is the `W-0705` case, never an error.
 pub fn original_line(m: &IfbcModule, code_off: u32) -> Option<u32> {
     m.line_of_code_off(code_off)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// §7.7.3: stage [6a] is a *build-time* ingest, so these tests need a real interpreter — the same
+    /// environment dependency the C harnesses have on `gcc`. A missing interpreter is a red test,
+    /// never a silently skipped one.
+    fn python() -> PathBuf {
+        find_python().expect(
+            "阶段 [6a] 需要构建期 CPython（§7.7.3）：PATH 上没有 python/python3，也没有 INFY_PYTHON",
+        )
+    }
+
+    fn cache() -> &'static Mutex<BTreeMap<String, CodeObjDump>> {
+        static CACHE: OnceLock<Mutex<BTreeMap<String, CodeObjDump>>> = OnceLock::new();
+        CACHE.get_or_init(Default::default)
+    }
+
+    /// One interpreter round-trip per distinct unit source, shared by the tests below.
+    fn probe(body: &str, params: &[&str]) -> CodeObjDump {
+        let src = wrap_embed_unit(body, params, "__infy_unit__");
+        let key = format!("{}\u{0}{src}", params.join(","));
+        if let Some(d) = cache().lock().unwrap().get(&key) {
+            return d.clone();
+        }
+        let d = run_python_probe(&python(), &src)
+            .unwrap_or_else(|e| panic!("探针失败（§7.7.1）：{e}\n送入的源：{src}"));
+        cache().lock().unwrap().insert(key, d.clone());
+        d
+    }
+
+    fn cap(minor: &str) -> CapTable {
+        CapTable::load("py", minor).unwrap_or_else(|e| panic!("能力表 IFBC-CAP-py-{minor} 读不回：{e}"))
+    }
+
+    /// §7.7.3: an `@py` unit needs `[b_track] py = "<minor>"` in the manifest.
+    fn manifest_py(decl: Option<&str>) -> Manifest {
+        let text = match decl {
+            Some(d) => format!("[module]\npath = \"example/btrack\"\n[b_track]\npy = \"{d}\"\n"),
+            None => "[module]\npath = \"example/btrack\"\n".to_string(),
+        };
+        let mut h = crate::diag::Handler::default();
+        crate::pkg::parse_manifest(&text, crate::pkg::MANIFEST_NAME, &mut h)
+            .unwrap_or_else(|| panic!("清单夹具应能解析：{text}"))
+    }
+
+    fn code_obj(name: &str) -> CodeObj {
+        CodeObj {
+            name: name.to_string(),
+            argcount: 0,
+            posonlyargcount: 0,
+            kwonlyargcount: 0,
+            nlocals: 0,
+            stacksize: 0,
+            flags: 0,
+            firstlineno: 1,
+            code: Vec::new(),
+            varnames: Vec::new(),
+            names: Vec::new(),
+            freevars: Vec::new(),
+            cellvars: Vec::new(),
+            consts: Vec::new(),
+            instrs: Vec::new(),
+            lines: Vec::new(),
+            exc: Vec::new(),
+        }
+    }
+
+    /// A hand-built dump, for the rules that do not need an interpreter.
+    fn dump_of(co: CodeObj) -> CodeObjDump {
+        CodeObjDump {
+            python_version: "3.14.6".to_string(),
+            version_info: (3, 14, 6),
+            pyc_magic: 3627,
+            pyc_magic_hex: "2b0e0d0a".to_string(),
+            unit: "__infy_unit__".to_string(),
+            module: co,
+            raw_json: String::new(),
+        }
+    }
+
+    fn instr(opname: &str, opcode: u32, arg: Option<u32>, argrepr: &str, offset: u32) -> PyInstr {
+        PyInstr {
+            opname: opname.to_string(),
+            opcode,
+            arg,
+            argrepr: argrepr.to_string(),
+            argval_int: None,
+            offset,
+            start_line: Some(2),
+            end_line: Some(2),
+            col: Some(1),
+            end_col: Some(9),
+            is_jump_target: false,
+        }
+    }
+
+    fn items(vs: &[ScanViolation]) -> Vec<(String, String, String)> {
+        vs.iter()
+            .map(|v| (v.code.to_string(), v.item.clone(), v.code_name.clone()))
+            .collect()
+    }
+
+    /// §7.7.1 rule 1 + §7.7.2's preamble: the code objects come from **CPython's own** compiler, and
+    /// the unit is a function so the declared bindings are its calling convention.
+    #[test]
+    fn the_probe_returns_cpythons_own_code_object_for_the_unit() {
+        let d = probe("return x + 1", &["x"]);
+        assert_eq!(d.unit, "__infy_unit__");
+        assert_eq!(d.version_info.0, 3, "§7.7.3 只摄取 CPython 3.x");
+        let co = d.unit_code();
+        assert_eq!(co.name, "__infy_unit__");
+        assert_eq!(co.argcount, 1, "绑定是单元的调用约定，不是注入的全局名（§7.7.1）");
+        assert_eq!(co.varnames, vec!["x".to_string()]);
+        assert!(co.consts.contains(&PyConst::Int(1)), "常量由源语言编译器定型：{:?}", co.consts);
+        let last = co.instrs.last().expect("指令流非空");
+        assert!(last.opname.starts_with("RETURN"), "单元以 return 收口，实得 {}", last.opname);
+    }
+
+    /// §7.7.1: `unit_code()` must hand back the **nested wrapper**, not the `<module>` body — the
+    /// latter would carry no parameters and the whole calling convention would silently vanish.
+    #[test]
+    fn the_unit_is_the_nested_wrapper_not_the_module_body() {
+        let d = probe("return x + 1", &["x"]);
+        assert_eq!(d.module.name, "<module>");
+        assert_eq!(d.module.nested().len(), 1);
+        assert_eq!(d.unit_code().name, "__infy_unit__");
+        assert_eq!(d.unit_code().argcount, 1, "取错对象的话这里是 0");
+    }
+
+    /// §7.4: every instruction the scan can point at must resolve back to an original-language line,
+    /// otherwise `W-0705` would fire on every unit and the lowered image could not carry a line map.
+    #[test]
+    fn instructions_other_than_the_interpreters_own_padding_carry_a_line() {
+        let d = probe("total = 0\nfor k in range(4):\n    total = total + k\nreturn total", &[]);
+        let co = d.unit_code();
+        let missing: Vec<String> = co
+            .instrs
+            .iter()
+            .filter(|i| co.line_at(i.offset).is_none())
+            .map(|i| i.opname.clone())
+            .collect();
+        for name in &missing {
+            assert!(
+                matches!(name.as_str(), "RESUME" | "CACHE" | "END_FOR" | "PUSH_NULL" | "RETURN_GENERATOR"),
+                "非填充指令 {name} 没有行映射（§7.4）：{missing:?}"
+            );
+        }
+        assert!(
+            co.instrs.iter().filter(|i| co.line_at(i.offset).is_some()).count() >= co.instrs.len() / 2,
+            "行映射几乎不存在：{missing:?}"
+        );
+    }
+
+    /// §7.7.1 rule 1: the block is re-indented under the wrapper (relative indent kept) and the
+    /// declared bindings become the parameter list.
+    #[test]
+    fn wrap_embed_unit_dedents_the_block_under_the_wrapper() {
+        let body = "        if ok:\n            return 1\n        return 0\n";
+        let got = wrap_embed_unit(body, &["x", "env"], "unit7");
+        assert_eq!(got, "def unit7(x, env):\n    if ok:\n        return 1\n    return 0\n");
+        assert_eq!(wrap_embed_unit("    return 1", &[], "u"), "def u():\n    return 1\n");
+    }
+
+    /// §7.7.3, the acceptance case "declare `py = \"3.13\"` while the host runs 3.14": the minor that
+    /// actually compiled the unit must equal the declaration.
+    #[test]
+    fn a_declared_minor_that_is_not_the_interpreter_is_e0713() {
+        let d = probe("return 1", &[]);
+        let observed = d.py_minor();
+        let other = if observed == "3.13" { "3.12" } else { "3.13" };
+        let e = check_probe_version(&manifest_py(Some(other)), &d)
+            .expect_err(&format!("声明 {other} 而解释器是 {observed}，必须 E-0713（§7.7.3）"));
+        assert_eq!(e.code(), Some("E-0713"));
+        match &e {
+            IngestErr::VersionMismatch { declared, observed: o, .. } => {
+                assert_eq!(declared.as_str(), other);
+                assert_eq!(o, &observed);
+            }
+            bad => panic!("应为 VersionMismatch，实得 {bad:?}"),
+        }
+        assert!(
+            check_probe_version(&manifest_py(Some(&observed)), &d).is_ok(),
+            "声明与实际一致必须放行"
+        );
+    }
+
+    /// §7.7.3: the `.pyc` magic is compared even when the minor agrees, a patch-level declaration is
+    /// normalised, and an undeclared `@py` is `E-0715` rather than a guess.
+    #[test]
+    fn version_lock_covers_the_pyc_magic_and_an_undeclared_language() {
+        let m313 = manifest_py(Some("3.13"));
+        let magic313 = CodeObjDump::known_magics()["3.13"].0;
+        assert!(check_declared_version(&m313, "3.13", magic313).is_ok());
+        assert!(check_declared_version(&m313, "3.13.4", magic313).is_ok(), "补丁级声明应归一到 minor");
+        let bad = check_declared_version(&m313, "3.13", magic313 + 1).expect_err("magic 不符必须拦");
+        assert_eq!(bad.code(), Some("E-0713"));
+        let none = check_declared_version(&manifest_py(None), "3.13", magic313).expect_err("§7.7.3 无声明即拒绝");
+        assert_eq!(none.code(), Some("E-0715"));
+    }
+
+    /// §7.7.2 + [`DYNAMIC_CODE_NAMES`]: `eval` is refused as dynamic code generation (`E-0711`), and
+    /// the table's own `eval = "-"` row must not downgrade it into a capability gap.
+    #[test]
+    fn eval_is_e0711_and_not_a_capability_gap() {
+        let d = probe("return eval(\"1 + 1\")", &[]);
+        let v = capability_scan(&d, &cap(&d.py_minor()));
+        let hit = v
+            .iter()
+            .find(|x| x.item == "builtin(eval)")
+            .unwrap_or_else(|| panic!("实得 {:?}", items(&v)));
+        assert_eq!(hit.code, "E-0711");
+        assert_eq!(hit.scan_item, "builtin");
+        assert_eq!(hit.diagnostic(0, Position { line: 1, column: 1 }).code, "E-0711");
+    }
+
+    /// §7.7.2 item 1, the acceptance case "an unmapped opcode triggers `E-0712` and names the exact
+    /// item": a **sub-operation** of a dispatched family row is refused by name, with the line it
+    /// came from.
+    #[test]
+    fn a_denied_sub_operation_is_e0712_naming_it() {
+        let d = probe("return x ** 2", &["x"]);
+        let v = capability_scan(&d, &cap(&d.py_minor()));
+        let hit = v
+            .iter()
+            .find(|x| x.item == "BINARY_OP(**)")
+            .unwrap_or_else(|| panic!("应点名 BINARY_OP(**)，实得 {:?}", items(&v)));
+        assert_eq!(hit.code, "E-0712");
+        assert_eq!(hit.scan_item, "opcode");
+        assert!(hit.py_line.is_some(), "诊断必须能指回原始语言行（§7.4）");
+        assert!(hit.detail.contains("未映射"), "拒绝的理由要写进诊断：{}", hit.detail);
+        assert!(hit.render().contains("BINARY_OP(**)"), "诊断必须点名具体子操作：{}", hit.render());
+    }
+
+    /// §7.7.2 item 1: an opcode with **no row at all** (rather than a `-` row) is also `E-0712`, and
+    /// names both the OPNAME and the number E.3 keys it by.
+    #[test]
+    fn an_opcode_with_no_row_at_all_is_e0712_naming_number_and_opname() {
+        let d = probe("return x + 1", &["x"]);
+        let mut c = cap(&d.py_minor());
+        let bin = d
+            .unit_code()
+            .instrs
+            .iter()
+            .find(|i| i.opname == "BINARY_OP")
+            .expect("x + 1 必须编出 BINARY_OP");
+        c.opcode_map.remove(&format!("0x{:x}", bin.opcode));
+        c.opcode_map.remove("BINARY_OP");
+        let v = capability_scan(&d, &c);
+        let want = format!("BINARY_OP (0x{:x})", bin.opcode);
+        let hit = v.iter().find(|x| x.item == want).unwrap_or_else(|| panic!("实得 {:?}", items(&v)));
+        assert_eq!(hit.code, "E-0712");
+        assert_eq!(hit.py_offset, bin.offset);
+    }
+
+    /// §7.7.2 item 2: a builtin the table explicitly refuses stops the build **by name**.
+    #[test]
+    fn a_builtin_the_table_refuses_is_e0712_naming_it() {
+        let d = probe("tmp = input()\nreturn 1", &[]);
+        let v = capability_scan(&d, &cap(&d.py_minor()));
+        assert!(
+            v.iter().any(|x| x.code == "E-0712" && x.item == "builtin(input)"),
+            "实得 {:?}",
+            items(&v)
+        );
+    }
+
+    /// §7.7.2 scan item 4 demands the recursion be **exhaustive**: a gap inside a nested code object
+    /// must still be reported, and the diagnosis must say which code object it came from.
+    #[test]
+    fn gaps_inside_nested_code_objects_are_reported_with_their_own_name() {
+        let d = probe("f = lambda: eval(\"1\")\nreturn f()", &[]);
+        assert_eq!(d.unit_code().nested().len(), 1, "lambda 是嵌套 code object");
+        let v = capability_scan(&d, &cap(&d.py_minor()));
+        let hit = v
+            .iter()
+            .find(|x| x.item == "builtin(eval)")
+            .unwrap_or_else(|| panic!("实得 {:?}", items(&v)));
+        assert_eq!(hit.code, "E-0711");
+        assert_eq!(hit.code_name, "<lambda>", "诊断必须指明所在的 code object");
+    }
+
+    /// §7.7.2 is a *report*, not a first-failure abort: several gaps in one unit are all listed, in a
+    /// deterministic order (§7.3 reproducibility).
+    #[test]
+    fn the_scan_lists_every_gap_in_deterministic_order() {
+        let d = probe("tmp = input()\nreturn eval(tmp)", &[]);
+        let v = capability_scan(&d, &cap(&d.py_minor()));
+        assert!(v.len() >= 2, "两个缺口都要列出，实得 {:?}", items(&v));
+        let keys: Vec<(String, u32, String)> =
+            v.iter().map(|x| (x.code_name.clone(), x.py_offset, x.item.clone())).collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted, "扫描结果必须有序");
+    }
+
+    /// §7.7.2 item 3 / §7.7.4: allow / deny / undeclared, and a deny entry covers its submodules
+    /// without catching a sibling name by the nose.
+    #[test]
+    fn import_verdicts_are_allow_deny_or_undeclared() {
+        let c = cap("3.14");
+        assert!(matches!(c.import_verdict("math"), ImportVerdict::Allowed(_)));
+        assert!(matches!(c.import_verdict("math.random"), ImportVerdict::Allowed(_)));
+        assert!(matches!(c.import_verdict("numpy"), ImportVerdict::Denied(p) if p == "numpy"));
+        assert!(matches!(c.import_verdict("numpy.linalg"), ImportVerdict::Denied(_)));
+        assert!(matches!(c.import_verdict("numpy2"), ImportVerdict::Undeclared));
+        assert!(matches!(c.import_verdict("requests"), ImportVerdict::Undeclared));
+    }
+
+    /// §7.7.2 scan item 3 through a real dump: `IMPORT_NAME`'s argument indexes **`co_names`**, so a
+    /// denied import has to be found there — reading it as a constant index never fires.
+    #[test]
+    fn a_denied_import_is_e0712_naming_the_module() {
+        let d = probe("import numpy\nreturn 1", &[]);
+        assert!(
+            d.unit_code()
+                .instrs
+                .iter()
+                .any(|i| i.opname == "IMPORT_NAME"),
+            "import 语句应编出 IMPORT_NAME"
+        );
+        let v = capability_scan(&d, &cap(&d.py_minor()));
+        assert!(
+            v.iter().any(|x| x.code == "E-0712" && x.item == "import(numpy)"),
+            "实得 {:?}",
+            items(&v)
+        );
+    }
+
+    /// §7.7.2 scan item 5: the `co_exceptiontable` entry classes are a pure function of CPython's own
+    /// decode — `push` / `setup` / `with` / `bare`, and the shipped tables cover the first three.
+    #[test]
+    fn exception_entry_shapes_are_classified_push_setup_with_bare() {
+        let mut co = code_obj("__infy_unit__");
+        co.code = vec![0u8; 12];
+        co.instrs = vec![
+            instr("PUSH_EXC_INFO", 0x20, None, "", 0),
+            instr("CHECK_EXC_MATCH", 0x06, Some(0), "ValueError", 2),
+            instr("POP_EXCEPT", 0x07, None, "", 4),
+            instr("RERAISE", 0x69, Some(0), "4", 6),
+        ];
+        let e = |target: u32, lasti: bool| PyExcEntry { start: 0, end: 8, target, depth: 1, lasti };
+        assert_eq!(co.exc_entry_kind(&e(0, true)), ExcKind::Handler, "lasti 的条目收到异常对象");
+        assert_eq!(co.exc_entry_kind(&e(6, false)), ExcKind::Cleanup, "只有 RERAISE 的是清理块");
+        co.instrs.push(instr("WITH_EXCEPT_START", 0x0b, None, "", 8));
+        assert_eq!(co.exc_entry_kind(&e(8, false)), ExcKind::With, "with 协议另有一类");
+        let mut bare = code_obj("__infy_unit__");
+        bare.instrs = vec![instr("RETURN_CONST", 0x36, Some(0), "None", 0)];
+        assert_eq!(bare.exc_entry_kind(&PyExcEntry { start: 0, end: 2, target: 0, depth: 0, lasti: false }), ExcKind::Unsupported);
+        let c = cap("3.14");
+        for k in [ExcKind::Cleanup, ExcKind::Handler, ExcKind::With] {
+            assert!(c.exception_allowed(k), "{} 应在 entry 段", k.word());
+        }
+        assert!(!c.exception_allowed(ExcKind::Unsupported), "bare 不在 entry 段：必须由扫描拒绝");
+    }
+
+    /// E.3's value grammar, using the forms the shipped tables actually write.
+    #[test]
+    fn the_mapping_grammar_covers_every_form_the_tables_use() {
+        assert_eq!(parse_mapping("seq.iter", "X").unwrap(), Mapping::Direct(Mapped::Mnem("seq.iter".to_string())));
+        assert_eq!(parse_mapping("-", "X").unwrap(), Mapping::Direct(Mapped::Reject));
+        assert_eq!(parse_mapping("ignore", "X").unwrap(), Mapping::Direct(Mapped::Ignore));
+        assert_eq!(
+            parse_mapping("host:std.io.log", "X").unwrap(),
+            Mapping::Direct(Mapped::Host("std.io.log".to_string()))
+        );
+        let disp = parse_mapping("arg:+->add._|host:std.str.concat,-->sub._,else->-", "X").unwrap();
+        assert_eq!(disp.resolve("+").mnemonic(), Some("add._"), "候选表按声明序取第一个可用的");
+        assert_eq!(disp.resolve("+").alternatives().len(), 2);
+        assert_eq!(disp.resolve("-").mnemonic(), Some("sub._"), "键 `-` 自身不是分隔符");
+        assert_eq!(disp.resolve("%"), Mapped::Reject, "else->- 即能力缺口");
+        let no_else = parse_mapping("arg:0->add._", "X").unwrap();
+        assert_eq!(no_else.resolve("9"), Mapped::Reject, "没有 else 的派发表，未知键必须拒绝");
+        assert!(parse_mapping("", "X").is_err(), "空值不是合法映射");
+        assert!(parse_mapping("not_an_ifbc_mnemonic", "X").is_err(), "附录 D 之外的助记符不得混进构建（§7.8.2）");
+    }
+
+    /// §7.7.2's dispatch vocabulary: which sub-operation a family row splits on.
+    #[test]
+    fn dispatch_key_names_the_sub_operation_a_family_row_splits_on() {
+        assert_eq!(dispatch_key(&instr("BINARY_OP", 0x2c, Some(0), "+", 0)), "+");
+        assert_eq!(dispatch_key(&instr("COMPARE_OP", 0x38, Some(0), "<=", 0)), "<=");
+        assert_eq!(dispatch_key(&instr("LOAD_ATTR", 0x24, Some(0), "x", 0)), "attr");
+        assert_eq!(dispatch_key(&instr("LOAD_ATTR", 0x24, Some(1), "x", 0)), "method", "3.12 起 bit0 = 绑定方法");
+        assert_eq!(dispatch_key(&instr("MAKE_FUNCTION", 0x73, Some(0), "", 0)), "plain");
+        assert_eq!(dispatch_key(&instr("MAKE_FUNCTION", 0x73, Some(3), "", 0)), "flags");
+        assert_eq!(dispatch_key(&instr("RETURN_VALUE", 0x37, None, "", 0)), "");
+    }
+
+    /// appendix E.3 keys `[opcode]` rows by **number** and carries the `OPNAME` alias beside it; the
+    /// two must agree, or the table cannot be audited against the interpreter's own `dis.opmap`
+    /// (§7.7.2). Only `IFBC-CAP-py-3.14.toml` satisfies the numeric half today — it was generated from
+    /// the interpreter installed on this host. The 3.13 and lua tables are name-keyed only, recorded
+    /// as BACKLOG **F28**: those numbers cannot be filled in here without inventing them (§12.2), and
+    /// while they are missing `check_alias_agreement` can never fire for those two tables.
+    #[test]
+    fn the_number_keyed_table_agrees_between_its_number_and_name_rows() {
+        let (lang, minor) = ("py", "3.14");
+        let (name, text) = CapTable::shipped(lang, minor).expect("shipped table");
+        let c = CapTable::load(lang, minor).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let mut numeric = 0usize;
+        for line in text.lines() {
+            let t = line.trim();
+            let Some(rest) = t.strip_prefix("0x") else { continue };
+            let (key, val) = rest.split_once(" = ").unwrap_or_else(|| panic!("{name}: 行格式 {t}"));
+            let (value, alias) = match val.split_once("   # ") {
+                Some((v, cm)) => (v.trim().trim_matches('"').to_string(), cm.trim().to_string()),
+                None => panic!("{name}: {key} 缺 OPNAME 别名注释"),
+            };
+            let key = format!("0x{key}");
+            numeric += 1;
+            assert_eq!(
+                c.opcode_map.get(&alias),
+                Some(&value),
+                "{name}: {key} = {value} 但 {alias} = {:?}",
+                c.opcode_map.get(&alias)
+            );
+            let n = u32::from_str_radix(&key[2..], 16).unwrap();
+            assert!(
+                c.check_alias_agreement(n, &alias).is_ok(),
+                "{name}: {key}/{alias} 自相矛盾"
+            );
+        }
+        assert!(numeric > 100, "{name}: [opcode] 段只有 {numeric} 行");
+    }
+
+    /// The two name-keyed tables must still resolve **every** row: `check_alias_agreement` cannot
+    /// help there (F28), so the only thing standing between a typo and a silently unmapped opcode is
+    /// that each row parses (§7.7.2).
+    #[test]
+    fn the_name_keyed_tables_still_map_every_row() {
+        for (lang, minor) in [("py", "3.13"), ("lua", "5.4")] {
+            let (name, text) = CapTable::shipped(lang, minor).expect("shipped table");
+            assert!(
+                !text.lines().any(|l| l.trim().starts_with("0x")),
+                "{name}: 已补上 E.3 的数值键就把它并进 the_number_keyed_table_…，并消掉 BACKLOG F28"
+            );
+            let c = CapTable::load(lang, minor).unwrap();
+            let mut mapped = 0usize;
+            let mut rejected = 0usize;
+            for (k, v) in &c.opcode_map {
+                let m = parse_mapping(v, k).unwrap_or_else(|e| panic!("{name}: {k} => {}", e.title()));
+                match m.resolve("") {
+                    Mapped::Reject => rejected += 1,
+                    _ => mapped += 1,
+                }
+            }
+            assert!(
+                mapped > 20 && rejected > 20,
+                "{name}: {mapped} 行覆盖 / {rejected} 行拒绝，共 {} 行",
+                c.opcode_map.len()
+            );
+        }
+    }
+
+    /// §12.2: each table carries a SHA-256 over the lines that are not the hash row. The canonical
+    /// form is built inside `CapTable::load`, so this is the only thing that catches a drift there
+    /// (line endings included — this machine checks out with `core.autocrlf=true`).
+    #[test]
+    fn each_table_hash_matches_the_body_it_claims_to_cover() {
+        for (lang, minor) in [("py", "3.13"), ("py", "3.14"), ("lua", "5.4")] {
+            let (name, text) = CapTable::shipped(lang, minor).expect("shipped table");
+            let declared = text
+                .lines()
+                .find(|l| l.trim_start().starts_with("table_hash"))
+                .and_then(|l| l.split('"').nth(1))
+                .unwrap_or_else(|| panic!("{name}: 没有 table_hash 行"))
+                .to_string();
+            let loaded = CapTable::load(lang, minor).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(loaded.table_hash, declared, "{name}: 声明的 hash 与按 E.3 规则重算的不一致");
+        }
+    }
+
+    /// §7.7.2: `infy ingest probe` compares these counts against a real dump, so a row that does not
+    /// parse must never degrade into "not mapped" silently.
+    #[test]
+    fn every_row_of_a_shipped_table_parses_under_the_grammar() {
+        for (lang, minor) in [("py", "3.13"), ("py", "3.14"), ("lua", "5.4")] {
+            let c = CapTable::load(lang, minor).expect("shipped table");
+            let cov = c.coverage();
+            assert!(cov.unparseable.is_empty(), "{lang}-{minor}: 这些行无法解析：{:?}", cov.unparseable);
+            assert!(cov.builtins > 0, "{lang}-{minor}: [builtin] 段一行可用都没有：{cov:?}");
+            if minor == "3.14" {
+                // `coverage()` counts E.3's numeric rows, so a name-keyed table reports 0 by design.
+                assert!(cov.mapped > 0 && cov.rejected > 0, "{lang}-{minor}: 覆盖统计 {cov:?}");
+            }
+        }
+    }
+
+    /// §7.7.1 rule 1: the units parameter table comes from the INFY-side declaration when the host
+    /// table carries it; without that it is `argcount` x `dyn`, never an empty signature.
+    #[test]
+    fn unit_signature_prefers_the_declared_host_entry() {
+        let mut co = code_obj("__infy_unit__");
+        co.argcount = 2;
+        let mut hosts = HostSigTable::new();
+        assert_eq!(unit_signature(&co, &hosts).params, vec![TyKind::Dyn, TyKind::Dyn]);
+        hosts.register(HostSig::new("__infy_unit__", &[TyKind::U32, TyKind::Str], TyKind::Bool));
+        let s = unit_signature(&co, &hosts);
+        assert_eq!(s.params, vec![TyKind::U32, TyKind::Str]);
+        assert_eq!(s.ret, TyKind::Bool);
+        co.name = "unit9".to_string();
+        hosts.register(HostSig::new("unit9", &[TyKind::Int], TyKind::Unit));
+        assert_eq!(unit_signature(&co, &hosts).params, vec![TyKind::Int], "按单元名索引（§7.7.1）");
+    }
+
+    /// §7.7.1/§7.8.2: a unit whose every opcode is covered lowers to an image that passes §7.8.3's
+    /// checks and survives the encoder/decoder round-trip.
+    #[test]
+    fn a_covered_unit_lowers_to_an_image_that_passes_the_load_checks() {
+        let d = probe("return x + 1", &["x"]);
+        let c = cap(&d.py_minor());
+        let hosts = HostSigTable::std_default();
+        let m = lower_named(&d, &c, &hosts, "b_track/__infy_unit__.py")
+            .unwrap_or_else(|v| panic!("lowering 失败：{:?}", items(&v)));
+        let text = ifbc::dump_canonical(&m.encode()).expect("双侧共用的规范化文本必须能渲染这张镜像");
+        assert!(text.lines().any(|l| l.starts_with('F')), "至少一个函数记录：{text}");
+        assert!(text.lines().any(|l| l.starts_with('I')), "至少一条指令：{text}");
+    }
 }
