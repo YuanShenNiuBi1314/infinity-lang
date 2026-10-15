@@ -102,10 +102,10 @@ $ gcc -std=c11 -Wall -Wextra -I runtime -c examples/tour/.infy-build/x86_64-pc-w
 （无输出）                                        # exit 0，0 error / 0 warning；这是 BACKLOG C2 的验收命令（BACKLOG §1 C2）
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
       runtime/test_ifbc.c runtime/test_ifbc_stubs.c -o ifbc_tests && ./ifbc_tests
-IFBC harness: 146 asserts, 146 pass, 0 FAIL      # exit 0，0 编译告警；D4(2) 轮 82 → 146（合并形状 + 间隙指令 + 跨语言夹具）
+IFBC harness: 167 asserts, 167 pass, 0 FAIL      # exit 0，0 编译告警；82 → 146 = D4(2) 合并形状 + 间隙指令 + 跨语言字节夹具；146 → 167 = D4(3) 的三份双侧共用文本夹具
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
       runtime/infy_rt.c runtime/test_ifbc.c -o ifbc_real && ./ifbc_real
-IFBC harness: 146 asserts, 146 pass, 0 FAIL      # exit 0，0 error / 0 warning；B2 轮真实链生产 infy_rt.c，stdout 与上一行逐字节相同
+IFBC harness: 167 asserts, 167 pass, 0 FAIL      # exit 0，0 error / 0 warning；B2 轮真实链生产 infy_rt.c，stdout 与上一行逐字节相同
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && (cd target/scratch && ./rt_tests)
 32335 assertions, 0 failures                     # exit 0，0 error / 0 warning；链的是生产 infy_rt.c；C3 轮 +32（Rust 写 ↔ C 读的夹具锁 + D-33）
 $ gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c
@@ -634,6 +634,47 @@ Rust 侧的编码器、`btrack.rs`、codegen/artifact 一行未动。
   199975 字节产物 / `build-id 4d8250b5…55ba` **逐字节未变**、`--verify-reproducible` exit 0、
   `fmt --check` 仍 exit 2（F6）、四条 C 链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警**、
   rt harness **32335/0**、替身链 IFBC **146/146**、生产链 **146/146** 且两份 stdout `cmp` 无输出。
+
+## D4(3) 轮（2026-10-15）：同一镜像两侧读成**同一份文本**，当场抓到三处分叉
+
+- **做法**：不把人类可读的 dumper 改成人家不能读的形态，而是两侧各加一份"只含双方都保留的字段、
+  逐位十进制"的规范化文本（C 侧 `infy_ifbc_dump_canonical` / `infy_ifbc_verify_canonical`，
+  Rust 侧 `ifbc::dump_canonical` / `ifbc::verify_canonical`），行语法 `H/T/P/F/I/L/X/S`
+  写进 `runtime/IFBC.md` §6.1。**方向分工是关键**：`.bin` 由 Rust 写入器生成
+  （`INFY_REGENERATE_FIXTURE=1` 才重写），`.can.txt`/`.ver.txt` 由 **C 侧**渲染
+  （`INFY_REGENERATE_CANONICAL=1` 才重写），两侧各自断言同一份文件 ⇒ 任一侧改渲染或改读法都会红，
+  没有一侧能单独定义答案。
+- **三份夹具**：`ifbc_rust_writer.bin`（1031 字节，D4(2) 那份，另加"两侧**阻塞性**校验结论都为空"）、
+  `ifbc_all_ops.bin`（2083 字节，**附录 D 的全部 opcode** 一条一个 `I` 行 —— 17 条间隙指令、`switch`
+  的内联 case 表、类型操作数越界时的 `?` 后缀都在内）、`ifbc_verify_matrix.bin`（1890 字节，
+  11 个函数、每函数一个缺陷、10 条 `(code, func, off)`：`R-0704 ×2 / R-0705 / R-0706 ×3 /
+  R-0707 ×2 / R-0710 / R-0713`，第 11 个函数是 `tailcall` 的目标且刻意干净）。
+- **分叉一（改 C 侧，是线宽错误）**：`coro.resume`/`coro.throw` 的 C 侧 `OPS[].nops = 0`，
+  本侧 `Op::arity() = 1`，而 D.8 明写 `0xc4 coro.resume h` ⇒ 指令宽度 `1 + 4*nops` 差 4 字节，
+  C 侧会把一条协程指令之后的**整条指令流**读歪（`I` 行立刻分两截、把填充字节读成 `nop`/`pop`）。
+  C 侧改为 1；执行仍从操作数栈取被 resume 的值，`h` 是与 `ldw` 类型注解（D-38 (e)）同类的
+  "装载与反汇编都读、执行不读"的注解。登记在偏差 **D-42**。
+- **分叉二（改 C 侧与两份文档，是命名）**：D.9 的 `0xe1/0xe2/0xe3` 规范写 `size_of idx` /
+  `align_of idx` / `field_off idx` —— `.idx` 是**操作数**，只有 `0xe0 typeof.idx` 是一个名字。
+  C 侧与 `runtime/IFBC.md`、本侧镜像文档 `docs/internals/ifbc-encoding-rust.md` 的表格都在抄
+  `.idx`（本侧代码本来就是 `size_of`/`align_of`/`field_off`）⇒ 三处一起改正。
+- **分叉三（改本侧，是重复报告）**：`verify_func` 把操作数合法性与 D.3/D.7 邻接检查写在"抽象执行"
+  走查里，而那条走查把**直线后继**也 `work.push(next)` 回工作栈 ⇒ 同一条指令被走 2–3 次、
+  同一个 `(code, off)` 报 2–3 次（矩阵里 `div` 缺守卫报 3 次，C 侧按边界各查一次只报 1 次）。
+  修 = ① 两项检查搬出走查、按 `instrs` 每指令一次（顺带不再漏掉不可达指令，与 C 侧同形）；
+  ② 走查不再把直线后继压回栈（高度仍记入 `height`，分支/跳转目标仍由 `push_block` 压）。
+  这不是线格式问题，但同样是"两侧对同一镜像的结论不同"。
+- **本轮没有让 F26 变成可讲的话**：比较覆盖了两侧**都能表达**的校验类，另有五类结论现在还不可比
+  （(a) 动态调用本侧判 `R-0705`、(b) `coro.*`/`throw.inf` 的 δ、(c) 操作数越界本侧在 `decode` 就拒、
+  (d) 本侧另要求"函数必须以终止指令收口"、(e) `W-0705` 粒度），逐条写进 D-42；
+  `docs/coverage.md` 的"被测对象是生产运行时吗"一行按此措辞。
+- 回归（全为本轮实测）：`cargo test --offline --lib` **426 / 0**（基线 424，`ifbc` 20 → **22**）、
+  `cargo check --offline --lib` 0 error / **50 warning**（未新增）、`infy check|build|test examples/tour`
+  全 exit 0 且 12513 字节 C11 / 199975 字节产物 / `build-id 4d8250b5…55ba` **逐字节未变**、
+  `--verify-reproducible` exit 0、生成 C 的 `gcc -std=c11 -Wall -Wextra -I runtime -c` exit 0（0/0）、
+  `fmt --check` 仍 exit **2**（F6 未裁决）；四条 C 链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各
+  **0 告警**、rt harness **32335/0**、替身链 IFBC **167/167**、生产链 **167/167** 且两份 stdout
+  `cmp` 无输出。
 
 ## 仍未实现
 
