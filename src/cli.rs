@@ -9,8 +9,11 @@
 //! `infy build`, `infy run` = the same pipeline into a temporary directory plus execution
 //! (§13.4), `infy test` = the §5.9 test build plus the generated `#[test]` harness, plus `init`,
 //! `fmt`, `expand`, `mod tidy`, `toolchain probe|list` and `artifact info|sections`.
-//! `infy doc`/`ifbc …`/`lib pack` still report that the stage behind them is open work rather than
-//! pretending to succeed (see `docs/status.md`).
+//! `infy ifbc dump|verify` (§7.8.4) inspects IFBC images — a §7.4 artifact's `.inf ifbc` region or a
+//! bare module image — as the human-readable disassembly, the machine-comparable canonical text both
+//! sides of the cross-check render, or the §7.8.3 load-time verdicts.
+//! `infy doc`/`lib pack`/`conformance` still report that the stage behind them is open work rather
+//! than pretending to succeed (see `docs/status.md`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,7 +22,7 @@ use crate::ast::{ItemKind, ParsedFile};
 use crate::diag::{Diagnostic, Handler, LintConfig, Phase};
 use crate::span::Position;
 use crate::span::{FileId, Sources};
-use crate::{artifact, borrow, codegen, derive, hir, lexer, macro_expand, parser, pkg, sema};
+use crate::{artifact, borrow, codegen, derive, hir, ifbc, lexer, macro_expand, parser, pkg, sema};
 
 /// §13.4 exit codes.
 pub mod exit {
@@ -62,18 +65,21 @@ pub fn run(args: &[String]) -> i32 {
         "toolchain" => toolchain_cmd(&positional),
         "target" => target_cmd(&positional),
         "artifact" => artifact_cmd(&positional, &rest),
+        "ifbc" => ifbc_cmd(&positional, &rest),
         "clean" => clean_cmd(flag("--cache")),
         "run" => run_cmd(&positional, &rest),
         "test" => test_cmd(&positional, &rest),
-        "bench" | "doc" | "lib" | "ifbc" | "ingest" | "conformance" | "lsp" | "pack" | "unpack" | "install" | "sumdb" | "database" => {
+        "bench" | "doc" | "lib" | "ingest" | "conformance" | "lsp" | "pack" | "unpack" | "install" | "sumdb" | "database" => {
             eprintln!(
                 "notice: `infy {cmd}` is not implemented in this build — stages [7]-[9] are wired \
-                 (`infy build`, `infy run`) and `infy test` runs the §5.9 `#[test]` harness, but \
-                 this command still needs its own stage: `ifbc`/`ingest` = the B-track bytecode \
-                 path (D1/D2), `bench` = §13.4 has no such subcommand (it is `infy test --bench`), \
+                 (`infy build`, `infy run`), `infy test` runs the §5.9 `#[test]` harness and \
+                 `infy ifbc dump|verify` inspects IFBC images (§7.8.4), but this command still \
+                 needs its own stage: `ingest` = the §7.7.4 wheel→`.infib` path (the stage-[6a] \
+                 ingest itself is wired and reachable from `infy check`), `bench` = §13.4 has no \
+                 such subcommand (it is `infy test --bench`), \
                  `doc`/`lib`/`conformance`/`lsp`/… = see docs/status.md. Commands \
                 that do work: check, build, run, test, fmt, expand, init, mod tidy, toolchain, target, \
-                 artifact info."
+                 artifact info, ifbc dump|verify."
             );
             exit::GENERIC
         }
@@ -103,8 +109,8 @@ fn usage() -> String {
         ("toolchain probe|list|add|remove", "A-track compilers + B-track bytecode toolchains (§7.6.2)"),
         ("target list|add <triple>", "target triples (§7.2)"),
         ("artifact info|sections <file> [--nodes]", ".inf meta and segment layout (§7.4)"),
+        ("ifbc dump|verify <file> [--canonical] [--all-errors]", "IFBC image / `.inf ifbc` inspection: disassembly + §7.8.3 load-time checks (§7.8.4/§12.3)"),
         ("lib pack|verify|dump|diff", ".infib containers (§13.2) — not implemented yet"),
-        ("ifbc dump|verify", "IFBC segment inspection (§7.8.4) — not implemented yet"),
         ("bench / doc / conformance / ingest / sumdb / lsp", "not implemented yet (`--cov` is refused outright: no instrumentation stage)"),
         ("clean [--cache]", "remove build output (§5.10)"),
         ("-V, --version", "language, tool, IFABI and IFBC versions"),
@@ -1781,6 +1787,263 @@ fn artifact_cmd(positional: &[String], rest: &[String]) -> i32 {
     exit::OK
 }
 
+// ---------------------------------------------------------------- §7.8.4 IFBC inspection
+
+/// What `infy ifbc dump|verify` was handed: a §7.4 container whose `.inf ifbc` region carries the
+/// B-track module images, or a file that *is* one IFBC module image (a committed `runtime/fixtures`
+/// `.bin`, an image written out of stage [6a]).
+#[derive(Clone, Debug)]
+struct IfbcInput {
+    /// The images, in `.inf ifbc` order. Empty when a container's region is empty — which is every
+    /// artifact this build produces, because stage [8] has no call channel into the VM (F29).
+    images: Vec<Vec<u8>>,
+    /// `Some((n_ifbc_modules, region_len))` when the bytes parsed as a §7.4 container.
+    container: Option<(u32, u32)>,
+}
+
+/// Why the command cannot name a single image to inspect.
+#[derive(Debug)]
+enum IfbcOpenErr {
+    /// Neither reading worked. Both reasons print, so a wrong `--out` path explains itself.
+    Neither(String, String),
+    /// `.inf ifbc` is non-empty but holds something other than exactly one module: §7.4 defines no
+    /// framing across several modules and neither reader implements one, so the command says so
+    /// instead of inventing a delimiter (F29; deviation D-45).
+    Framing { n: u32, len: u32 },
+}
+
+/// Read a file as one of the two accepted shapes. The container is tried first: `artifact::read`
+/// only inspects the trailer at end-of-file (D-33), so a bare image is never mistaken for one.
+fn classify_ifbc(bytes: &[u8]) -> Result<IfbcInput, IfbcOpenErr> {
+    let container = artifact::read(bytes, crate::VERSION.ifabi);
+    if let Ok(a) = &container {
+        let (n, len) = (a.meta.n_ifbc_modules, a.meta.ifbc.len);
+        if len == 0 {
+            return Ok(IfbcInput { images: Vec::new(), container: Some((n, len)) });
+        }
+        if n != 1 {
+            return Err(IfbcOpenErr::Framing { n, len });
+        }
+        return Ok(IfbcInput {
+            images: vec![a.region_bytes(a.meta.ifbc).to_vec()],
+            container: Some((n, len)),
+        });
+    }
+    match ifbc::decode(bytes) {
+        Ok(_) => Ok(IfbcInput { images: vec![bytes.to_vec()], container: None }),
+        Err(e) => Err(IfbcOpenErr::Neither(
+            container.err().map(|x| x.to_string()).unwrap_or_default(),
+            e.to_string(),
+        )),
+    }
+}
+
+/// What `infy ifbc dump|verify` prints for a container whose `.inf ifbc` region is empty. It is a
+/// function rather than inline `println!` because the wording is the point: exit 0 here means
+/// "nothing to inspect", and the note says so and names F29, so an empty region can never be read
+/// as "the artifact's bytecode passed §7.8.3".
+fn ifbc_empty_region_text(sub: &str, n: u32) -> String {
+    format!(
+        "ifbc {sub} — .inf ifbc 为空（{n} 个 B 轨模块 / 区域 0 字节）：没有可{}/§7.8.3 的字节码\n  \
+         = note: 阶段 [6a] 已能从 CLI 摄取 `@py` 单元（`infy check` 打 `ingest ok —` 行），缺的是阶段 \
+         [8] 通往 IFBC VM 的调用通道，所以含 B 轨单元的 module 在 [8] 就 exit 6、走不到 [9]\
+         （BACKLOG F29）。[6a] 今天的镜像由 `runtime/fixtures/ifbc_py_unit.bin` 双侧锁点覆盖，不是这个\
+         产物；本命令因此**不声称**校验过任何产物里的 B 轨字节码。\n",
+        if sub == "dump" { "反汇编" } else { "校验" }
+    )
+}
+
+/// The text `infy ifbc dump` writes for one image: the human-readable disassembly, or with
+/// `--canonical` the machine-comparable text whose line grammar `runtime/IFBC.md` §6.1 defines and
+/// `runtime/infy_ifbc.c` renders from the same bytes. Canonical mode returns that text with **no**
+/// header and no decoration, because the committed `.can.txt` fixtures are the C side's rendering
+/// and the comparison is a byte diff, not a claim.
+fn ifbc_dump_text(image: &[u8], canonical: bool) -> Result<String, String> {
+    let m = ifbc::decode(image).map_err(|e| e.to_string())?;
+    if canonical {
+        m.dump_canonical()
+            .map_err(|e| format!("镜像可解码、指令流却不线性（{e}）—— 两侧没有共用文本可差"))
+    } else {
+        Ok(m.disassemble())
+    }
+}
+
+/// §7.8.3's six load-time checks for one image, against this side's std host-signature table.
+/// `all_errors == false` stops at the first failing function, exactly like the runtime (D.10).
+fn ifbc_verify_image(image: &[u8], all_errors: bool) -> Result<Vec<ifbc::VerifyViolation>, String> {
+    let m = ifbc::decode(image).map_err(|e| e.to_string())?;
+    Ok(ifbc::verify(&m, &ifbc::HostSigTable::std_default(), all_errors))
+}
+
+/// The same verdicts as the machine-comparable text: sorted `V <code> f=<func> off=<off>` lines,
+/// byte for byte what `infy_ifbc_verify_canonical` renders on the C side (`docs/internals/
+/// ifbc-encoding-rust.md` §6). There is no shared text for an image either side cannot load, so
+/// that is reported as an error rather than rendered as a partial match.
+fn ifbc_verify_canonical_text(images: &[Vec<u8>]) -> Result<String, String> {
+    let mut out = String::new();
+    for img in images {
+        let m = ifbc::decode(img).map_err(|e| e.to_string())?;
+        out.push_str(&ifbc::verify_canonical(&m, &ifbc::HostSigTable::std_default()));
+    }
+    Ok(out)
+}
+
+/// §13.4/§7.8.4: `infy ifbc dump|verify <artifact|image> [--canonical] [--all-errors]`.
+///
+/// §13.4 names the two subcommands and §12.3 makes `infy ifbc dump` a golden-file target, but says
+/// nothing about the accepted file shapes, the `--canonical` text or which exit code a §7.8.3
+/// rejection carries — those choices are recorded in `docs/spec-deviations.md` D-45.
+fn ifbc_cmd(positional: &[String], rest: &[String]) -> i32 {
+    let sub = positional.first().map(|s| s.as_str()).unwrap_or("");
+    if !matches!(sub, "dump" | "verify") {
+        eprintln!("error: infy ifbc 子命令不认识 `{sub}`（可用：dump | verify，§13.4/§7.8.4）");
+        return exit::GENERIC;
+    }
+    let path = match positional.get(1) {
+        Some(p) => PathBuf::from(p),
+        None => {
+            eprintln!("error: infy ifbc dump|verify <artifact|镜像文件>（§13.4）");
+            return exit::GENERIC;
+        }
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: 无法读取 {}: {e}", path.display());
+            return exit::GENERIC;
+        }
+    };
+    let canonical = rest.iter().any(|a| a == "--canonical");
+    let all_errors = rest.iter().any(|a| a == "--all-errors");
+    let input = match classify_ifbc(&bytes) {
+        Ok(i) => i,
+        Err(IfbcOpenErr::Neither(art, image)) => {
+            eprintln!(
+                "error[E-0605]: {} 既不是可读的 §7.4 产物，也不是可解码的 IFBC 镜像。\n  \
+                 = 按产物读：{art}\n  = 按镜像读：{image}",
+                path.display()
+            );
+            return exit::CHECKSUM;
+        }
+        Err(IfbcOpenErr::Framing { n, len }) => {
+            eprintln!(
+                "error: {} 的 `.inf ifbc` 区有 {len} 字节而 meta.n_ifbc_modules = {n} —— §7.4 没有定义\
+                 一个区里多个模块如何分帧，两侧读取器也都没实现，本命令不猜分隔符（BACKLOG F29 / 偏差 D-45）。",
+                path.display()
+            );
+            return exit::GENERIC;
+        }
+    };
+    if input.images.is_empty() {
+        // Not a fake pass: the region is empty, so there is no bytecode to disassemble or check.
+        let (n, _) = input.container.unwrap_or((0, 0));
+        print!("{}", ifbc_empty_region_text(sub, n));
+        return exit::OK;
+    }
+    if sub == "dump" {
+        for (i, img) in input.images.iter().enumerate() {
+            match ifbc_dump_text(img, canonical) {
+                Ok(text) => {
+                    if !canonical {
+                        println!(
+                            "; IFBC 镜像 #{i} —— {} 字节（{}）",
+                            img.len(),
+                            if input.container.is_some() { "来自 .inf ifbc 区" } else { "裸镜像" }
+                        );
+                    }
+                    use std::io::Write;
+                    print!("{text}");
+                    let _ = std::io::stdout().flush();
+                }
+                Err(e) => {
+                    println!("R-0704: 镜像 #{i} 无法装载：{e}");
+                    println!("ifbc dump FAILED — 镜像 #{i} 不是可反汇编的 IFBC 镜像");
+                    return exit::DIAGNOSED;
+                }
+            }
+        }
+        return exit::OK;
+    }
+    let mut blocking = 0usize;
+    let mut warnings = 0usize;
+    if canonical {
+        // stdout stays pure in canonical mode: the text is the diff target against the C side.
+        match ifbc_verify_canonical_text(&input.images) {
+            Ok(out) => {
+                print!("{out}");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                blocking = out.lines().filter(|l| l.starts_with("V R")).count();
+                warnings = out.lines().filter(|l| l.starts_with("V W")).count();
+            }
+            Err(e) => {
+                eprintln!(
+                    "error: 镜像无法解码（{e}）—— --canonical 只在两侧都能装载的镜像上有共用文本，\
+                     这里不渲染半份。"
+                );
+                return exit::DIAGNOSED;
+            }
+        }
+    } else {
+        for (i, img) in input.images.iter().enumerate() {
+            let vs = match ifbc_verify_image(img, all_errors) {
+                Ok(v) => v,
+                Err(e) => {
+                    // A module that will not decode never reaches the six items; item 1's static
+                    // counterpart is what the loader refused with, so this is a rejection (R-0704),
+                    // not a tool error.
+                    println!("R-0704: 镜像 #{i} 无法装载：{e}");
+                    blocking += 1;
+                    continue;
+                }
+            };
+            println!("; §7.8.3 校验 —— 镜像 #{i}（{} 字节，按 func_table 顺序逐函数）", img.len());
+            for v in &vs {
+                if v.code.starts_with('W') {
+                    warnings += 1;
+                    if all_errors {
+                        println!("  {}", v.render());
+                    }
+                } else {
+                    blocking += 1;
+                    println!("{}", v.render());
+                }
+            }
+        }
+    }
+    // Canonical mode has already written its (pure) text, so the status lines go to stderr there.
+    let say = |m: String| {
+        if canonical {
+            eprintln!("{m}")
+        } else {
+            println!("{m}")
+        }
+    };
+    if blocking > 0 {
+        say(format!(
+            "ifbc verify FAILED — {blocking} 条阻断违规（R-07xx）/ {warnings} 条 W-0705\
+             （§7.8.3 第 6 项，不阻断）"
+        ));
+        if !all_errors && !canonical {
+            say(String::from(
+                "  = note: 按附录 D.10 默认只报首个失败函数，保持与运行时一致；`--all-errors` 一次列全。",
+            ));
+        }
+        return exit::DIAGNOSED;
+    }
+    say(format!(
+        "ifbc verify ok — {} 个镜像通过 §7.8.3 的 1→5 与结构 mandate（{warnings} 条 W-0705 不阻断）",
+        input.images.len()
+    ));
+    say(String::from(
+        "  = note: 这是**本侧**装载期校验的结论。它与 C 侧虚拟机不等价（`call.virt`/`call.embed`/\
+         `invoke.dynamic` 本侧判 R-0705、`coro.*`/`throw.inf` 的 δ 不同、`W-0705` 粒度不同 —— \
+         不可比清单 = 偏差 D-42 (a)–(e)，BACKLOG F26）。两侧一致的只有逐 (code, func, off) 的\
+         规范化文本与反汇编文本。",
+    ));
+    exit::OK
+}
+
 fn clean_cmd(cache: bool) -> i32 {
     let root = find_module_root(None).unwrap_or_else(|| PathBuf::from("."));
     let build = root.join(".infy-build");
@@ -2291,5 +2554,229 @@ fn main() { }
                 .expect("frontend 应返回结果");
         assert_eq!(code, exit::OK);
         assert!(l.embed_images.is_empty(), "纯 INFY 模块没有 [6a] 镜像：{:?}", l.embed_images);
+    }
+
+    // ------------------------------------------------------- §7.8.4 `infy ifbc dump|verify`
+
+    /// A committed `runtime/fixtures` image (`.bin` = this side's writer output) or text
+    /// (`.can.txt`/`.ver.txt` = the **C** side's rendering, written only by
+    /// `INFY_REGENERATE_CANONICAL=1`).
+    fn fixture_bytes(name: &str) -> Vec<u8> {
+        std::fs::read(fixture_path(name)).unwrap_or_else(|e| panic!("runtime/fixtures/{name}: {e}"))
+    }
+
+    fn fixture_path(name: &str) -> String {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtime")
+            .join("fixtures")
+            .join(name)
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// A §7.4 container whose `.inf ifbc` region carries `ifbc` bytes. No real build reaches that
+    /// state today (F29: stage [8] refuses an embed body long before [9]), so the artifact side of
+    /// `infy ifbc` is pinned by writing the container here.
+    fn container_with_ifbc(ifbc: &[u8], n: u32) -> Vec<u8> {
+        let content = artifact::Content {
+            host_image: b"MZ\0\0\0\0",
+            ifabi: crate::VERSION.ifabi,
+            opt_level: 2,
+            overflow: artifact::OV_PANIC,
+            panic_radius: artifact::RADIUS_FOCUS,
+            usize_bits: 64,
+            fast_math: false,
+            lto: 1,
+            stack_bytes: 8 * 1024 * 1024,
+            focus_stack_bytes: 256 * 1024,
+            focus_quota: 1,
+            iter_guard_steps: 1 << 32,
+            target_triple: "x86_64-pc-windows-gnu",
+            build_id: [0xAB; 32],
+            platform: "windows",
+            lang_version: "2.0",
+            source_toolchain: "gcc 14.2.0",
+            unreproducible: false,
+            ifbc,
+            n_ifbc_modules: n,
+            chains: vec![],
+            events: vec![],
+            nodes: vec![],
+            sums: vec![],
+            resource_keys: vec![],
+            entry: None,
+        };
+        artifact::write(&content).expect("容器写入应成功")
+    }
+
+    /// One-off inputs for the command go to `target/scratch/` (gitignored), never into the tree.
+    fn scratch_file(name: &str, bytes: &[u8]) -> String {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("scratch");
+        std::fs::create_dir_all(&dir).expect("target/scratch");
+        let p = dir.join(name);
+        std::fs::write(&p, bytes).expect("写 scratch 文件");
+        p.to_string_lossy().to_string()
+    }
+
+    /// D2's acceptance at the **command** level: `infy ifbc dump --canonical` writes exactly the text
+    /// the C loader rendered from the same bytes. D4(3) pinned that inside the C harness and in
+    /// `ifbc::tests`; this is the first time the CLI itself is the producer of the diff. Canonical
+    /// mode prints no header and no status line, which is what makes stdout byte-comparable.
+    #[test]
+    fn cli_canonical_dump_equals_the_text_the_c_loader_rendered() {
+        for (bin, txt) in [
+            ("ifbc_rust_writer.bin", "ifbc_rust_writer.can.txt"),
+            ("ifbc_all_ops.bin", "ifbc_all_ops.can.txt"),
+            ("ifbc_py_unit.bin", "ifbc_py_unit.can.txt"),
+        ] {
+            let image = fixture_bytes(bin);
+            let want = String::from_utf8(fixture_bytes(txt)).expect("规范化文本是 UTF-8");
+            let got = ifbc_dump_text(&image, true).unwrap_or_else(|e| panic!("{bin}: {e}"));
+            assert_eq!(want, got, "`infy ifbc dump --canonical {bin}` 不再是 C 侧渲染的那一份文本");
+            let path = fixture_path(bin);
+            assert_eq!(run(&argv(&["ifbc", "dump", "--canonical", &path])), exit::OK, "{bin}");
+        }
+    }
+
+    /// The default (human) form is §12.3's golden-file target. It has no cross-language byte lock —
+    /// the C dumper is a deliberately different text (D-42) — so what is pinned is that the image
+    /// renders and that the rendering depends on the bytes only, which is what a golden file needs.
+    #[test]
+    fn cli_human_dump_renders_the_module_and_is_deterministic() {
+        let image = fixture_bytes("ifbc_py_unit.bin");
+        let a = ifbc_dump_text(&image, false).expect("人类可读反汇编");
+        let b = ifbc_dump_text(&image, false).expect("人类可读反汇编");
+        assert_eq!(a, b, "反汇编文本必须只由镜像字节决定（§12.3 黄金文件）");
+        assert!(a.contains("IFBC module"), "{}", a.lines().next().unwrap_or(""));
+        assert!(a.contains("normalize"), "单元名必须在反汇编里（§7.7.1）");
+        assert!(a.contains("func_table") || a.contains("funcs=1"), "{a}");
+        let path = fixture_path("ifbc_py_unit.bin");
+        assert_eq!(run(&argv(&["ifbc", "dump", &path])), exit::OK);
+    }
+
+    /// §7.8.3's verdicts as CLI output: the canonical form is the C side's `.ver.txt`, byte for byte,
+    /// and the clean writer image is clean here too (the C harness asserts the same about its own
+    /// render). This is **not** "the two sides' load-time checks are equivalent" — that claim is
+    /// barred by F26 / deviation D-42; it is one committed text both sides reproduce.
+    #[test]
+    fn cli_canonical_verify_equals_the_verdict_text_the_c_loader_rendered() {
+        let image = fixture_bytes("ifbc_verify_matrix.bin");
+        let got = ifbc_verify_canonical_text(&[image.clone()]).expect("规范化结论");
+        let want = String::from_utf8(fixture_bytes("ifbc_verify_matrix.ver.txt")).expect("UTF-8");
+        assert_eq!(want, got, "`infy ifbc verify --canonical` 不再是 C 侧渲染的那一份结论文本");
+        assert_eq!(got.lines().count(), 10, "{got}");
+        let path = fixture_path("ifbc_verify_matrix.bin");
+        assert_eq!(run(&argv(&["ifbc", "verify", "--canonical", &path])), exit::DIAGNOSED);
+        let clean = fixture_bytes("ifbc_rust_writer.bin");
+        assert_eq!(ifbc_verify_canonical_text(&[clean]).expect("干净镜像"), "");
+    }
+
+    /// D.10 + §13.4: the default reports only the first failing function (like the runtime),
+    /// `--all-errors` lists every one, and a blocking finding is exit 2 (deviation D-45 — §13.4's
+    /// list has no code for a load-time rejection).
+    #[test]
+    fn verify_reports_the_first_finding_by_default_and_all_of_them_with_the_flag() {
+        let image = fixture_bytes("ifbc_verify_matrix.bin");
+        let renders = |vs: &[ifbc::VerifyViolation]| -> Vec<String> {
+            vs.iter().map(|v| v.render()).collect()
+        };
+        let one = ifbc_verify_image(&image, false).expect("可解码");
+        assert_eq!(one.len(), 1, "默认只报首个失败函数：{:?}", renders(&one));
+        assert_eq!(one[0].code, "R-0704");
+        assert_eq!(one[0].func, 0);
+        let all = ifbc_verify_image(&image, true).expect("可解码");
+        assert_eq!(
+            all.iter().filter(|v| !v.code.starts_with('W')).count(),
+            10,
+            "{:?}",
+            renders(&all)
+        );
+        assert!(all.iter().all(|v| !v.code.starts_with('W')), "矩阵不该出 W-0705：{:?}", renders(&all));
+        for c in ["R-0704", "R-0705", "R-0706", "R-0707", "R-0710", "R-0713"] {
+            assert!(all.iter().any(|v| v.code == c), "校验矩阵没覆盖 {c}：{:?}", renders(&all));
+        }
+        let path = fixture_path("ifbc_verify_matrix.bin");
+        assert_eq!(run(&argv(&["ifbc", "verify", &path])), exit::DIAGNOSED);
+        assert_eq!(run(&argv(&["ifbc", "verify", "--all-errors", &path])), exit::DIAGNOSED);
+    }
+
+    /// F29's visible half, and the premise D2 had to accept: every artifact this build produces has
+    /// an empty `.inf ifbc`. Exit 0 means "there is no bytecode here", and the text says exactly
+    /// that plus why — so an empty region can never be read as "the artifact passed §7.8.3".
+    #[test]
+    fn an_artifact_with_an_empty_ifbc_region_is_reported_as_empty() {
+        let bytes = container_with_ifbc(&[], 0);
+        let input = classify_ifbc(&bytes).expect("空区仍是合法容器");
+        assert!(input.images.is_empty(), "空区不该读出镜像：{input:?}");
+        assert_eq!(input.container, Some((0, 0)));
+        let text = ifbc_empty_region_text("verify", 0);
+        assert!(text.contains("0 个 B 轨模块"), "{text}");
+        assert!(text.contains("F29") && text.contains("不声称"), "{text}");
+        let path = scratch_file("d2-empty.exe", &bytes);
+        assert_eq!(run(&argv(&["ifbc", "dump", &path])), exit::OK);
+        assert_eq!(run(&argv(&["ifbc", "verify", &path])), exit::OK);
+    }
+
+    /// The artifact path of the command is reachable even while real builds cannot fill the region:
+    /// a container whose `.inf ifbc` holds exactly one module must inspect **those** bytes. This is
+    /// the shape §13.4's `infy ifbc verify runner` example takes once F29 lands.
+    #[test]
+    fn a_one_module_artifact_is_read_from_the_ifbc_region() {
+        let image = fixture_bytes("ifbc_rust_writer.bin");
+        let want = String::from_utf8(fixture_bytes("ifbc_rust_writer.can.txt")).expect("UTF-8");
+        let bytes = container_with_ifbc(&image, 1);
+        let input = classify_ifbc(&bytes).expect("一个模块的容器");
+        assert_eq!(input.images, vec![image.clone()], "区里读回的字节必须就是写进去的那一份");
+        assert_eq!(input.container, Some((1, image.len() as u32)));
+        assert_eq!(ifbc_dump_text(&input.images[0], true).expect("dump"), want);
+        assert_eq!(
+            ifbc_verify_image(&image, true)
+                .expect("verify")
+                .iter()
+                .filter(|v| !v.code.starts_with('W'))
+                .count(),
+            0,
+            "干净镜像在本侧也不该有阻断结论"
+        );
+        let path = scratch_file("d2-one-module.exe", &bytes);
+        assert_eq!(run(&argv(&["ifbc", "dump", "--canonical", &path])), exit::OK);
+        assert_eq!(run(&argv(&["ifbc", "verify", &path])), exit::OK);
+    }
+
+    /// §7.4 frames no delimiter for several modules in one region and neither reader implements one,
+    /// so a container claiming more than one is refused **by name**: guessing a split would let the
+    /// command hand back a clean bill of health for a prefix of the region (deviation D-45).
+    #[test]
+    fn several_modules_in_one_region_are_refused_by_name() {
+        let image = fixture_bytes("ifbc_rust_writer.bin");
+        let mut two = image.clone();
+        two.extend_from_slice(&image);
+        for n in [2u32, 0u32] {
+            let bytes = container_with_ifbc(&two, n);
+            match classify_ifbc(&bytes) {
+                Err(IfbcOpenErr::Framing { n: got, len }) => {
+                    assert_eq!(got, n);
+                    assert_eq!(len as usize, two.len());
+                }
+                other => panic!("n_ifbc_modules={n} 必须走 Framing，实际 {other:?}"),
+            }
+            let path = scratch_file(&format!("d2-{n}modules.exe"), &bytes);
+            assert_eq!(run(&argv(&["ifbc", "verify", &path])), exit::GENERIC, "n={n}");
+        }
+    }
+
+    /// §13.4's codes for the failure modes the spec does not assign: an unrecognisable file keeps
+    /// `artifact info`'s borrowing (E-0605 / exit 7, D-32), a bad subcommand or a missing path is 1.
+    #[test]
+    fn ifbc_refuses_a_file_that_is_neither_and_an_unusable_invocation() {
+        let readme = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let readme = readme.to_string_lossy().to_string();
+        assert_eq!(run(&argv(&["ifbc", "dump", &readme])), exit::CHECKSUM);
+        assert_eq!(run(&argv(&["ifbc", "frobnicate", &readme])), exit::GENERIC);
+        assert_eq!(run(&argv(&["ifbc", "dump"])), exit::GENERIC);
+        assert_eq!(
+            run(&argv(&["ifbc", "verify", "target/scratch/definitely-not-here-ifbc.bin"])),
+            exit::GENERIC
+        );
     }
 }
