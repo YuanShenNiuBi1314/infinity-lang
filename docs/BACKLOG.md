@@ -735,7 +735,54 @@
       证据提交：**`d3f5a80`**（`feat(E2)`）—— 上述 521/0、0/50、83 条的 77/0/6、exit 1、`--category` 与九种误用的退出码、
       12513/199975/`4d8250b5…55ba` 未变、`gcc -c` 0/0、四条 C 链（32335/0、180/180×2、`-c` 各 0 告警、stdout `cmp`）
       全部为该提交上的实测复跑，非引用；本节的做账行与 RUNLOG 的 cron-21 行在其后的提交里。
-- [ ] E3 把通过率表落进 `docs/coverage.md`，并在 README 明确"距 100% 还差哪些类"。**在 100% 之前，任何文档不得出现"INFY v2.0 兼容"字样。**
+- [x] E3 把通过率表落进 `docs/coverage.md`，并在 README 明确"距 100% 还差哪些类"。**在 100% 之前，任何文档不得出现"INFY v2.0 兼容"字样。**
+      **E3 轮（2026-10-16）落地并勾 `[x]`**：表格落进 `docs/coverage.md` 新增的 **§6**（20 行 × 11 列 =
+      slug / §12 表 / 分类名原文 / 要求 / 已有 / Pass / Fail / Blocked / 通过率 / 缺口 / 非满分的原因，
+      + 三档小计 + 合计 + 缺口三分类那一行 + §6.1 逐类读法 + §6.2 用例格式表达不了的那一面 + §6.3 红线），
+      README 新增「**距 §12 的 100% 还差哪些类**」一节，`conformance/README.md` 改为指向 §6 并说明它自己那张表
+      **刻意不复制通过率**（同一份数字在两处各算一遍 = 同一个缺口两个答案，D-47(h) 的同一族）。
+      (1) **数字全部从命令来**：`infy conformance --report` 是数据源（P29），本轮**没加、没改任何一条用例或期望**，
+          合计行仍是 `83 条用例 · Pass 77 · Fail 0 · Blocked 6 · 通过率 92.8% · 规范目标 2300（覆盖 83，缺口 2217）` ⇒ exit **1**。
+      (2) **副本配了逐格回核**（`conformance` **11 → 14**）：`the_pass_rate_table_in_coverage_md_matches_the_corpus`
+          要求行的存在/数量/顺序等于 `CATEGORIES`、前 10 列等于 `conformance::tally`、通过率用 `cli::conformance_rate`
+          这**一个**格式化函数（为此改 `pub(crate)`）、"非满分的原因"列点名的 `Fxx` 必须与该分类实际挂着的 `defect`
+          集合**相等**（少写、多写、写错都红）、空分类行以"结构性空分类"开头、小计/合计/缺口行按整行字符串比对。
+      (3) **"距 100% 还差哪些类"分三类点名**（把 Blocked 写成待补用例、把空分类写成不适用都是谎报）：
+          覆盖缺口 = **20/20 行** `short` > 0、合计 2217 条；结构性空分类 = 3 行 / 196 条
+          （`1.3-domain-neutral` = **F38**、`10.9-std` = **F19**、`11.1-host-protocol` = `src/host.rs` 占位）；
+          Blocked = 6 条（**F34** ×1、**F35** ×2、**F36** ×2、**F37** ×1）。另列第四类：§12.3 黄金文件
+          （`--update-golden` 两分支仍拒 = D-48(e)）与 §12.4 等价性矩阵四档（一档都跑不了 = F12/F19/F29/F31/F32）。
+          **先划读法线：通过率 ≠ 合规率** —— 92.8% 是"已写的 83 条过了 77 条"，§12.4 的 100% 是"2300 条全过 + 黄金 + 矩阵"，
+          这就是 D-48(a) 把 `0` 裁成"20 个分类都达到 `required` 且 Fail=0、Blocked=0"的理由。
+      (4) **红线从约定变成机检**：`no_markdown_doc_claims_the_compatibility_name` 扫全仓 `.md`（排除 `spec/` 那份规范原文），
+          任何一行出现那句声称而**没有否定标记** ⇒ 红；出现在禁令的引用里是允许的（BACKLOG 的任务行、RUNLOG 的历史行、
+          各文档的红线句都可搜索，要挡的是肯定句）。`the_front_facing_docs_restate_the_refusal` 反过来要求
+          README / `docs/coverage.md` / `conformance/README.md` / `docs/status.md` **各自**都还写着那句禁令 ——
+          否则"把红线删干净"也能通过上一条。**三条测试都验过能变红**（改 `9.5-fmt` 行的数字 / 加一句肯定式声称 /
+          删掉红线句 ⇒ 三条各自 FAILED，随后逐字恢复）。
+      (5) **顺带修掉两处过期声称**（同族认法 = 经验库 `infy-doc-claims-vs-evidence`）：`docs/status.md` 的"仍未实现"
+          挂了三轮的"目前外部用例为 **0**，逐分类通过率不可测"（E1 就有 83 条）改成 83 条 / 3.6% 并写明 E1/E2/E3 各自落了什么；
+          本节旧指针里"覆盖缺口 = 20 行里 17 行 > 0"**是错的** —— 17 是"有用例的分类数"，实测 20/20 行都欠
+          （最小的一行是 `7.8-ifbc` 的 62 条），`conformance_exit` 的 `categories_short` 就是 20。
+      (6) **本轮自己造的测试隔离缺陷（不是实现缺陷，已修）**：`run_case` 把用例落成 `target/scratch/conformance/<用例 id>`，
+          目录名只有 id ⇒ 同进程两条测试跑同一套用例时，后一条的 `remove_dir_all` 把前一条正在读的 module 删在半路，
+          现场症状是 `2-lexical-0001` 假报 `E-0600 产物无入口`（一个语义码，完全不像文件竞争），单跑各自绿、并跑红。
+          修 = `CORPUS_SERIAL` 静态锁，跑用例集的三条测试（含 `INFY_CONFORMANCE_PROBE=1` 那条作者工具）都先取锁。
+      回归全部复跑：`cargo test --offline --lib` **524 passed / 0 failed**（基线 521，+3 全在 `conformance`；分组计数见
+      `docs/status.md` 的 E3 一节）、`cargo check --offline --lib` 0 error / **50 warning**（未新增：HEAD 用 `git archive`
+      解到 `target/scratch/basecheck` 全量重检，与工作树的告警**集合**逐条 `diff` 相同，各 50 条）、
+      `infy check|build|run|test examples/tour` 全 exit 0、生成 C11 仍 **12513** 字节 / 产物仍 **199975** 字节 / `blob 738` /
+      `build-id 4d8250b58122ca2b76132029955e2d2005156dc0a6b021bf5f4ae761e5fd55ba` **逐字节不变**（没碰 [7]-[9]）、
+      `--verify-reproducible` exit 0、`infy artifact info … --nodes` exit 0 且节点表 6 行 = 8/9/10/11/16/19、
+      生成 C 的 `gcc -std=c11 -Wall -Wextra -I runtime -c` exit 0（**0/0**，5723 字节 .o）、`fmt --check` 仍 exit **2**（F6 未裁决）；
+      **C 侧零改动**仍复跑四条链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警**、rt **32335/0**（**CWD 必须是 `target/scratch`**：
+      本轮先在 `target/scratch/e3/` 跑出 2 条假失败 + exit 139，换回去就绿）、替身链与生产链 IFBC 各 **180/180** 且 stdout `cmp` 无差异。
+      **明确未做**：§12 的**数量**（还差 2217 条，E3 一条没填）、§12.3 黄金更新、§12.4 矩阵四档、三个空分类的实现
+      （F38 / F19 / `host.rs`）、6 条 Blocked 背后的 F34/F35/F36/F37；"两侧装载期校验等价"仍不许讲（F26 前半 / D-42 (a)–(e)）。
+      **E3 落的是缺口表，不是达标声明**：100% 之前那句声称仍然不许出现在任何文档里（现在有测试挡）。
+      证据提交：**`008bd93`**（`feat(E3)`）—— 上述 524/0、0/50（告警集合逐条 diff）、83 条的 77/0/6 与 exit 1、
+      12513/199975/`blob 738`/`4d8250b5…55ba` 未变、`--verify-reproducible` 0、`gcc -c` 0/0、四条 C 链（32335/0、
+      180/180×2、`-c` 各 0 告警、stdout `cmp`）全部为该提交上的实测复跑，非引用；本节的做账行与 RUNLOG 的 cron-22 行在其后的提交里。
 
 ### 阶段 F：工程卫生（每轮顺手做一点，不许它长大）
 
@@ -1054,18 +1101,15 @@
 
 ## 2. 当前指针
 
-> **下一轮第一件事：E3 —— 把 §12 的逐分类通过率表落进 `docs/coverage.md` 与 README，并显式列「距 100% 还差哪些类」**（§1 的第一个 `[ ]`）。
-> **E2 轮（2026-10-16）已勾 `[x]`**：`infy conformance --report` 接进 `cli.rs`，实测 20 行逐分类 + 三档小计 + 合计 =
-> **83 条 · Pass 77 · Fail 0 · Blocked 6 · 通过率 92.8% · 覆盖 83/2300（缺口 2217）** ⇒ **exit 1**（裁定 = 偏差 **D-48 (a)–(g)**）。
-> E3 的三件事，都不用重新审计：
-> (1) **表从命令来**：`target/debug/infy.exe conformance --report` 的逐分类行就是数据源；`docs/coverage.md` 的 **P29** 已写成
->     实测行，E3 要新增的是「§12 逐分类通过率」一节（20 行 × 【已有 / §12 要求 / Pass / Blocked / 缺口】），README 的覆盖表
->     同步；`conformance/README.md` 里已有「已有 vs §12 要求」那张表，缺的是**通过率**那一半，别复制成第二份真值 —— 引用命令。
-> (2) **"距 100% 还差哪些类"要逐分类点名，并区分三种缺口**：覆盖缺口（`short = required - cases`，20 行里 17 行 > 0）、
->     结构性空分类（`1.3-domain-neutral` = **F38**、`10.9-std` = **F19**、`11.1-host-protocol` = `src/host.rs` 占位）、
->     已知未修的 Blocked（**F34/F35/F36/F37**，6 条用例）。把 Blocked 写成"待补用例"、或把空分类写成"不适用"，都是谎报。
-> (3) **措辞红线（E3 是解锁点，但 E3 本身不解锁声称）**：§12.4 要求合规率 100% 才能声称「INFY v2.0 兼容」，覆盖 83/2300 时
->     任何文档不得出现该字样；E3 落的是**缺口表**，不是达标声明。"两侧装载期校验等价"仍不许讲（F26 前半，清单 = D-42 (a)–(e)）。
+> **下一轮第一件事：F1 —— 建 `.github/workflows/ci.yml`**（§1 的第一个 `[ ]`；`cargo fmt --check` 不适用（本仓库没有 rustfmt 约定），只做 `cargo build --offline --release` + `cargo test --offline` + `gcc` 跑 `runtime` 的两份 harness）。
+> **E3 轮（2026-10-16）已勾 `[x]`**：§12 逐分类通过率落进 `docs/coverage.md` **§6**（20 行 × 11 列 + 三档小计 + 合计 + 缺口三分类）与 README 的「距 §12 的 100% 还差哪些类」，副本配了逐格回核 + 红线机检 ⇒ `conformance` **11 → 14**、基线 **524 passed / 0 failed**、`cargo check` **0 error / 50 warning**（HEAD 全量重检的告警**集合**与工作树逐条 `diff` 相同）、`infy conformance --report` 的数字**一字未变**（83 = Pass 77 / Fail 0 / Blocked 6 · 92.8% · 覆盖 83/2300 ⇒ exit 1）。证据提交 `008bd93`。
+> F1 的接手要点（四条都不用重新审计）：
+> (1) **workflow 只能跑 Windows**：阶段 [9] 的产物是 **PE 可执行文件 + 追加的 `INFYART2` 段**，而 `infy_rt.c` 的 `std.fs` 走 `CreateFileW` + UTF-8→宽字符 ⇒ Linux/macOS runner 上 `cli::tests` 的端到端（建产物 + 执行）与 C 侧 harness 都不是这 524 项测过的形状。**别顺手加 `ubuntu-latest` 的 matrix 假装双平台**。
+> (2) **`cc` 必须在 PATH，python 也必须在**：`gcc` 本机在 `/c/msys64/ucrt64/bin`；`cli::tests::{run_executes_the_tour…, test_build_runs_the_harness…, an_a_track_unit_is_compiled_linked_and_called}`、`atrack::tests::the_generated_header_and_wrapper_compile`、`conformance` 里 `requires = ["cc"]` 的用例、以及 §1 那四条 C 链都直接 shell out 到 `gcc`。缺 `cc` 时 `infy build` 报 `E-0602` + exit 6（**这是正确的显式失败**，不是抖动）。更要注意**通过率随环境变**：`requires = ["python"]` 的用例在缺解释器时记 **Blocked**（不记 Fail、也不记 Pass），而 §6 那张表的 77/0/6 是在 **CPython 3.14.6 在场**的环境测出来的 ⇒ CI 里没有 python 时 `conformance::tests::every_case…` 仍然绿，但 `the_pass_rate_table_in_coverage_md_matches_the_corpus` **会红**。这是设计如此（表就是不许在缺工具的环境里被当成实测），** remedy 是给 runner 备好解释器（或 `INFY_PYTHON` 指过去），不是放宽那条测试**。
+> (3) **三处已知的"假红"要写进 yaml 注释**：① rt harness 的 **CWD 必须是 `target/scratch`**（夹具按 `../../runtime/fixtures/…` 取；换目录 = `test_rt.c:1520/1521` 两条假失败 + **exit 139**，E3 轮在 `target/scratch/e3/` 现场又踩一次；二进制放子目录没关系，**跑的时候换 CWD**）；② `INFY_REGENERATE_FIXTURE` / `INFY_REGENERATE_CANONICAL` / `INFY_REGENERATE_CATEGORIES` / `INFY_CONFORMANCE_PROBE` 四个开关**绝不能设** —— 它们重写的是提交进仓库的夹具、双侧文本与 `CATEGORY.toml`；③ `.gitattributes`（`runtime/fixtures/*` = `binary`/`-text`、`conformance/cases/**` = `-text`）是双侧逐字节比较与 §2.1 `W-0001`（行尾本身就是被测面）的前提，CI 里不许用 `core.autocrlf` 覆盖它。
+> (4) **F1 的验收只能验到"命令 + 文件"，验不到"CI 通过"**：勾 `[x]` 的条件写成 `gh api repos/YuanShenNiuBi1314/infinity-lang/actions/workflows`（以及 runs）的**回查**；GitHub 对分支上首条 workflow 常要一次手动批准才肯跑。跑不起来就在 RUNLOG 记卡点并保持 `[ ]`，**不许**把"yaml 看着对"写成"CI 绿"。
+> **E3 轮的现成件（F1 直接引用，别再造）**：`docs/coverage.md` §6 = 逐分类数字的对外副本（§1 的证据命令表仍按 P 编号引用）；`conformance::tests` 的三条文档回核/红线测试 = CI 该跑的红线看门狗；E2 的 `cli::NOT_IMPLEMENTED` / `conformance_report_text` / `conformance_exit` 不变；跑用例集的三条测试共用 `CORPUS_SERIAL` 锁（`run_case` 的 scratch 目录只按用例 id 命名，同进程并发会互删 module，现场症状是**语义码** `E-0600` 而不是文件锁错误）。
+> **E2 轮（2026-10-16）已勾 `[x]`**：`infy conformance --report` 接进 `cli.rs`，实测 20 行逐分类 + 三档小计 + 合计 ⇒ **exit 1**（裁定 = 偏差 **D-48 (a)–(g)**）。
 > **E2 轮新增的常驻面（别再造）**：`cli::NOT_IMPLEMENTED`（拒绝臂名单常量，`conformance_is_no_longer_a_refused_command` 钉它
 > —— 拒绝臂与已接线命令共享 exit 1，只有名单能让"命令又躺回拒绝臂"变红）；`cli::conformance_report_text(ran, selected)`
 > 是唯一渲染入口（空分类的 `n/a`、`defect=`、"不得声称兼容"这些**措辞本身**被测试逐子串断言）；
@@ -1181,8 +1225,9 @@
 > **F31/F32/F33**（D3 轮的 A 轨余项：`#[repr(C)]` struct 跨边界 / §7.6.2 工具链注册与审计 /
 > §7.6.3 项 3·5 与 §7.6.5/§7.6.6）；
 > `main` 与本地分叉（另一会话推了 `faa34ad` / `05da606`），**合并主干由人决定**。
-> 优先级最高的已知地雷：**E3**（§1 唯一的下一个 `[ ]` = 把 §12 逐分类通过率落进 `docs/coverage.md` 与 README
-> 并显式列「距 100% 还差哪些类」；`infy conformance --report` 自 E2 轮起已经能打这份数字，但覆盖 83/2300 ⇒ 任何文档不得声称兼容），A 轨余项 **F31/F32/F33**，
+> 优先级最高的已知地雷：**F1**（§1 唯一的下一个 `[ ]` = `.github/workflows/ci.yml`；只能跑 Windows，且**验收验不到"CI 绿"**，见上面 F1 的 (4)），
+> 紧随其后的 **F2**（50 条告警）、**F3**（一次性产物的 `.gitignore`：本轮 E3 就在仓库根落过一个 `tmp_rt.out`，靠手工删）、
+> A 轨余项 **F31/F32/F33**，
 > **F26 的前半**（"两侧校验等价"仍不许讲）、
 > **F12**（移动语义没有运行时入口，`String`/`Vec` 的真实程序写不出来）、**F15**（`fmt!` 被阶段 [4] 挡住，
 > §14.2 样例不能 `check`）、**F19**（没有任何 INFY 构造能写 stdout ⇒ `infy run` 的程序输出对现有一切实例
