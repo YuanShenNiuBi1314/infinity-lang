@@ -940,8 +940,8 @@
       `infy conformance --report` 仍 exit **1**（83 = 77/0/6 · 92.8%）、`fmt --check` 仍 exit **2**（F6）；
       **C 侧零改动**仍复跑四条链（两份 `-c` 各 **0 告警**、rt **32335/0**、两条 IFBC **180/180** + `cmp` 无差异）。
 - [x] F4 `infy lsp`、`std.net` TLS、`dyn Trait` vtable 偏移表：要么实现，要么在 `docs/spec-deviations.md` 里保持"明确未实现"的记录，不许静默。
-      **F4 轮（2026-10-16）走"记录"这条验收路** ⇒ 裁定 = 偏差 **D-50(a)–(c)**（提交号由紧随的做账提交补记，同 F1 的做法；
-      本轮的 4 条锁点与全部数字在 `docs/status.md` 的 F4 一节）。为什么不走实现：三件里两件被**规范本身**挡住 ——
+      **F4 轮（2026-10-16）走"记录"这条验收路** ⇒ 裁定 = 偏差 **D-50(a)–(c)**（交付提交 = **`e77d180`**，
+      推送第 1 次即脚本 exit 0；4 条锁点与全部数字在 `docs/status.md` 的 F4 一节）。为什么不走实现：三件里两件被**规范本身**挡住 ——
       附录 C-7「仍缺 ④」明写 LSP 的增量诊断与 §9.4 的逐字节一致性从未定义（实现了也只能造一个看起来在服务的空 server = 假成功），
       §10.4 又要求"TLS 后端由 `.inf rt` 段内置"而 §1.3 的零第三方依赖约束下没有可依赖的密码学实现（`runtime/infy_rt.c` 里
       grep `TLS` 只命中 thread-local 的 `INFY_TLS` 宏 —— **同一三字首两种含义**）。第三件（vtable）是唯一有真实落点的：
@@ -1310,6 +1310,10 @@
 > §10.4 又要求 TLS 后端内置在 `.inf rt` 段而 §1.3 禁止第三方依赖 ⇒ 这两件在规范/约束改口之前只能记录；
 > vtable 那件本轮**定死了偏移表**（`docs/internals/runtime-abi.md` §1，唯一真值 = `hir::Layouter::vtable_record`，
 > 文档是被读回来比对的那一侧）。
+> **推送与 run（2026-10-17 00:0x 收尾）**：`scripts/push-branch.ps1 -Branch toolchain` 第 **1** 次即脚本 exit 0 ⇒
+> 交付提交 **`e77d180`** 已在远端（脚本自报回查 `debt 0`）。**它触发的 run `38928670201`（run_number 7，head `e77d180`）
+> 收尾时仍 `in_progress`** ⇒ **下一轮开头先回查逐步结论**：绿 = 无事；**红就按 F1 的验收读法把 F1 重新打开**并按逐条根因处置
+> （本轮**动了 `src/`**，所以 run #7 不是"纯做账 run"，它对 F1 有判据力）。紧随的补记提交所触发的 run 只是确认，不是新前置。
 > **下一轮 = §1 第一个 `[ ]` = F5**（`infy fmt` / `infy expand` 的目录参数与 `infy check` 不一致）。起手现成件（本轮已定位，不必重审）：
 > 失败点 = `cli.rs:1616 fmt_cmd`（`1641` 那句 `error: 无法读取 …` 就是把目录当文件 `read` 的现场）与 `cli.rs:1711 expand_cmd`；
 > `check` 那条走的是 `load_scoped()` 的 module 根发现（`MODULE.infy.toml`），三条命令要一致就得让 fmt/expand 也接同一套发现，

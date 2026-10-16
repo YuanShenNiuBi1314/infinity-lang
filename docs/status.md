@@ -1556,4 +1556,7 @@ rt **32335/0**、两条 IFBC **180/180** + `cmp` 逐字节相同）、`infy conf
 
 **下一轮 = §1 第一个 `[ ]` = F5**（`infy fmt` / `infy expand` 的目录参数与 `infy check` 不一致）。
 F40/F41/F42 是本轮实测出来的三条真缺陷，按 BACKLOG 顺序排在 F5 之后，不要跳过指针来抓它们。
+**交付与远端**：交付提交 **`e77d180`**，`scripts/push-branch.ps1 -Branch toolchain` 第 **1** 次即脚本 exit 0（回查 `debt 0`）；
+它触发的 **run `38928670201`（run_number 7）收尾时仍 `in_progress`** ⇒ 下一轮开头先回查逐步结论，**红则按 F1 的读法重开 F1**
+（本轮动了 `src/`，这个 run 对 F1 有判据力）。
 
