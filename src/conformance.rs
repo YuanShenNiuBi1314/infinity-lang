@@ -570,9 +570,20 @@ fn runs(prog: &str) -> bool {
 /// §4.9's `overflow = "panic"` so an arithmetic case cannot quietly wrap.
 pub const DEFAULT_MANIFEST: &str = "[module]\npath    = \"example/conformance\"\nversion = \"0.1.0\"\ninfy    = \"2.0\"\n\n[dependencies]\n\"std\" = \"1.0\"\n\n[profile]\noverflow = \"panic\"\n";
 
+/// `run_case` keys its materialized module by case id alone (`target/scratch/conformance/<id>`), and
+/// materializing an id deletes that directory first — so two corpus runs inside one process pull each
+/// other's tree out from under a read. The symptom is not a lock error but a *semantic* one: a bogus
+/// `E-0600 产物无入口`, or os error 3 on the manifest path, on whichever case another thread happens
+/// to be re-materializing. E3 pinned this down with a lock inside `conformance::tests`, which did not
+/// hold: `cli::tests` runs the same corpus through the public `run_case`, and a `mod tests` lock
+/// cannot reach it. One lock, taken where the shared path is touched, is the only shape no caller can
+/// forget — so it lives here, not in a test.
+static SCRATCH_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Run one case. Never panics, never prints, and never reports `Pass` for something it did not do:
 /// a missing tool or a case that misses its expectation both come back with a reason.
 pub fn run_case(c: &Case) -> Outcome {
+    let _scratch = SCRATCH_SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     for t in &c.requires {
         if !tool_present(t) {
             return Outcome {
@@ -824,7 +835,6 @@ mod tests {
 
     #[test]
     fn every_case_in_the_corpus_meets_its_expectation_or_is_marked_blocked() {
-        let _serial = corpus_serial();
         let cases = match load_cases(&corpus_root()) {
             Ok(c) => c,
             Err(errs) => panic!("用例集加载失败：\n{}", errs.join("\n")),
@@ -911,7 +921,6 @@ mod tests {
         if std::env::var("INFY_CONFORMANCE_PROBE").is_err() {
             return;
         }
-        let _serial = corpus_serial();
         let cases = load_cases(&corpus_root()).expect("用例集应能加载");
         let mut lines = Vec::new();
         for c in &cases {
@@ -988,16 +997,6 @@ mod tests {
 
     fn case_toml(id: &str, category: &str, clause: &str, kind: &str, expect: &str, exit: &str, tail: &str) -> String {
         format!("id = \"{id}\"\ncategory = \"{category}\"\nclause = \"{clause}\"\ntitle = \"selftest\"\nkind = \"{kind}\"\nexpect = {expect}\nexit = {exit}\n{tail}")
-    }
-
-    /// `run_case` keys its materialized module by case id alone (`target/scratch/conformance/<id>`),
-    /// so two tests running the corpus inside one process delete each other's tree mid-read. The
-    /// symptom is not a lock error but a bogus `E-0600 产物无入口` on whichever case the other thread
-    /// happens to be re-materializing. Anything that runs cases takes this.
-    static CORPUS_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn corpus_serial() -> std::sync::MutexGuard<'static, ()> {
-        CORPUS_SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     // ------------------------------------------------------------ E3: the documented table and the refusal
@@ -1085,7 +1084,6 @@ mod tests {
 
     #[test]
     fn the_pass_rate_table_in_coverage_md_matches_the_corpus() {
-        let _serial = corpus_serial();
         let doc = doc_text("docs/coverage.md");
         let ran = match run_corpus(&corpus_root()) {
             Ok(r) => r,
@@ -1233,5 +1231,85 @@ mod tests {
                 "{rel} 里没有那句红线（§12.4 的 100% 之前不得声称），而 E3 要求它写在面向读者的文档里"
             );
         }
+    }
+
+    /// F1：CI 是"这些测试与两份 C harness 每次推送都真跑一遍"的唯一机器凭据。命令面少一条，那一环
+    /// 从此没人跑 —— 而 yaml 不是代码，没有任何编译器会替我们发现它被删了一行（D1(2)/D2 那族"上游
+    /// 全绿对『这一步存不存在』没有预测力"的第一次应用恰好发生在这种文件上）。
+    #[test]
+    fn the_ci_workflow_covers_the_build_the_tests_and_both_c_harnesses() {
+        let y = doc_text(".github/workflows/ci.yml");
+        for want in [
+            "cargo build --offline --release",
+            "cargo test --offline",
+            "for f in runtime/infy_rt.c runtime/infy_ifbc.c; do",
+            "gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c",
+            "gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/test_ifbc.c runtime/test_ifbc_stubs.c",
+            "gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/infy_rt.c runtime/test_ifbc.c",
+            "cmp stubs.out real.out",
+            "\"$INFY\" check examples/tour",
+            "\"$INFY\" build examples/tour --verify-reproducible",
+            "\"$INFY\" artifact info \"$exe\" --nodes",
+        ] {
+            assert!(y.contains(want), "CI 里没有 `{want}` ⇒ 那一环没有步骤覆盖它");
+        }
+    }
+
+    /// 这四个开关重写的是**提交进仓库**的夹具、双侧文本与 `CATEGORY.toml`。CI 一旦设了它们，
+    /// "双侧逐字节比较"就变成"两侧各写一遍再比一遍自己"，红绿都失去意义。
+    #[test]
+    fn the_ci_workflow_never_sets_the_regeneration_switches() {
+        let y = doc_text(".github/workflows/ci.yml");
+        for name in [
+            "INFY_REGENERATE_FIXTURE",
+            "INFY_REGENERATE_CANONICAL",
+            "INFY_REGENERATE_CATEGORIES",
+            "INFY_CONFORMANCE_PROBE",
+        ] {
+            for (n, line) in y.lines().enumerate() {
+                let t = line.trim();
+                if t.starts_with('#') {
+                    continue; // 注释里点名正是"为什么不设"的说明，允许。
+                }
+                for form in [format!("{name}="), format!("{name}:"), format!("export {name}")] {
+                    assert!(
+                        !t.contains(&form),
+                        ".github/workflows/ci.yml:{} 设了重写夹具的开关：`{t}`",
+                        n + 1
+                    );
+                }
+            }
+        }
+    }
+
+    /// 三条"验不到但可以钉死"的形状：runner 只有 Windows、检出改写工作树就红、rt harness 的 CWD
+    /// 锁在 `target/scratch`。第三条还顺带钉住 `.gitattributes` 里给 workflow 自己钉的 LF ——
+    /// `core.autocrlf=true` 的 runner 上，多行 run 段的 `do\r`/`fi\r` 是 bash 语法错误。
+    #[test]
+    fn the_ci_workflow_is_windows_only_and_keeps_the_three_anti_false_red_guards() {
+        let y = doc_text(".github/workflows/ci.yml");
+        let runs_on: Vec<String> = y
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("runs-on:"))
+            .map(|l| l.to_string())
+            .collect();
+        assert!(!runs_on.is_empty(), "CI 里没有 `runs-on:` ⇒ 一个 job 都没有");
+        for line in &runs_on {
+            assert!(
+                line.contains("windows"),
+                "runner 是 `{line}`：阶段 [9] 产 PE + 追加 INFYART2 段、std.fs 走 CreateFileW，\
+                 别的平台上跑的不是这 524 项测过的形状"
+            );
+        }
+        assert!(y.contains("git status --porcelain"), "行尾/改写守卫没了");
+        assert!(
+            y.contains("cd target/scratch"),
+            "rt harness 的 CWD 守卫没了 —— 它按 ../../runtime/fixtures 取夹具，换目录是两条假失败 + exit 139"
+        );
+        assert!(
+            doc_text(".gitattributes").contains(".github/workflows/*.yml"),
+            "workflow 的行尾没钉成 LF"
+        );
     }
 }

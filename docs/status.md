@@ -36,9 +36,9 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 524 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 527 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
-Finished `dev` profile  (50 warnings，全部为 unused/dead code，见 BACKLOG F2；D4(1) 清掉一处死字段；E1/E2/E3 轮未新增——E2 轮改动前后的告警**集合**逐条 diff 相同；E3 轮只加了三条 `#[cfg(test)]` 测试、一处 `pub(crate)` 与一把用例集串行锁（`CORPUS_SERIAL`，见下文 E3 一节）)
+Finished `dev` profile  (50 warnings，全部为 unused/dead code，见 BACKLOG F2；D4(1) 清掉一处死字段；E1/E2/E3 轮未新增——E2 轮改动前后的告警**集合**逐条 diff 相同；E3 轮只加了三条 `#[cfg(test)]` 测试、一处 `pub(crate)` 与一把用例集串行锁；F1 轮 +3 条 CI 回核测试，并把那把锁从 `mod tests` 挪进 `run_case`（`SCRATCH_SERIAL`，见下文 F1 一节）)
 $ infy check examples/tour
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)   # exit 0
 $ infy build examples/tour
@@ -132,19 +132,19 @@ $ infy conformance --update-golden                 # §12.4 要求显式授权�
 error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权（`--i-know-this-is-breaking`），因为改动黄金文件等于改语义。
 ```
 
-524 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 524；E3 轮实测）：
+527 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 527；F1 轮实测）：
 `lexer` 79 · `derive` 57 · `fmt` 39 · `cli` **38**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → **E2 轮 38**） ·
 `macro_expand` 35 · `btrack` **30**（D1(1) 前是 0，D1(2) 轮 23 → 30） ·
 `atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **26**（D3 轮 22 → 26） · `pkg` 24 · `sema` 22 ·
 `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` 20 · `artifact` 18 ·
-`toml` 15 · `borrow` 15 · `sha256` 12 · `conformance` **14**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线） · `codes` 9 ·
-`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = 524。
+`toml` 15 · `borrow` 15 · `sha256` 12 · `conformance` **17**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫） · `codes` 9 ·
+`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = 527。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
   借用检查（`E-1001`/`E-1002`/`E-1004`/`E-1005`/`E-1006`/`E-0121` 正反例）、哈希与 base64 与 TOML 往返、
   `infy` CLI 自身、IFBC Rust 侧编码/解码/反汇编：都有上表的测试。
-- **仍没有一项独立单测**：仍是 1 行占位的 `host.rs`/`doc.rs`（`atrack.rs` 的占位状态在 D3 轮结束，27 项；`conformance.rs` 的在 E1 轮结束，E3 轮到 **14** 项 + 83 条外部用例）。
+- **仍没有一项独立单测**：仍是 1 行占位的 `host.rs`/`doc.rs`（`atrack.rs` 的占位状态在 D3 轮结束，27 项；`conformance.rs` 的在 E1 轮结束，F1 轮到 **17** 项 + 83 条外部用例）。
   `btrack.rs`（§7.7 B 轨）的零单测状态在 **D1(1) 轮**结束（23 项，D1(2) 轮 → **30** 项，锁 §7.7.1 探针、§7.7.2 五个扫描项、
   §7.7.3 版本锁、附录 E.3 表语法与表体 hash、§7.8.3 的降级自检），它揪出并修掉的三个缺陷见下文 D1(1) 一节。
   `codegen.rs`（§7.1 阶段 [8]）在 C2 轮从 1 行占位变成独立单测模块（C4 轮 **19** 项 = `goto` 必须转移控制那一条；C5 轮 **22** 项 = §5.9 测试 harness 的 3 条；D3 轮 **26** 项 = A 轨调用走包装符号、没有 `#[link]` 配对的声明被点名拒绝、`()` 返回的 `void` 转发、块状尾表达式的结果临时量作用域），`hir.rs` 的 20 项锁阶段 [7]，
@@ -1192,3 +1192,77 @@ rc **0** 且两份 stdout `cmp` **无差异**。
 三个空分类要的是实现（**F38** 黑名单文件与调用点 / **F19** stdout 通道 / `src/host.rs` 占位）；
 6 条 Blocked 要的是修 **F34/F35/F36/F37**；"两侧装载期校验等价"仍不许讲（**F26** 前半，清单 = **D-42** (a)–(e)）。
 **红线本身不变**：§12.4 的 100% 之前任何文档不得那样声称，E3 落的是缺口表而**不是**达标声明；这条从今天起由测试守。
+
+
+## F1 轮（2026-10-16）：`.github/workflows/ci.yml` 落成，CI 的每个 run 段先在本地按 GitHub 的执行方式重放
+
+**做了什么**：新建 `.github/workflows/ci.yml`（11 步 = 2 个 `uses` + 9 个 `run`，单 job、单 runner），
+`.gitattributes` 加一条把 workflow 自己钉成 `eol=lf`，`.github/` 落进 README 的目录表；
+`src/conformance.rs` 加 **3 项**回核（14 → **17**），并修掉一处 E3 遗留的测试隔离缺陷（见本节末）。
+`cargo fmt --check` 按 BACKLOG F1 的原话**不适用**（本仓库没有 rustfmt 约定，`src/` 全文不是 rustfmt 形状）。
+
+**命令面 = §1 那四条链 + tour**，逐条与文档里的证据命令同源：
+
+| CI 步骤 | 对应证据行 | 本地重放结果 |
+| --- | --- | --- |
+| `cargo build --offline --release` | 新（F1 第一条） | exit **0**，23.8s，`target/release/infy.exe` 3060224 字节 |
+| `cargo test --offline` | P1（`--lib` 的那 527 项 + bin 的 0 项 + doc-test 的 0 项） | exit **0**，`527 passed; 0 failed` |
+| `cargo check --offline --lib` 告警数 | P2 | **50**（只报不门禁：F2 未清，门禁 = 假装 F2 已清） |
+| `gcc -std=c11 -Wall -Wextra -c` 两份 `.c` | P10 + `-c infy_ifbc.c` | 各 **0 告警**（stderr 0 字节，非空即红） |
+| rt harness | P9 | **32335 assertions / 0 failures** exit 0 |
+| IFBC 替身链 + 生产链 + `cmp` | P6 + P11 | 各 **180/180** exit 0，两份 stdout 逐字节相同 |
+| tour 的 `check\|build\|run\|test` + `--verify-reproducible` + `artifact info --nodes` | P3/P12/P13/P14/P16/P17 | 全 exit **0**；12513 字节 C11 / 199975 字节产物 / 节点表 6 行 = 8/9/10/11/16/19 |
+
+**为什么只有 Windows**（`runs-on: windows-latest`，没有 matrix）：阶段 [9] 的产物是 PE + 追加的
+`INFYART2` 段，`infy_rt.c` 的 `std.fs` 走 `CreateFileW` + UTF-8→宽字符 ⇒ Linux/macOS 上跑的**不是**
+这 527 项测过的形状，加一个 `ubuntu-latest` 就是假装双平台。
+
+**三条防假红写进 yaml，并由测试钉住**（不是注释里的约定）：
+1. **检出改写工作树 ⇒ 红**。`.gitattributes` 的 `-text`/`binary` 是双侧逐字节比较与 §2.1 `W-0001`
+   （行尾本身就是被测面）的前提；守卫做成 `git status --porcelain` 必须为空 —— 它同时抓行尾转换和
+   任何 smudge 过滤，比"打印一下 autocrlf 的值"强。
+2. **四个重写夹具的开关绝不设**（`INFY_REGENERATE_FIXTURE`/`_CANONICAL`/`_CATEGORIES`/
+   `INFY_CONFORMANCE_PROBE`）。CI 一旦设了它们，"双侧逐字节比较"就变成"两侧各写一遍再比一遍自己"。
+   注释里点名允许（那正是"为什么不设"），赋值不允许 ⇒ 测试按 `NAME=`/`NAME:`/`export NAME` 三种形态
+   扫非注释行。
+3. **rt harness 的 CWD 锁在 `target/scratch`**：它按 `../../runtime/fixtures/…` 取夹具，换目录 =
+   两条假失败 + **exit 139**（这条坑已在 D4(1)、C4、E3 三次现场复现，本轮第四次：先在 `target/scratch`
+   之外跑，拿到 `2 failures` 才换回去）。
+   另有一条本轮新坑：**workflow 文件自己的行尾**。这台机 `core.autocrlf=true`，未标属性的 `.yml` 检出成
+   CRLF 时，多行 `run` 段里的 `do`/`fi` 是 bash 语法错误（用 CRLF 副本验过 PyYAML 会把行尾归一化、
+   run 段里 `` 数为 0，但 GitHub 用的是另一个解析器 ⇒ 不赌，`.gitattributes` 显式钉 `eol=lf`）。
+
+**两条刻意不进 CI**（写进 yaml 注释，防止下一轮"顺手补上"）：`infy conformance --report` 今天 exit **1**
+（D-48(a)：`0` 要求 20 个分类都达到 §12 的 `required` 且 Fail=0、Blocked=0，而覆盖只有 83/2300）；
+`(cd examples/tour && infy fmt --check)` exit **2**（F6 未裁决）。把它们当门禁 = 把"缺口/未裁决"读成"回归"。
+
+**CPython 与 `cc` 都是前提，缺了就红**：`btrack::tests::py_unit_fixture_bytes()` 重新摄取 §7.7.1 的
+`normalize` 单元时声明 `py = "3.14"`，别的 minor ⇒ `E-0713`、别的字节码 ⇒ 夹具回核不等 ⇒
+`the_pass_rate_table_in_coverage_md_matches_the_corpus` 会红。这是设计如此（BACKLOG §2 的 F1(2)：
+remedy 是备解释器，不是放宽断言）⇒ yaml 用官方 `actions/setup-python@v7` 装 **3.14**，
+`cc` 则先查 PATH、再查四个常见目录（`/c/msys64/ucrt64/bin`、`/c/msys64/mingw64/bin`、`/c/mingw64/bin`、
+`/c/Strawberry/c/bin`）、都没有就带 `PATH=` 显式失败。**没有**"缺工具就 skip"的分支。
+
+**顺带修掉的测试隔离缺陷（E3 那把锁的跨模块形态）**：E3 轮加的 `CORPUS_SERIAL` 定义在
+`conformance::tests` 里，而 `cli::tests` 的 `the_conformance_report_…` 与 `a_filtered_conformance_run_…`
+直接调**公开的** `conformance::run_case` 跑同一套用例 ⇒ 同进程两个用例集运行器照旧互删 module。
+本轮加 3 项只读测试改变了线程调度，把它现形了：`7.7-b-track-0003` 假报「系统找不到指定的路径
+(os error 3)」、`cli` 那条读到 `Fail = 2`，而**单跑各自全绿**。修 = 把锁挪到共享路径的被碰点
+（`run_case` 自己持模块级 `SCRATCH_SERIAL`），调用方再也忘不掉；`mod tests` 里那把锁与三处取锁行删除。
+**认法**：一把放在测试模块里的锁，只保护同一个模块里的邻居（经验库 `infy-parallel-tests-share-scratch`）。
+
+**回归（全部本轮实测，非引用）**：`cargo test --offline --lib` **527 passed / 0 failed**（基线 524，
++3 全在 `conformance`）、`cargo check --offline --lib` 0 error / **50 warning**（未新增）、
+`cargo test --offline` 全目标 exit 0（lib 527 / bin 0 / doc 0）、`cargo build --offline --release` exit 0、
+`infy check|build|run|test examples/tour` 全 exit 0、`--verify-reproducible` exit 0（199975 == 199975）、
+`infy artifact info … --nodes` exit 0、生成 C11 仍 **12513** 字节、生成 C 的 `gcc -c` **0 error / 0 warning**
+（5723 字节 .o）、`infy conformance --report` 仍 **exit 1** 且数字一字未变（83 = Pass 77 / Fail 0 / Blocked 6 ·
+92.8% · 覆盖 83/2300）、`(cd examples/tour && infy fmt --check)` 仍 **exit 2**（F6 未裁决）；
+**C 侧零改动**仍复跑四条链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警**、rt **32335/0**、
+替身链与生产链 IFBC 各 **180/180** 且 stdout `cmp` **无差异**。
+
+**明确未做 / 不能声称**：F1 的验收只能验到"命令 + 文件 + 远端是否登记"，**验不到"CI 绿"** ——
+远端那一次 run 的实际结论只认 `gh api …/actions/runs` 的回查，逐条写在 `docs/RUNLOG.md` 的 F1 push 行里；
+runner 镜像里到底有没有 `gcc`、`setup-python` 的缓存里有没有 3.14，都是**本轮无法在本机测量的事实**
+（`windows-latest` 映射到哪张镜像、镜像装了什么的仓库 `github/runner-images` 在本机 API 返回 404），
+yaml 因此把两者都做成"缺了就红并打 PATH"而不是"缺了就跳"。

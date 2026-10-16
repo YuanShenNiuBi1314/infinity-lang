@@ -6,6 +6,10 @@
 - 语言版本 `2.0` · 工具链 `2.0.0` · **IFABI-2** · IFBC v1 · std 1.0
 - 实现语言 Rust（规范指定的参考实现语言），**零第三方依赖**（`.cargo/config.toml` 里 `offline = true`；编译器是信任边界，供应链模型只适用于用户代码）
 - AOT 路径：INFY → C11 → 宿主 `cc` → 单个可执行文件 + 追加的 `.inf` 段（§7.4）
+- CI：`.github/workflows/ci.yml` 在每次 push 到 `main`/`toolchain` 时跑 `cargo build --offline --release` +
+  `cargo test --offline` + `-Wall -Wextra` 的 C 侧编译自检 + 两份 C harness（rt 与 IFBC 两条链，含 stdout 逐字节比对）+
+  tour 的 `check|build|run|test` 与 `--verify-reproducible`。**只有 Windows runner**（阶段 [9] 产 PE + `INFYART2`
+  追加段，`std.fs` 走 `CreateFileW` ⇒ 别的平台上跑的不是这套测试测过的形状）
 - License: MIT
 
 ## 快速开始
@@ -58,7 +62,7 @@ infy conformance --update-golden       # §12.4 要求显式授权；带 --i-kno
 | §12 / §12.5 | 合规套件：用例格式 + 分类表 + 运行器 + `infy conformance --report` 的**逐分类**通过率 + 通过率表落进文档 | 🟡 E1 轮落成 `src/conformance.rs`（分类表逐字抄 §12.1/§12.2/§12.5 的 20 行，合计 1244/256/800/2300 由单测钉住；用例格式 = 一个用例一个目录 `case.toml` + 逐字节源文件，裁定见偏差 **D-47**；运行器走 `cli::check_verdict` = `infy check` 自己那条链，不是第二套前端）+ `conformance/cases/**` 首批 **83 条 / 17 个分类**；**E2 轮把命令行接上** = 逐分类通过率 20 行一行不少、空分类的通过率列打 `n/a`、`Blocked` 进分母不进分子并逐条打 `defect=F34/F35/F36/F37`、退出码裁定 = 偏差 **D-48(a)**（今天 `83 条：Pass 77 / Fail 0 / Blocked 6` ⇒ **exit 1**）；**E3 轮把那份数字落成对外表格** = `docs/coverage.md` §6（20 行 × 11 列 + 三档小计 + 合计 + 缺口三分类），表里每个数字由 `conformance::tests::the_pass_rate_table_in_coverage_md_matches_the_corpus` 逐格对回 `conformance::tally`（副本漂了就红），红线本身由 `no_markdown_doc_claims_the_compatibility_name` + `the_front_facing_docs_restate_the_refusal` 机检。**仍 🟡 而且不能声称合规**：覆盖 **83/2300 ≈ 3.6%**，三个分类结构性缺用例（F38 / F19 / `host.rs` 占位），比较面只有【诊断码 + 退出码】而 §12.3 的黄金文件与 §12.4 的等价性矩阵不进 `cases/**`（`--update-golden` 两分支都拒 = D-48(e)；矩阵四档一档都跑不了 = F12/F19/F29/F31/F32）|
 | 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32335 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 180 断言 B2 轮起也链生产 `infy_rt.c`（同为 180/180，输出逐字节相同），且 D4(3) 轮起两侧读**同一份规范化文本**。仍不等于 §12 合规：外部用例已有 83 条而 §12 要求 2300（P28/E1） |
 
-`cargo test --offline --lib` 目前 **524 passed / 0 failed**（另有 **83 条 §12 外部用例**：77 Pass / 6 Blocked / 0 Fail，`infy conformance --report` 打的正是这一份数字，见下）（`cargo check --offline --lib` 0 error / 50 warning；
+`cargo test --offline --lib` 目前 **527 passed / 0 failed**（另有 **83 条 §12 外部用例**：77 Pass / 6 Blocked / 0 Fail，`infy conformance --report` 打的正是这一份数字，见下）（`cargo check --offline --lib` 0 error / 50 warning；
 D4(1) 轮把 `ifbc` 从 6 项抬到 **19** 项，并删掉 `CodeBuilder` 的一个死字段，告警 −1；D4(2) 轮 +1 = 钉
 "Rust 写入器的字节 == 已提交夹具"；D4(3) 轮 +2 = `ifbc` **22** 项，钉"本侧渲染的规范化文本 == C 侧渲染并
 提交的那份"；D1(1) 轮 +23 = `btrack` 从 **0** 到 **23**、D1(2) 轮到 **30** 项，钉 §7.7.1 探针、§7.7.2 五个扫描项、§7.7.3 版本锁
@@ -126,7 +130,7 @@ null→`Option`、`Result` 出参、回调 ctx、struct 按值）、`event` 调�
 
 1. **覆盖缺口 —— 20/20 行都欠用例数，合计 2217 条。** 这一类欠的是**用例**，不是实现：17 个有内容的分类里
    14 行已经是 100.0%（已写的全过），把数量填到 §12 的 `required` 是搬运工作（E1 的 83 条来源就是仓库里
-   已有的 524 项单测）。**但"通过率 100%"不等于该分类合规** —— 它只说明写的那几条过了。
+   已有的 527 项单测）。**但"通过率 100%"不等于该分类合规** —— 它只说明写的那几条过了。
 2. **结构性空分类 —— 3 行一条用例都没有，整行都是缺口（196 条）。** 这三行欠的是**实现/文件**，先修好才谈得上写用例：
    `1.3-domain-neutral`（缺口 52）= **F38**（§1.3 的扫描有函数而零 CLI 调用点，且黑名单 `std/domain_terms.txt`
    不在仓库里）；`10.9-std`（缺口 84）= **F19**（四项检查全在执行面，而没有任何 INFY 构造能写 stdout）；
@@ -157,6 +161,7 @@ conformance/    §12 合规用例集：cases/<分类>/<编号>/{case.toml + 源�
 spec/           INFY Language Spec v2.0 全文
 docs/           覆盖矩阵（coverage.md）、构建状态（status.md）、规范偏差、运行日志
 examples/       §14 语言导览的可编译样例
+.github/        CI（workflows/ci.yml：build + test + 两份 C harness + tour 端到端，只在 Windows runner 上）
 ```
 
 ## 规范偏差

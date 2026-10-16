@@ -1,0 +1,154 @@
+# INFY v2.0 工具链 CI（BACKLOG F1）。
+#
+# 为什么只有 Windows：阶段 [9] 的产物是 PE 可执行文件 + 追加的 `INFYART2` 段，而 `infy_rt.c` 的
+# `std.fs` 走 `CreateFileW` + UTF-8→宽字符。别的平台上 `cli::tests` 的端到端（建产物 + 执行）与
+# 两份 C harness 都不是现有测试测过的形状 ⇒ 不要"顺手加一个 matrix"假装双平台支持。
+#
+# 三条防"假红"的前提（BACKLOG §2 的 F1 接手要点，逐条对应下面的步骤）：
+#   1. 检出不许改写工作树。`.gitattributes` 把 `runtime/fixtures/*.bin` 钉成 `binary`、把
+#      `*.can.txt`/`*.ver.txt` 与 `conformance/cases/**` 钉成 `-text`；一旦有 smudge 过滤（例如
+#      `core.autocrlf`）把 LF 变成 CRLF，双侧逐字节比较与 §2.1 的 `W-0001`（行尾本身就是被测面）
+#      都会假红 ⇒ 第一步就是 `git status --porcelain` 必须为空。
+#   2. `INFY_REGENERATE_FIXTURE` / `INFY_REGENERATE_CANONICAL` / `INFY_REGENERATE_CATEGORIES` /
+#      `INFY_CONFORMANCE_PROBE` 四个开关**绝不设** —— 它们重写提交进仓库的夹具、双侧文本与
+#      `CATEGORY.toml`。本文件里没有任何一处赋值，`conformance::tests
+#      ::the_ci_workflow_never_sets_the_regeneration_switches` 把这条钉成测试。
+#   3. rt harness 的**工作目录必须是 `target/scratch`**：它按 `../../runtime/fixtures/…` 取夹具，
+#      换目录 = 两条假失败 + exit 139（现场复现三次）。二进制也产在那里（`*.exe` 已被 .gitignore）。
+#
+# 刻意**不进** CI 的两条命令（不是遗漏）：
+#   - `infy conformance --report`：今天 exit **1**，因为 D-48(a) 裁定 `0` 要求 20 个分类都达到 §12 的
+#     `required` 且 Fail=0、Blocked=0，而用例集只覆盖 83/2300。把它当门禁 = 把"缺口"读成"回归"。
+#   - `(cd examples/tour && infy fmt --check)`：exit **2**，F6（§14 源码不是 §9.5 的不动点）未裁决。
+name: infy-toolchain
+
+on:
+  push:
+    branches: [main, toolchain]
+  workflow_dispatch:
+
+# CI 只读仓库：不发布、不打 tag、不动 main（BACKLOG §0.6 的禁令在这里也是默认值）。
+permissions:
+  contents: read
+
+# 同一分支上后来的推送取消还在跑的那条：Windows runner 的分钟数贵，且旧提交必然被新提交覆盖。
+concurrency:
+  group: infy-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: build + test + C harnesses
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: 检出没改写工作树（行尾锁，前提 1）
+        run: |
+          set -euo pipefail
+          echo "core.autocrlf = $(git config --get core.autocrlf || echo '(未设)')"
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::检出改写了工作树 ⇒ 双侧逐字节比较与 §2.1 的 W-0001 会假红，先看下面的名单"
+            git status --porcelain
+            exit 1
+          fi
+
+      - name: Provision CPython 3.14
+        # `btrack::tests::py_unit_fixture_bytes()` 从探针重新摄取 §7.7.1 的 `normalize` 单元，声明的
+        # 是 `py = "3.14"`；别的 minor ⇒ `E-0713`，别的字节码 ⇒ 夹具回核不等。BACKLOG §2 的 F1(2)
+        # 明写 remedy 是"给 runner 备好解释器"，不是放宽那条断言。
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      - name: 工具链自检（缺 cc 就红，不许读成跳过）
+        run: |
+          set -euo pipefail
+          command -v cargo >/dev/null 2>&1 || { echo "::error::runner 上没有 cargo（PATH=$PATH）"; exit 1; }
+          echo "rustc  : $(rustc --version)"
+          echo "cargo  : $(cargo --version)"
+          gcc_dir=""
+          if command -v gcc >/dev/null 2>&1; then
+            gcc_dir="$(command -v gcc)"
+          else
+            for d in /c/msys64/ucrt64/bin /c/msys64/mingw64/bin /c/mingw64/bin /c/Strawberry/c/bin; do
+              if [ -x "$d/gcc.exe" ]; then gcc_dir="$d/gcc.exe"; echo "$d" >> "$GITHUB_PATH"; break; fi
+            done
+          fi
+          if [ -z "$gcc_dir" ]; then
+            echo "::error::runner 上没有 gcc：阶段 [9]、A 轨编译与两份 C harness 都要它。缺 cc 时 infy build 报 E-0602 + exit 6 是正确的显式失败，CI 不许把它跳过。PATH=$PATH"
+            exit 1
+          fi
+          echo "gcc    : $("$gcc_dir" --version | head -1)"
+          echo "python : $(python --version 2>&1)"
+
+      - name: cargo build --offline --release
+        run: cargo build --offline --release
+
+      - name: cargo test --offline
+        run: cargo test --offline
+
+      - name: cargo check --offline --lib（告警数只报不门禁，F2 未清）
+        run: |
+          set -uo pipefail
+          n=$(cargo check --offline --lib --message-format=short 2>&1 | grep -c ': warning:' || true)
+          echo "cargo check --offline --lib 的告警数 = ${n}（F2 的目标是 0；现在不设门禁，见 docs/BACKLOG.md）"
+
+      - name: C 侧编译自检（-Wall -Wextra 必须 0 告警）
+        run: |
+          set -euo pipefail
+          mkdir -p target/scratch
+          for f in runtime/infy_rt.c runtime/infy_ifbc.c; do
+            stem="$(basename "$f" .c)"
+            log="target/scratch/compile-$stem.log"
+            gcc -std=c11 -Wall -Wextra -c "$f" -o "target/scratch/$stem.o" 2>"$log"
+            if [ -s "$log" ]; then
+              echo "::error::$f 在 -Wall -Wextra 下有输出（四条 C 链的基线是 0 告警）"
+              cat "$log"
+              exit 1
+            fi
+            echo "$f：0 告警"
+          done
+
+      - name: rt harness（CWD 必须是 target/scratch，前提 3）
+        run: |
+          set -euo pipefail
+          mkdir -p target/scratch
+          gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o target/scratch/rt_tests.exe
+          cd target/scratch
+          ./rt_tests.exe > rt.out 2>&1
+          tail -3 rt.out
+          grep -q '0 failures' rt.out
+
+      - name: IFBC 交叉验证（替身链 + 生产链，两份 stdout 逐字节相同）
+        run: |
+          set -euo pipefail
+          mkdir -p target/scratch
+          gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/test_ifbc.c runtime/test_ifbc_stubs.c -o target/scratch/ifbc_stubs.exe
+          gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/infy_rt.c runtime/test_ifbc.c -o target/scratch/ifbc_real.exe
+          cd target/scratch
+          ./ifbc_stubs.exe > stubs.out 2>&1
+          ./ifbc_real.exe  > real.out  2>&1
+          tail -1 stubs.out; tail -1 real.out
+          cmp stubs.out real.out
+
+      - name: tour 端到端（§14 导览，用 release 二进制）
+        run: |
+          set -euo pipefail
+          INFY=./target/release/infy.exe
+          "$INFY" check examples/tour
+          "$INFY" build examples/tour
+          "$INFY" run   examples/tour
+          "$INFY" test  examples/tour
+          "$INFY" build examples/tour --verify-reproducible
+          exe=$(ls examples/tour/.infy-build/*/ci.exe)
+          echo "产物 = $exe（$(wc -c < "$exe") 字节）"
+          "$INFY" artifact info "$exe" --nodes

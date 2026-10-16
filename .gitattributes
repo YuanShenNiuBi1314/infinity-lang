@@ -7,3 +7,8 @@ runtime/fixtures/*.ver.txt -text
 # 这台机 core.autocrlf=true，检出时会把 conformance/cases/**/*.infy 变成 CRLF，而 §2.1 的 W-0001
 # 就把行尾本身当被测面 —— 于是每条用例都多出一条诊断、且故意写 CRLF 字节的那两条正反例整个失效。
 conformance/cases/**         -text
+
+# F1：workflow 的 run 段就是 bash 脚本。这台机 core.autocrlf=true，未标 -text/eol 的文本会被检出成
+# CRLF，而 `do\r`/`fi\r` 会让每个多行 run 步骤变成 bash 语法错误。用 CRLF 副本解析过：PyYAML 会把
+# 行尾归一化成 LF（run 里 \r 数 = 0），但 GitHub 用的是另一个解析器 ⇒ 不赌，显式钉成 LF。
+.github/workflows/*.yml  text eol=lf
