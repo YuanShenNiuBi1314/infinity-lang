@@ -824,6 +824,7 @@ mod tests {
 
     #[test]
     fn every_case_in_the_corpus_meets_its_expectation_or_is_marked_blocked() {
+        let _serial = corpus_serial();
         let cases = match load_cases(&corpus_root()) {
             Ok(c) => c,
             Err(errs) => panic!("用例集加载失败：\n{}", errs.join("\n")),
@@ -910,6 +911,7 @@ mod tests {
         if std::env::var("INFY_CONFORMANCE_PROBE").is_err() {
             return;
         }
+        let _serial = corpus_serial();
         let cases = load_cases(&corpus_root()).expect("用例集应能加载");
         let mut lines = Vec::new();
         for c in &cases {
@@ -986,5 +988,250 @@ mod tests {
 
     fn case_toml(id: &str, category: &str, clause: &str, kind: &str, expect: &str, exit: &str, tail: &str) -> String {
         format!("id = \"{id}\"\ncategory = \"{category}\"\nclause = \"{clause}\"\ntitle = \"selftest\"\nkind = \"{kind}\"\nexpect = {expect}\nexit = {exit}\n{tail}")
+    }
+
+    /// `run_case` keys its materialized module by case id alone (`target/scratch/conformance/<id>`),
+    /// so two tests running the corpus inside one process delete each other's tree mid-read. The
+    /// symptom is not a lock error but a bogus `E-0600 产物无入口` on whichever case the other thread
+    /// happens to be re-materializing. Anything that runs cases takes this.
+    static CORPUS_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn corpus_serial() -> std::sync::MutexGuard<'static, ()> {
+        CORPUS_SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    // ------------------------------------------------------------ E3: the documented table and the refusal
+    //
+    // Two separate failures are locked here, and conflating them is what let both happen elsewhere:
+    //
+    // * A pass-rate table copied out of `infy conformance --report` into a doc goes stale in
+    //   silence — the command moves, the prose does not. So `docs/coverage.md` §6's rows are
+    //   re-derived from `tally` here, cell by cell, instead of being trusted.
+    // * §12.4 forbids *calling* this implementation compatible before the suite is at 100%. As a
+    //   sentence in a doc that is a promise; here it is a check. The name may appear inside a
+    //   prohibition (the rule's own text, quoted in BACKLOG / RUNLOG / every doc's red line), which
+    //   is exactly what makes it searchable — what must never appear is a line that asserts it.
+
+    const COMPAT_NAME: &str = "INFY v2.0 兼容";
+    const COMPAT_NEGATIONS: &[&str] = &["不得", "不声称", "未声称", "不许", "才能声称", "拒绝"];
+
+    fn doc_text(rel: &str) -> String {
+        let path = repo_root().join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读不到 {rel}（{}）: {e}", path.display()))
+    }
+
+    /// Every markdown file the repo owns, except `spec/` (the normative text states the rule; it is
+    /// not this implementation's claim) and build output.
+    fn markdown_docs() -> Vec<String> {
+        const SKIP: &[&str] = &["spec", "target", ".git", ".infy-build", "node_modules"];
+        fn walk(dir: &Path, out: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(file_type) = entry.file_type() else { continue };
+                if file_type.is_dir() {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if SKIP.contains(&name) {
+                            continue;
+                        }
+                    }
+                    walk(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                    let rel = path.strip_prefix(repo_root()).unwrap().to_string_lossy().replace('\\', "/");
+                    out.push(rel);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&repo_root(), &mut out);
+        out.sort();
+        out
+    }
+
+    /// The `Fxx` defect ids mentioned by a piece of text, sorted and deduped.
+    fn defect_ids(text: &str) -> Vec<String> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == 'F' {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 1 {
+                    out.push(chars[i..j].iter().collect());
+                    i = j;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn category_slugs_in_doc_order(doc: &str) -> Vec<String> {
+        doc.lines()
+            .filter_map(|line| {
+                let after = line.strip_prefix("| `")?;
+                let end = after.find('`')?;
+                let slug = &after[..end];
+                CATEGORIES.iter().any(|c| c.slug == slug).then(|| slug.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_pass_rate_table_in_coverage_md_matches_the_corpus() {
+        let _serial = corpus_serial();
+        let doc = doc_text("docs/coverage.md");
+        let ran = match run_corpus(&corpus_root()) {
+            Ok(r) => r,
+            Err(errs) => panic!("用例集加载失败：\n{}", errs.join("\n")),
+        };
+        let rows = tally(&ran);
+
+        // Same rows, same order, none added: §12.5's "逐分类" is what a doc table must not shave.
+        assert_eq!(
+            CATEGORIES.iter().map(|c| c.slug.to_string()).collect::<Vec<String>>(),
+            category_slugs_in_doc_order(&doc),
+            "docs/coverage.md §6 的 20 行必须与 `CATEGORIES` 逐一对应、按同一顺序，且不多不少"
+        );
+
+        let mut bad: Vec<String> = Vec::new();
+        for r in &rows {
+            let slug = r.category.slug;
+            let line = doc
+                .lines()
+                .find(|l| l.starts_with(&format!("| `{slug}` |")))
+                .unwrap_or_else(|| panic!("docs/coverage.md §6 里没有 `{slug}` 这一行"));
+            let cells: Vec<&str> = line.trim().trim_matches('|').split('|').map(|c| c.trim()).collect();
+            if cells.len() != 11 {
+                bad.push(format!("{slug}: 该行 {n} 列，应为 11 列", n = cells.len()));
+                continue;
+            }
+            let want = [
+                format!("`{slug}`"),
+                r.category.table.to_string(),
+                r.category.title.to_string(),
+                r.category.required.to_string(),
+                r.cases.to_string(),
+                r.pass.to_string(),
+                r.fail.to_string(),
+                r.blocked.to_string(),
+                cli::conformance_rate(r.pass, r.cases),
+                r.shortfall().to_string(),
+            ];
+            for (i, (got, exp)) in cells.iter().zip(want.iter()).enumerate() {
+                if got != exp {
+                    bad.push(format!("{slug} 第 {} 列 = `{got}`，命令与 `tally` 给的是 `{exp}`", i + 1));
+                }
+            }
+            let mut defects: Vec<String> = ran
+                .iter()
+                .filter(|(c, _)| c.category.slug == slug)
+                .filter_map(|(c, _)| c.defect.clone())
+                .collect();
+            defects.sort();
+            defects.dedup();
+            let note = cells[10];
+            if r.cases == 0 {
+                if !note.starts_with("结构性空分类") {
+                    bad.push(format!("{slug}: 0 条用例的分类必须逐行写明是结构性空分类，实得 `{note}`"));
+                }
+            } else if r.blocked > 0 {
+                if !note.contains("Blocked") || defect_ids(note) != defects {
+                    bad.push(format!("{slug}: 非通过那一列要点名 Blocked 与它挂的缺陷号 {:?}", defects));
+                }
+            } else if !note.starts_with("覆盖缺口") {
+                bad.push(format!("{slug}: 全通过的行只欠用例数，应写覆盖缺口，实得 `{note}`"));
+            }
+        }
+        assert!(bad.is_empty(), "docs/coverage.md §6 的通过率表与用例集不符：\n{}", bad.join("\n"));
+
+        // The three subtotals and the total are the report's own arithmetic, spelled the same way.
+        for table in ["§12.1", "§12.2", "§12.5"] {
+            let sub: Vec<&Tally> = rows.iter().filter(|r| r.category.table == table).collect();
+            let cases: usize = sub.iter().map(|r| r.cases).sum();
+            let pass: usize = sub.iter().map(|r| r.pass).sum();
+            let fail: usize = sub.iter().map(|r| r.fail).sum();
+            let blocked: usize = sub.iter().map(|r| r.blocked).sum();
+            let req = required_total(table);
+            let line = format!(
+                "小计 {table}：规范目标 {req} · 用例 {cases} · Pass {pass} · Fail {fail} · Blocked {blocked} · 缺口 {}",
+                req - cases
+            );
+            assert!(doc.contains(&line), "docs/coverage.md §6 少了这条小计行：`{line}`");
+        }
+        let req_all: usize = CATEGORIES.iter().map(|c| c.required).sum();
+        let pass: usize = rows.iter().map(|r| r.pass).sum();
+        let fail: usize = rows.iter().map(|r| r.fail).sum();
+        let blocked: usize = rows.iter().map(|r| r.blocked).sum();
+        let total_line = format!(
+            "**合计：用例 {} · Pass {pass} · Fail {fail} · Blocked {blocked} · 通过率 {} · 规范目标 {req_all}（覆盖 {}，缺口 {}）**",
+            ran.len(),
+            cli::conformance_rate(pass, ran.len()),
+            ran.len(),
+            req_all - ran.len()
+        );
+        assert!(doc.contains(&total_line), "docs/coverage.md §6 少了这条合计行：`{total_line}`");
+
+        // And the gap split into its three kinds, because "还差 2217 条" alone hides that three of
+        // those rows are not a missing-cases problem at all.
+        let short_rows = rows.iter().filter(|r| r.shortfall() > 0).count();
+        let short_all: usize = rows.iter().map(|r| r.shortfall()).sum();
+        let empty: Vec<&str> = rows.iter().filter(|r| r.cases == 0).map(|r| r.category.slug).collect();
+        let blocked_cases = ran.iter().filter(|(_, o)| o.status == Status::Blocked).count();
+        let mut all_defects: Vec<String> = ran.iter().filter_map(|(c, _)| c.defect.clone()).collect();
+        all_defects.sort();
+        all_defects.dedup();
+        let gap_line = format!(
+            "**缺口分三类**：覆盖缺口 = {short_rows}/{} 行 `short` > 0，合计 {short_all} 条；结构性空分类 = {} 行（{}）；已知未修的 Blocked = {blocked_cases} 条用例（defect：{}）",
+            CATEGORIES.len(),
+            empty.len(),
+            empty.join(" · "),
+            all_defects.join(" · ")
+        );
+        assert!(doc.contains(&gap_line), "docs/coverage.md §6 少了这条缺口分类：`{gap_line}`");
+    }
+
+    #[test]
+    fn no_markdown_doc_claims_the_compatibility_name() {
+        let mut offenders = Vec::new();
+        let mut hits = 0usize;
+        let files = markdown_docs();
+        assert!(files.len() >= 8, "只扫到 {} 个 .md ⇒ `markdown_docs` 的遍历写错了", files.len());
+        for rel in &files {
+            for (n, line) in doc_text(rel).lines().enumerate() {
+                if !line.contains(COMPAT_NAME) {
+                    continue;
+                }
+                hits += 1;
+                if !COMPAT_NEGATIONS.iter().any(|marker| line.contains(marker)) {
+                    offenders.push(format!("{rel}:{}", n + 1));
+                }
+            }
+        }
+        assert!(hits > 0, "一个 .md 都没有出现这个名字 ⇒ 扫描对象写错了，这条测试在空转");
+        assert!(
+            offenders.is_empty(),
+            "§12.4：合规率 100% 之前不得作出该声称。这些行出现了 `{COMPAT_NAME}` 而没有否定标记：\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    #[test]
+    fn the_front_facing_docs_restate_the_refusal() {
+        // Absence of a claim is not the same as stating the limit: deleting the red line would
+        // satisfy the test above and make E3's deliverable worse.
+        for rel in ["README.md", "docs/coverage.md", "conformance/README.md", "docs/status.md"] {
+            let text = doc_text(rel);
+            assert!(
+                text.lines().any(|l| l.contains(COMPAT_NAME) && COMPAT_NEGATIONS.iter().any(|m| l.contains(m))),
+                "{rel} 里没有那句红线（§12.4 的 100% 之前不得声称），而 E3 要求它写在面向读者的文档里"
+            );
+        }
     }
 }

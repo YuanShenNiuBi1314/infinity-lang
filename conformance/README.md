@@ -3,8 +3,13 @@
 这个目录是规范 §12 要求的合规套件。它现在是**首批搬运结果**，不是 §12 的完成量：
 §12.1 + §12.2 + §12.5 的表合计 **2300** 个用例，而这里的用例数与逐分类缺口由
 `infy conformance --report` 打印（**E2 轮已接线**：20 行逐分类 + 三档小计 + 合计，退出码裁定 = 偏差 **D-48**），
-并落进 `docs/coverage.md` 与 README（**E3**）。
-**在用例集覆盖到 100% 之前，任何文档不得出现「INFY v2.0 兼容」字样**（§12.4）。
+并落进 `docs/coverage.md` §6 与根 README（**E3 轮已落**：那份 20 行 × 11 列的表由
+`conformance::tests::the_pass_rate_table_in_coverage_md_matches_the_corpus` 逐格对回 `conformance::tally`，
+用例集动了而文档没动 ⇒ 测试变红；本文件下面那张"已有 vs §12 要求"只留数量差额，**不复制通过率**）。
+**在用例集覆盖到 100% 之前，任何文档不得出现「INFY v2.0 兼容」字样**（§12.4）—— 这条现在是机检：
+`conformance::tests::no_markdown_doc_claims_the_compatibility_name` 扫全仓 `.md`（除 `spec/`），
+任何一行出现那句话而没有否定标记就红；`the_front_facing_docs_restate_the_refusal` 反过来要求本文件与
+README / `docs/coverage.md` / `docs/status.md` 各自都还写着这句红线。
 
 ## 目录结构
 
@@ -71,7 +76,9 @@ infy conformance --category 7.8-ifbc             # 只跑一个分类：其余 1
 ## 现在有多少条（E1 首批，2026-10-16 实测）
 
 **83 条用例，17 个分类有内容**：77 条 Pass、6 条 Blocked（挂着 `defect` 标记的已知未修项）、**0 条 Fail**。
-逐分类数量与 §12 要求的差额由运行器算（`conformance::tally`），**E2 轮已把它打到命令行**（实测输出 = `docs/coverage.md` P29）：
+逐分类数量与 §12 要求的差额由运行器算（`conformance::tally`），**E2 轮已把它打到命令行**（实测输出 = `docs/coverage.md` P29），
+**E3 轮起完整的逐分类通过率表在 `docs/coverage.md` §6**（Pass/Fail/Blocked/通过率/缺口/非满分的原因，逐格有测试回核）；
+下面这张表刻意**只留数量差额**——通过率在两个地方各算一份，报告和文档就会在同一个缺口上给出两个答案（D-47(h)）。
 
 | 分类 | 已有 | §12 要求 | 分类 | 已有 | §12 要求 |
 | --- | --- | --- | --- | --- | --- |

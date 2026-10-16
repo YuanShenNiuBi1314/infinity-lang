@@ -55,10 +55,10 @@ infy conformance --update-golden       # §12.4 要求显式授权；带 --i-kno
 | §7.8 / 附录 D | IFBC 编码、反汇编、装载期六项校验（`R-0704`…`R-0708`）、UB-019 | 🟡 **D4(1)+D4(2)+D4(3) 已把两侧改成 D-38 裁定的同一份线格式，并且读成同一份文本**：`runtime/fixtures/ifbc_rust_writer.bin` 是 Rust 写入器的逐字节输出，C 侧用生产装载器读回并**执行**其中函数；D4(3) 另加两份规范化文本入口（C 侧 `infy_ifbc_dump_canonical`/`infy_ifbc_verify_canonical`，Rust 侧 `ifbc::dump_canonical`/`ifbc::verify_canonical`）与三份共用夹具 —— **附录 D 全部 opcode 的逐指令反汇编相等**、**校验矩阵 10 条 `(code, func, off)` 逐条相等**（Rust 侧 22 项单测 / C 侧 180 断言）。当场抓到 `coro.resume`/`coro.throw` 的 C 侧操作数个数（= 指令流错位）与 D.9 助记符命名，外加本侧 `verify_func` 的重复报告缺陷，全部记入偏差 **D-42**；**D2 轮把这份比对抬到命令行层** = `infy ifbc dump|verify`（§7.8.4/§12.3），命令的 `--canonical` 输出与 C 侧渲染的夹具逐字节 `cmp`，规范未定的四处（输入形态 / `--canonical` 是哪份文本 / 拒绝的退出码 / 一个区里多模块怎么分帧）记偏差 **D-45**。**仍 🟡**：两侧装载期校验结论仍有 D-42 (a)–(e) 五类不可比（F26 未消）、六条间隙指令在 C 侧装载通过而执行显式拒绝（F27 / 偏差 D-41）、`.inf ifbc` 也仍恒空（阶段 [6a] 已产出镜像，缺阶段 [8] 的调用通道 = F29 ⇒ `infy ifbc verify <产物>` 今天只能报"0 个 B 轨模块"） |
 | §7.6 A 轨（编译型语言嵌入） | `#[link]` 与 `@c` 成对、`infy_binding.h` 反向生成、`infy_e_<name>_<8hex>` 包装、§7.6.4 跨边界类型封闭表、UB-010 移交判据（`E-0720`/`E-0721`/`E-0722`/`E-0723`） | 🟡 D3 轮把 `src/atrack.rs` 从 1 行占位落成绑定的**唯一真值源**（**27 项**单测）：配对两个方向都报 `E-0720`（`sema` 那半边一直在，`#[link]` 落空这半边此前从不报）、`extern "C"` 之外的 ABI 与 `@cpp`/`@rust`/`@zig` 点名拒绝；包装符号哈希按规范化**签名块**（裁定见偏差 **D-46(a)(b)**）；绑定头 + `a_track/<name>.c` 由编译器写、`cc` 编译并**链接进产物**，最小 `@c` 单元端到端被调通（`coverage.md` P25/P26，程序 stdout = `dec_mark(41) -> 42`）。`E-0723` 此前**全仓库零发点**，现在是 UB-010 的移交判据（只落返回方向，D-46(c)）。**仍 🟡**：§7.6.4 里 ptr+len 展开 / null→`Option` / `Result` 出参 / 回调 ctx / `#[repr(C)]` struct 按值这五类**规范允许但没有发射形态**的行以 `§7.6.4` 指名拒绝而不是发码（D-46(e)），于是 §7.6.1 样例自己的 `-> *mut DecHandle` 过不了（**F31**）；§7.6.2 的工具链注册 / `recipe.toml` / 版本核对未接（**F32**）；§7.6.3 项 3 的非标量 thunk 与项 5 的调试映射、§7.6.1 的 `W-0720` 与链接期 `E-0604` 映射、§7.6.5 反向导出（`E-0724`）、§7.6.6 `isolation = "process"` 全未做（**F33**） |
 | §11 | `HostApi` C ABI、三步握手（`R-0903/0904/0905`）、`EnvSnapshot` 固定偏移 | ⬜ `src/host.rs` 是占位文件 —— **未实现**（偏移表本身已由 `src/hir.rs::env_table` 落成并有金样） |
-| §12 / §12.5 | 合规套件：用例格式 + 分类表 + 运行器 + `infy conformance --report` 的**逐分类**通过率 | 🟡 E1 轮落成 `src/conformance.rs`（分类表逐字抄 §12.1/§12.2/§12.5 的 20 行，合计 1244/256/800/2300 由单测钉住；用例格式 = 一个用例一个目录 `case.toml` + 逐字节源文件，裁定见偏差 **D-47**；运行器走 `cli::check_verdict` = `infy check` 自己那条链，不是第二套前端）+ `conformance/cases/**` 首批 **83 条 / 17 个分类**；**E2 轮把命令行接上** = 逐分类通过率 20 行一行不少、空分类的通过率列打 `n/a`、`Blocked` 进分母不进分子并逐条打 `defect=F34/F35/F36/F37`、退出码裁定 = 偏差 **D-48(a)**（今天 `83 条：Pass 77 / Fail 0 / Blocked 6` ⇒ **exit 1**）。**仍 🟡 而且不能声称合规**：覆盖 83/2300 ≈ 3.6%，三个分类结构性缺用例（F38 / F19 / `host.rs` 占位），比较面只有【诊断码 + 退出码】而 §12.3 的黄金文件与 §12.4 的等价性矩阵不进 `cases/**`（`--update-golden` 两分支都拒 = D-48(e)）；通过率落进 `docs/coverage.md`/README 的正式表格是 **E3** |
+| §12 / §12.5 | 合规套件：用例格式 + 分类表 + 运行器 + `infy conformance --report` 的**逐分类**通过率 + 通过率表落进文档 | 🟡 E1 轮落成 `src/conformance.rs`（分类表逐字抄 §12.1/§12.2/§12.5 的 20 行，合计 1244/256/800/2300 由单测钉住；用例格式 = 一个用例一个目录 `case.toml` + 逐字节源文件，裁定见偏差 **D-47**；运行器走 `cli::check_verdict` = `infy check` 自己那条链，不是第二套前端）+ `conformance/cases/**` 首批 **83 条 / 17 个分类**；**E2 轮把命令行接上** = 逐分类通过率 20 行一行不少、空分类的通过率列打 `n/a`、`Blocked` 进分母不进分子并逐条打 `defect=F34/F35/F36/F37`、退出码裁定 = 偏差 **D-48(a)**（今天 `83 条：Pass 77 / Fail 0 / Blocked 6` ⇒ **exit 1**）；**E3 轮把那份数字落成对外表格** = `docs/coverage.md` §6（20 行 × 11 列 + 三档小计 + 合计 + 缺口三分类），表里每个数字由 `conformance::tests::the_pass_rate_table_in_coverage_md_matches_the_corpus` 逐格对回 `conformance::tally`（副本漂了就红），红线本身由 `no_markdown_doc_claims_the_compatibility_name` + `the_front_facing_docs_restate_the_refusal` 机检。**仍 🟡 而且不能声称合规**：覆盖 **83/2300 ≈ 3.6%**，三个分类结构性缺用例（F38 / F19 / `host.rs` 占位），比较面只有【诊断码 + 退出码】而 §12.3 的黄金文件与 §12.4 的等价性矩阵不进 `cases/**`（`--update-golden` 两分支都拒 = D-48(e)；矩阵四档一档都跑不了 = F12/F19/F29/F31/F32）|
 | 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32335 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 180 断言 B2 轮起也链生产 `infy_rt.c`（同为 180/180，输出逐字节相同），且 D4(3) 轮起两侧读**同一份规范化文本**。仍不等于 §12 合规：外部用例已有 83 条而 §12 要求 2300（P28/E1） |
 
-`cargo test --offline --lib` 目前 **521 passed / 0 failed**（另有 **83 条 §12 外部用例**：77 Pass / 6 Blocked / 0 Fail，`infy conformance --report` 打的正是这一份数字，见下）（`cargo check --offline --lib` 0 error / 50 warning；
+`cargo test --offline --lib` 目前 **524 passed / 0 failed**（另有 **83 条 §12 外部用例**：77 Pass / 6 Blocked / 0 Fail，`infy conformance --report` 打的正是这一份数字，见下）（`cargo check --offline --lib` 0 error / 50 warning；
 D4(1) 轮把 `ifbc` 从 6 项抬到 **19** 项，并删掉 `CodeBuilder` 的一个死字段，告警 −1；D4(2) 轮 +1 = 钉
 "Rust 写入器的字节 == 已提交夹具"；D4(3) 轮 +2 = `ifbc` **22** 项，钉"本侧渲染的规范化文本 == C 侧渲染并
 提交的那份"；D1(1) 轮 +23 = `btrack` 从 **0** 到 **23**、D1(2) 轮到 **30** 项，钉 §7.7.1 探针、§7.7.2 五个扫描项、§7.7.3 版本锁
@@ -76,7 +76,8 @@ D4(1) 轮把 `ifbc` 从 6 项抬到 **19** 项，并删掉 `CodeBuilder` 的一�
 C3 轮新建的 `artifact` 直接带 **18** 项（§7.4 容器逐字段读回、七个拒绝理由各一条、§7.3 九类输入逐个绑定、
 `INFY_META_OFF_*` 钉回冻结头文本），C4/C5 轮把 `cli` 抬到 **16** 项（`infy run`/`infy test` 的端到端退出码与逐字节转发、
 §5.9/§2.2 的文件选择、§5.8 的 dirhash 不随构建范围变、`--cov`/`--arg`/`--feature` 的显式拒绝），仍在进行中或未开始的只剩
-`host`、`doc`（`conformance` 于 E1 轮从 1 行占位新建到 **11** 项 + 83 条外部用例；`atrack` 于 D3 轮从 1 行占位新建到 **27** 项，并第一次让 `infy build` 真把 C 源编进产物；
+`host`、`doc`（`conformance` 于 E1 轮从 1 行占位新建到 11 项 + 83 条外部用例，E3 轮到 **14** 项（+3 = 文档表的逐格回核、
+红线的机检、四份面向读者的文档各须重申红线）；`atrack` 于 D3 轮从 1 行占位新建到 **27** 项，并第一次让 `infy build` 真把 C 源编进产物；
 `btrack` 于 D1(1) 轮从 0 抬到 **23** 项，但它锁的是**库内**的
 探针/扫描/降级路径 —— 阶段 [6a] 至今没有 CLI 调用点；`hir` 于 C1 轮补了 20 项声明层金样，语句/表达式级 IFIR 仍未落 ——
 阶段 [8] 是 AST→C 直接发射）。
@@ -107,12 +108,44 @@ null→`Option`、`Result` 出参、回调 ctx、struct 按值）、`event` 调�
 `std.net` 的 TLS 后端（§10.4）、`infy lsp`（§13.4 标注为可选）、`dyn Trait` 的跨实现 vtable 偏移表（规范缺口 C-7 ②）、
 `line_map`/`exception_table` 的规范字节格式（缺口 C-7 ①，本实现自行固定并写入 `runtime/IFBC.md`）。
 
-**因此本实现不声称「INFY v2.0 兼容」**：§12 要求 `infy conformance --report` 输出**逐分类**通过率、用例集共 2300 项
-（§12.1 的 1244 + §12.2 的 256 + §12.5 的 800）。E1 轮交付的是**用例格式、分类表与运行器**，首批 83 条用例覆盖 17 个分类（3.6%），三个分类结构性地还没有用例（`§1.3` 的领域黑名单 = F38、`§10.9–§10.14` 要运行期而程序没有 stdout 通道 = F19、`§11.1–§11.4` 的 `HostApi` 仍是占位）；**E2 轮把 `infy conformance --report` 接上了命令行**（20 行逐分类 +
-三档小计 + 合计，今天 `83 条：Pass 77 / Fail 0 / Blocked 6` ⇒ **exit 1**，退出码裁定 = 偏差 **D-48**），
-所以逐分类通过率已经能从命令输出，但覆盖仍是 83/2300 ⇒ **不声称兼容**。`docs/coverage.md` 目前是逐条款"实现 × 证据"矩阵
-+ P28 的用例集实测行 + P29 的命令行实测行；把逐分类通过率表落进 `docs/coverage.md` 与 README 并显式列
-「距 100% 还差哪些类」= **E3**。
+## 距 §12 的 100% 还差哪些类（E3）
+
+**因此本实现不声称「INFY v2.0 兼容」**：§12.4 把那句话留给 100% 通过 §12 套件（2300 条 = §12.1 的 1244 +
+§12.2 的 256 + §12.5 的 800）且 §12.3 的黄金文件与可复现构建全过的实现，而这里是 **83/2300 ≈ 3.6%**。
+逐分类通过率本身已经能从命令输出（`infy conformance --report`，E2 轮），完整的 20 行表在
+`docs/coverage.md` §6 —— 那张表由 `conformance::tests::the_pass_rate_table_in_coverage_md_matches_the_corpus`
+逐格对回 `conformance::tally`，所以文档里的数字不会烂在原地。今天的一份 =
+
+`83 条用例 · Pass 77 · Fail 0 · Blocked 6 · 通过率 92.8% · 规范目标 2300（覆盖 83，缺口 2217）` ⇒ **exit 1**
+
+**先划一条读法上的线：通过率 ≠ 合规率。** 92.8% 说的是"已写的 83 条里过了 77 条"；§12.4 的 100% 说的是
+"2300 条全过 + 黄金文件 + 等价性矩阵"。这就是为什么 `0` 退出码被裁成"20 个分类都达到 `required` 且
+`Fail=0`、`Blocked=0`"（偏差 D-48(a)），而不是"没有失败"。
+
+缺口分**三类**（外加一类用例格式表达不了的），逐分类点名在 `docs/coverage.md` §6 的"非满分的原因"列：
+
+1. **覆盖缺口 —— 20/20 行都欠用例数，合计 2217 条。** 这一类欠的是**用例**，不是实现：17 个有内容的分类里
+   14 行已经是 100.0%（已写的全过），把数量填到 §12 的 `required` 是搬运工作（E1 的 83 条来源就是仓库里
+   已有的 524 项单测）。**但"通过率 100%"不等于该分类合规** —— 它只说明写的那几条过了。
+2. **结构性空分类 —— 3 行一条用例都没有，整行都是缺口（196 条）。** 这三行欠的是**实现/文件**，先修好才谈得上写用例：
+   `1.3-domain-neutral`（缺口 52）= **F38**（§1.3 的扫描有函数而零 CLI 调用点，且黑名单 `std/domain_terms.txt`
+   不在仓库里）；`10.9-std`（缺口 84）= **F19**（四项检查全在执行面，而没有任何 INFY 构造能写 stdout）；
+   `11.1-host-protocol`（缺口 60）= `src/host.rs` 是 1 行占位（§11 `HostApi` 未实现）。
+   目录和 `CATEGORY.toml` 都留着、缺口逐行打印 —— 删目录让表变好看是 §12.5 要防的谎报。
+3. **已知未修的 Blocked —— 6 条用例（defect：F34 ×1、F35 ×2、F36 ×2、F37 ×1）。** 期望写的就是规范的期望，
+   不达是因为实现有缺陷；这六条**进分母不进分子**。`defect` 标记的反向机制：实现修好了而标记没删 ⇒ 测试变红，
+   所以"把缺陷当通过"这条路也是堵死的。
+4. **§12.3 / §12.4 不进 `cases/**` 的那一面（第四类，不在这 92.8% 里）**：黄金文件（`--update-golden` 两个分支
+   都拒绝 = D-48(e)；黄金文本由 `runtime/fixtures` 的两侧写入器生成 = D-45(b)，真接还需要 **F29**）、
+   §12.4 的等价性矩阵（wheel ≡ 源码、`-O0` ≡ `-O3`、`lto=false` ≡ `fat`、A 轨同进程 ≡ `isolation = "process"`
+   ⇒ **一档都跑不了**，因为 **F12/F19/F29/F31/F32** 都还开着）、以及比较面本身只有【诊断码多重集 + §13.4 退出码】
+   （§9.2 的位置与文本、§9.4 的 `--diag-json` 结构在用例格式之外）。
+
+红线现在是**机检**而不只是约定：`conformance::tests::no_markdown_doc_claims_the_compatibility_name` 扫全仓 `.md`
+（`spec/` 那份规范原文除外），任何一行出现那句话而没有否定标记 ⇒ 测试红；
+`conformance::tests::the_front_facing_docs_restate_the_refusal` 反过来要求 README / `docs/coverage.md` /
+`conformance/README.md` / `docs/status.md` 各自都还写着那句红线（防止"把禁令删掉"被当成"通过了检查"）。
+另一句仍然不许讲的话不变：**"两侧装载期校验等价"**（**F26** 前半，不可比清单 = 偏差 **D-42** 的 (a)–(e)）。
 
 ## 目录
 

@@ -2476,7 +2476,10 @@ fn conformance_report_text(
 }
 
 /// `n/a` for a category with no cases: 0/0 must never render as 100%.
-fn conformance_rate(pass: usize, cases: usize) -> String {
+/// `pub(crate)` because E3's doc lock (`conformance::tests::the_pass_rate_table_in_coverage_md_matches_the_corpus`)
+/// re-derives the `rate` column of `docs/coverage.md` from this formatter — a second copy of the
+/// rounding would let the report and the documented table disagree on the same shortfall.
+pub(crate) fn conformance_rate(pass: usize, cases: usize) -> String {
     if cases == 0 {
         String::from("n/a")
     } else {
