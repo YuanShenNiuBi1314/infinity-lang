@@ -795,7 +795,26 @@
 
 ### 阶段 F：工程卫生（每轮顺手做一点，不许它长大）
 
-- [ ] F1 `.github/workflows/ci.yml`：`cargo fmt --check`? 不适用（无 rustfmt 约定）→ 只做 `cargo build --offline --release` + `cargo test --offline` + `gcc` 跑 `runtime` 测试。
+- [x] F1 `.github/workflows/ci.yml`：`cargo fmt --check`? 不适用（无 rustfmt 约定）→ 只做 `cargo build --offline --release` + `cargo test --offline` + `gcc` 跑 `runtime` 测试。
+      **cron-26 轮（2026-10-16）勾 `[x]` = 验收条件终于有了一次真 run 的 `success`**：本轮开头 `scripts/push-branch.ps1`
+      第 **1** 次即 exit 0（`1896c2a..6efb926`，`gh api …/git/refs/heads/toolchain` 回查 = 本地 HEAD ⇒ 现算欠账 0，
+      cron-24/25 欠的 **7** 个提交全部清掉），推送当场触发的 **run `38908208089`（run_number 2, event push, head_sha `6efb926`）
+      conclusion = `success`**，且 **12 步逐条 `success`**（`gh api …/actions/runs/38908208089/jobs` + `gh run view --log` 两份都取了，
+      日志 956 行、全仓 `FAILED`/`panicked` 命中 **0**）。**run #1 从没跑过的那 5 步（步 8-12）这轮第一次在远端跑，全部实到数字**：
+      步 7 `cargo test --offline` = `running 530 tests` → **530 passed / 0 failed**（另有 bin 的 0 项、doc-test 的 0 项）
+      ⇒ **EOL 修复在远端生效**（步 3「porcelain 为空 + `grep -rlU` 查 CR 字节」两道守卫都过，run #1 那三条 `W-0001` 假红消失）；
+      步 8 告警数 = **0**；步 9 两份 `.c` 各打「0 告警」（stderr 空才走得完）；步 10 rt **32335 assertions / 0 failures**
+      （`cd target/scratch` 那条前提在 runner 上同样成立）；步 11 替身链与生产链 IFBC 各 **180 asserts / 180 pass / 0 FAIL** 且 `cmp` 通过；
+      步 12 tour 的 `check|build|run|test` + `--verify-reproducible`（两个独立构建目录产物字节相同）+ `artifact info --nodes`
+      全部 exit 0，**节点表 6 行 = 8/9/10/11/16/19 与 §8.4 金样逐行相同**、生成 C11 **12513** 字节与本机逐字相符、
+      `unreproducible false`。**两条只认远端的供给事实**：runner 的 `gcc` 在 PATH（步 5 success）、`setup-python@v7` 装的是
+      **CPython 3.14.8**（本机 3.14.6）⇒ `btrack::tests::py_unit_fixture_is_exactly_what_the_ingest_produces` 在 3.14.8 上仍 `ok`，
+      「B 轨夹具回核只对本机那个 patch 成立」这句不成立。**一条新的基线口径教训**（照实记，不当已解决）：远端 tour 产物是
+      **221666 字节 / build-id `e39398bc…a5be`**，本机一直记的是 **199975 / `4d8250b5…55ba`** ⇒ 这两个数**不是**跨机常数，
+      而是宿主 `cc` 的函数（远端 `.inf meta` 自己写着 `source_toolchain gcc 15.2.0`，本机 MSYS2 是 16.2.0；
+      差的只有镜像 220864 vs 199173，**段 blob 738 + 段尾 64 两侧逐字节同**）。CI 因此**只打印不门禁**这些数是对的；
+      谁把它们当断言，就是把 CI 永久钉红。勾 `[x]` 只声称「那一次真 run 的 conclusion = success + 步 8-12 的远端数字已知」，
+      不声称「§12 兼容」（覆盖仍 83/2300）、不声称「`fmt --check` 过」（F6 仍 exit 2）、不声称「两侧装载期校验等价」（F26 前半 / D-42 (a)–(e)）。
       **F2 轮（2026-10-16）把下面那段「远端还没有 workflow」的旧声称作废并给出真结论**：推送第 1 次即成（`6fceaa5..1896c2a`），
       `gh api …/actions/workflows` 由 **0 → 1**、`…/actions/runs?branch=toolchain` 出现 **run 38892797672（run_number 1, event push）**
       ⇒ **分支上首条 workflow 不需要人工批准**（过去两轮悬着的那个问题就此有答案）。该 run **conclusion = failure**，逐步结论：
@@ -1211,6 +1230,28 @@
 
 ## 2. 当前指针
 
+> **cron-26 轮（2026-10-16）= F1 勾 `[x]`，本段取代下一段的「下一轮第一件事：还是先补推 `toolchain`」**：
+> 开头 `scripts/push-branch.ps1` 第 **1** 次即 exit 0 ⇒ 远端 `toolchain` = `6efb926` = 本地 HEAD、现算欠账 **0**
+> （cron-24/25 两批全败欠的 **7** 个提交全清；**没**动 git 配置、**没**换凭据，`github.com:443` 这轮不抖）。
+> 推送当场触发的 **run `38908208089`（run_number 2 / event push / head_sha `6efb926`）= conclusion `success`，12 步逐条 `success`**，
+> **run #1 里 skipped 的步 8-12 第一次在远端跑且全部拿到实数**：check 告警 **0** · 两份 `.c` 各 0 告警 · rt **32335/0** ·
+> IFBC 两条链各 **180/180** + `cmp` 过 · tour 四条 + `--verify-reproducible` + `artifact info --nodes` 全 exit 0 且
+> **节点表 8/9/10/11/16/19 与 §8.4 金样逐行相同**、C11 **12513** 字节与本机相符；步 7 `cargo test --offline` =
+> **530 passed / 0 failed** ⇒ run #1 那三条 `W-0001` 假红消失（EOL 锁在远端实测生效）。日志已取回本机
+> （`gh run view --log` → 956 行，`FAILED`/`panicked` 命中 **0** 处），下列数字全部取自该日志而非引用上一轮。
+> **两条只认远端的供给事实**：runner 上 `gcc` 在 PATH（步 5 success）、`setup-python@v7` 给的是 **CPython 3.14.8**（本机 3.14.6）
+> 而 `btrack::tests::py_unit_fixture_is_exactly_what_the_ingest_produces` 在它上面仍 `ok` ⇒「B 轨夹具只对本机那个 patch 成立」不成立。
+> **一条要传给下一轮的口径纠正**：远端 tour 产物 **221666 字节 / build-id `e39398bc…a5be`** vs 本机一直记的
+> **199975 / `4d8250b5…55ba`** ⇒ **产物字节与 build-id 是宿主 `cc` 的函数，不是跨机常数**（远端 `.inf meta` 自带
+> `source_toolchain gcc 15.2.0`，本机 MSYS2 是 16.2.0；镜像 220864 vs 199173，而**段 blob 738 + 段尾 64 两侧逐字节相同**）。
+> CI 对这些数**只打印不门禁**是正确设计，别"顺手补上"；把 199975 当远端断言 = 把 CI 永久钉红。
+> **下一轮 = §1 第一个 `[ ]` = F4**（`infy lsp`、`std.net` TLS、`dyn Trait` vtable 偏移表：要么实现，要么在
+> `docs/spec-deviations.md` 里保持"明确未实现"的记录）。起手现成件（本轮 grep 过，不必重审）：`infy lsp` 已在
+> `cli::NOT_IMPLEMENTED` 名单里（显式拒绝，不是假成功）；`stdlib.rs` 的 `std.net.*` 三条 `native: None`；
+> `hir::vtable_layout` **已实现且有测试**（`drop`/`size`/`align` + 方法指针 = `24 + 8n`），缺的是 `codegen.rs:670/2395`
+> 的发射（两处都已是显式 `CgError`，不是静默）。措辞红线不变：「两侧装载期校验等价」仍不许讲（F26 前半 / D-42 (a)–(e)）；
+> 覆盖 83/2300 ⇒ 任何文档不得出现「INFY v2.0 兼容」的肯定式声称。
+> **（以下为 cron-25 轮的指针，已被上面一段取代，保留作历史）**
 > **下一轮第一件事：还是先补推 `toolchain`**（F3 轮开头走 `scripts/push-branch.ps1`，两次全败 = 第 1 次
 > `Recv failure: Connection was reset`、第 2 次 `Failed to connect to github.com:443 after 21071 ms`，而同一时刻
 > `gh api` 正常 ⇒ 仍是 `github.com` 侧抖动，**不动 git 配置、不换凭据**；远端 `toolchain` 回查仍 = `1896c2a`

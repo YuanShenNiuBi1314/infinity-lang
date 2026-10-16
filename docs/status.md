@@ -1393,3 +1393,52 @@ git 的 ignore 解析器吃 CRLF ⇒ 不需要给 `.gitignore` 补 `text eol=lf`
 `(cd examples/tour && infy fmt --check)` 仍 **exit 2**（F6 未裁决）；
 **C 侧零改动**仍复跑四条链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警**（stderr 0 字节）、
 rt **32335 assertions / 0 failures**、替身链与生产链 IFBC 各 **180/180** 且两份 stdout `cmp` **无差异**。
+
+## cron-26 轮（2026-10-16）：run #2 十二步逐条 success ⇒ F1 勾 `[x]`；一条基线口径纠正（产物字节不是跨机常数）
+
+**做了什么**：**零代码改动**的一轮 —— F1 缺的从来不是实现，是「那一次真 run 的 conclusion」。
+① 开头 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/push-branch.ps1 -Branch toolchain`
+第 **1** 次即 `pushed; remote verified at 6efb926 (debt 0)`（脚本 exit 0），清掉 cron-24/25 两批全败欠的 **7** 个提交；
+**没**动 git 配置、**没**换凭据。② 推送当场触发 **run `38908208089`**（`run_number 2`、`event push`、`head_sha 6efb926`）。
+③ 回查两份：`gh api …/actions/runs/38908208089/jobs` 给逐步结论，`gh run view 38908208089 --job 116997082109 --log`
+给日志原文（取回本机 956 行）。**下面的远端数字全部读自这两份输出**，不是引用上一轮。
+
+**远端 run #2 = `success`，12 步全 `success`**（日志里 `FAILED`/`panicked` 命中 **0** 处）：
+
+| 步 | 名称 | 远端实数 |
+|---|---|---|
+| 3 | 检出没改写工作树 | `git status --porcelain` 空 **且** `grep -rlU CR examples/**.infy` 无命中 ⇒ EOL 锁生效 |
+| 5 | 工具链自检 | `gcc` 在 PATH、rustc/cargo 在位（缺则带 `PATH=` 红，本轮没红） |
+| 6 | `cargo build --offline --release` | success |
+| 7 | `cargo test --offline` | `running 530 tests` → **530 passed / 0 failed**（另 bin 0 项、doc-test 0 项）⇒ run #1 的三条 `W-0001` 假红消失 |
+| 8 | `cargo check --offline --lib` 告警数 | **0**（F2 清零在远端同口径成立） |
+| 9 | C 侧 `-Wall -Wextra -c` | `runtime/infy_rt.c：0 告警` + `runtime/infy_ifbc.c：0 告警`（stderr 非空即红） |
+| 10 | rt harness（`cd target/scratch`） | **32335 assertions, 0 failures** |
+| 11 | IFBC 两条链 + `cmp` | 替身链与生产链各 **180 asserts / 180 pass / 0 FAIL**，`cmp` 通过 |
+| 12 | tour 端到端 | `check\|build\|run\|test` + `--verify-reproducible`（两目录产物字节相同）+ `artifact info --nodes` 全 exit 0；**节点表 6 行 = 8/9/10/11/16/19**、C11 **12513** 字节、`unreproducible false` |
+
+步 **8-12 是第一次在远端执行**（run #1 里因 `set -e` 全 `skipped`）⇒ 「IFBC 交叉验证在 CI 里跑过且两条链 stdout 相同」
+「rt harness 在远端也是 32335/0」这两句话**今天有机器凭据了**，之前只有本机凭据。
+
+**runner 供给的两条实测**（过去两轮只能靠"缺了就红"兜）：`windows-latest` 上 `gcc` 在 PATH；
+`actions/setup-python@v7` 装的是 **CPython 3.14.8**（`pythonLocation: C:\hostedtoolcache\windows\Python\3.14.8\x64`，本机 3.14.6），
+而 `btrack::tests::py_unit_fixture_is_exactly_what_the_ingest_produces` 在 3.14.8 上仍 `ok` ⇒ B 轨夹具的回核**不**依赖本机那个 patch 号。
+
+**一条基线口径纠正（本轮最重要）**：远端步 12 的产物是 **221666 字节 / build-id `e39398bc25b6fb39…19a5be`**，
+而本机与所有历史轮次记的是 **199975 / `4d8250b5…55ba`**。**这不是回归**：远端 `.inf meta` 自己写着
+`source_toolchain   gcc 15.2.0`，本机是 MSYS2 **16.2.0**；差的只有宿主镜像（**220864** vs **199173**），
+而**段 blob 738 + 段尾 64 两侧逐字节相同**、生成的 C11 **12513** 字节两侧相同、节点表 6 行两侧相同。
+⇒ **产物字节与 build-id 是宿主 `cc` 的函数，不是跨机常数**；`docs/status.md`/`docs/coverage.md`/README 里那些
+199975/`4d8250b5…` 全部是**本机口径**，读它们时要记住这条。CI 的步 12 因此**只打印不门禁**这些数 = 正确设计，
+下一轮别"顺手补上"（把 199975 写成远端断言就是把 CI 永久钉红）。
+
+**本轮本地复跑（与远端同一套命令，`src/` 一字未动）**：`cargo check --offline --lib` **0 error / 0 warning**、
+`cargo test --offline --lib` **530 passed / 0 failed**、`cargo build --offline --release` exit 0、
+`infy check|build|run|test examples/tour` 全 exit **0**、`--verify-reproducible` exit **0**、本机产物 **199975** 字节；
+C 侧四条链（**C 侧零改动**仍复跑）：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 stderr **0 字节**、rt **32335/0**、
+替身链与生产链 IFBC 各 **180/180** 且 `cmp` **无差异**。
+
+**F1 勾 `[x]` 声称的和不声称的**：只声称「那一次真 run 的 conclusion = success + 12 步的远端数字已知」。
+不声称 §12 兼容（用例覆盖仍 **83/2300**，`infy conformance --report` 仍 exit **1** = D-48(a)）、
+不声称 §14 导览是规范写法（`fmt --check` 仍 exit **2** = F6 未裁决）、
+不声称两侧装载期校验等价（F26 前半，清单 = D-42 (a)–(e)）。

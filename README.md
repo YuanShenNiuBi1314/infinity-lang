@@ -9,7 +9,12 @@
 - CI：`.github/workflows/ci.yml` 在每次 push 到 `main`/`toolchain` 时跑 `cargo build --offline --release` +
   `cargo test --offline` + `-Wall -Wextra` 的 C 侧编译自检 + 两份 C harness（rt 与 IFBC 两条链，含 stdout 逐字节比对）+
   tour 的 `check|build|run|test` 与 `--verify-reproducible`。**只有 Windows runner**（阶段 [9] 产 PE + `INFYART2`
-  追加段，`std.fs` 走 `CreateFileW` ⇒ 别的平台上跑的不是这套测试测过的形状）
+  追加段，`std.fs` 走 `CreateFileW` ⇒ 别的平台上跑的不是这套测试测过的形状）。
+  **run #2（`38908208089`，push `6efb926`）= 全 12 步 `success`**：远端 `cargo test --offline` **530 passed / 0 failed**、
+  `cargo check` 告警 **0**、两份 `.c` 各 0 告警、rt **32335/0**、IFBC 两条链各 **180/180** + `cmp` 过、
+  tour 端到端 exit 0 且节点表 = §8.4 金样（8/9/10/11/16/19）。**读远端日志时记住一条口径**：产物字节与 `build-id`
+  是宿主 `cc` 的函数（runner 的 `gcc 15.2.0` 产 221666 字节，本机 MSYS2 `gcc 16.2.0` 产 199975 字节；段 blob 738 +
+  段尾 64 与生成的 C11 12513 字节两侧相同），所以 CI 只打印这些数、不门禁它们
 - License: MIT
 
 ## 快速开始
