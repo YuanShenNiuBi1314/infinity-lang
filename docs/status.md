@@ -36,19 +36,19 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 540 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 541 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
 Finished `dev` profile  (0 warnings —— F2 轮把 50 条一次清零：20 条 `unreachable pattern`、6 条 unused import、6 条 unused variable、3 条 `depth` 赋值不读、2 条多余 `mut`、2 条 never-constructed 变体、11 条 never-used fn/method/field；**没有用 `#[allow(...)]` 消数**，其中两处是「没接上」而非「没用」，见下文 F2 一节。口径 = `cargo check --offline --lib --message-format=short` 先 `touch src/lib.rs` 再计数；上一档 50 = F1 轮，51 → 50 = D4(1) 轮删掉 `CodeBuilder.bounds`)
 $ infy check examples/tour
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)   # exit 0
 $ infy build examples/tour
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)
-codegen ok — 12513 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
+codegen ok — 12512 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
 artifact ok — 199975 byte(s) 写到 examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe（§7.4：宿主镜像 199173 + 段 blob 738 + 段尾 64，6 段）
-  build-id 4d8250b58122ca2b76132029955e2d2005156dc0a6b021bf5f4ae761e5fd55ba   # exit 0（C3 轮起阶段 [9] 已落地）
+  build-id d7c4408e84614ac24fe0475c31e1af24c9ab27c2790c605d9e371b4fac370015   # exit 0（C3 轮起阶段 [9] 已落地；**F6 轮换值**：D-17 把 tour 规范化 ⇒ dirhash 变 ⇒ build-id 变，产物字节仍 199975）
 $ infy run examples/tour                                        # C4 轮起：[7]-[9] 建到临时目录 + 立即执行
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)
-codegen ok — 12513 byte(s) of C11 written to %TEMP%\infy-run-<pid>-<n>\ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
+codegen ok — 12512 byte(s) of C11 written to %TEMP%\infy-run-<pid>-<n>\ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
 artifact ok — 199975 byte(s) 写到 %TEMP%\infy-run-<pid>-<n>\ci.exe（…）       # 程序的 stdout/stderr 逐字节转发
 run ok — 程序退出码 0（stdout 0 字节 / stderr 0 字节，§13.4）                  # 这行在 stderr
 $ echo $?
@@ -61,7 +61,7 @@ $ echo $?
 3                                                                # §13.4 的 3；两条都由 cli::tests 断言
 $ infy test examples/tour                                        # C5 轮起：测试构建 + 跑 #[test] harness
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)
-codegen ok — 12681 byte(s) … (stages [7]-[8]; 1 chain(s), 6 node(s))   # 测试构建的 C11 比普通构建多 168 字节
+codegen ok — 12680 byte(s) … (stages [7]-[8]; 1 chain(s), 6 node(s))   # 测试构建的 C11 比普通构建多 168 字节（12680 − 12512，**F6 轮两值同移**）
 artifact ok — … 写到 %TEMP%\infy-run-<pid>-<n>\ci.exe（…）
 test result: 0 passed, 0 failed, 0 total                         # 程序的 stdout（tour 里没有 #[test]）
 test ok — 程序退出码 0（stdout 42 字节 / stderr 0 字节，§13.4）    # 这行在 stderr；exit 0
@@ -97,7 +97,7 @@ error: E-0602 · … 无法启动 …（§7.6.2：A 轨工具链缺失或未注�
 $ infy artifact info examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe --nodes
 INFY artifact (.inf meta) … n_nodes 6 … entry chain `Pipeline` (kind 0)
 chain_id  node_idx  file                   line  col  linkage  host_event_id  name
-   0         0      cmd/runner/main.infy     8     5      0         -          begin     # exit 0（8/9/10/11/16/19，与 C1 金样一致）
+   0         0      cmd/runner/main.infy     7     5      0         -          begin     # exit 0（**7/8/9/10/16/20** = D-17 规范化后的行号；节点数 6、`gate`/`retry_once` 各 1 连携块、锚点 begin=0·done=5 与 C1 金样相同 —— 变的只有行号）
 $ gcc -std=c11 -Wall -Wextra -I runtime -c examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c -o ci.o
 （无输出）                                        # exit 0，0 error / 0 warning；这是 BACKLOG C2 的验收命令（BACKLOG §1 C2）
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
@@ -110,8 +110,8 @@ $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests
 32335 assertions, 0 failures                     # exit 0，0 error / 0 warning；链的是生产 infy_rt.c；C3 轮 +32（Rust 写 ↔ C 读的夹具锁 + D-33）
 $ gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c
 （无输出）                                        # exit 0，0 warning（B3 的验收命令；三项语义已于 B3 轮落地，见下文 B3 一节）
-$ (cd examples/tour && infy fmt --check)
-2 file(s) are not canonical                        # exit 2，见下文"导览源码不是格式化不动点"
+$ infy fmt --check examples/tour
+0 file(s) formatted                              # exit 0（**F6 轮**：D-17 裁决 = §9.5 胜、样例改写到规范形态；锁点 = fmt::tests::the_tour_sources_are_the_9_5_fixpoint + CI 步 12 门禁，见下文 F6 一节）
 $ infy conformance --report                        # E2 轮起：§12.5 要求的逐分类通过率（下例是真实输出的节选）
   table    slug                           req cases  pass  fail block    rate short   分类名（§12 原文）
   §12.1    2-lexical                       96    13    11     0     2    84.6%     83   §2 词法（含 build 约束）  ← 非通过 2 条
@@ -132,13 +132,15 @@ $ infy conformance --update-golden                 # §12.4 要求显式授权�
 error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权（`--i-know-this-is-breaking`），因为改动黄金文件等于改语义。
 ```
 
-540 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 540；F5 轮实测）：
-`lexer` 79 · `derive` 57 · `fmt` 39 · `cli` **46**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → F2 轮 39 → F4 轮 41 → **F5 轮 46** = `VALUE_OPTS` 的逐项跳值 + 取值点源码回扫 + 三条命令的目录参数本体 + 空目录/缺 module 的显式失败 + `expand --derive` 的显式拒绝） ·
+> **一行口径（F6 轮，2026-10-17）**：`infy fmt --check examples/tour` 从本轮起 **exit 0**（偏差 **D-17** 已裁 = §9.5 胜、样例侧改写到规范形态）。下文各轮小节里的 `exit 2`（F6 未裁决）、生成 C11 **12513** 字节、`build-id 4d8250b5…55ba`、节点表行号 **8/9/10/11/16/19** 全是**裁决前那棵树**的当时实测值，保留为历史；现值 = **12512** / **`d7c4408e…370015`** / **7/8/9/10/16/20**（产物 199975 与段 blob 738 没动）。这三组数只随 tour 的字节动 —— 谁把规范化回滚掉，CI 步 12 的门禁与 `fmt::tests::the_tour_sources_are_the_9_5_fixpoint` 会同时红，不会静默。
+
+541 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 541；**F6 轮实测**）：
+`lexer` 79 · `derive` 57 · `fmt` **40**（**F6 轮 +1** = `the_tour_sources_are_the_9_5_fixpoint`，把 `examples/tour` 读回来逐字节比它自己的 §9.5 输出） · `cli` **46**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → F2 轮 39 → F4 轮 41 → **F5 轮 46** = `VALUE_OPTS` 的逐项跳值 + 取值点源码回扫 + 三条命令的目录参数本体 + 空目录/缺 module 的显式失败 + `expand --derive` 的显式拒绝） ·
 `macro_expand` 35 · `btrack` **31**（D1(1) 前是 0，D1(2) 轮 23 → 30，**F2 轮 +1** = wheel 归档里每个成员按自己的 local header 偏移取数据） ·
 `atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **27**（D3 轮 22 → 26，**F4 轮 +1** = 合法 `dyn` 形参在阶段 [8] 以条款号被拒） · `pkg` 24 · `sema` 22 ·
 `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` **21**（**F4 轮 +1** = `docs/internals/runtime-abi.md` §1 写出的 vtable 偏移被读回来与布局器比） · `artifact` 18 ·
 `toml` 15 · `borrow` 15 · `sha256` 12 · `conformance` **19**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫，**F3 轮 +1** = `.gitignore` 的一次性产物名单形状（按"谁产生它"列的六条一条不能少）+ 反向红线（不得宽到吞掉 `*.bin`/`*.md`/`*.rs` 或整个目录）+ 每个 `scripts/*.ps1` 的审计日志必须落在 `logs/`，**F1 收尾 +1** = 语料 EOL 例外必须声明在全局规则之后） · `codes` 9 ·
-`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = **540**。
+`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = **541**。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -1626,3 +1628,45 @@ tour 的 `check`/`build`/`run`/`test` + `--verify-reproducible` 全 exit **0**�
 C 侧零改动仍复跑四条链（两份 `-c` 各 stderr **0 字节**、rt **32335/0**、两条 IFBC **180/180** + `cmp` 逐字节相同）、
 `infy conformance --report` 仍 exit **1**（83 = 77/0/6 · 92.8% ⇒ 仍**不得**声称兼容）、`infy fmt --check examples/tour` 仍 exit **2**（F6）。
 **下一轮 = §1 第一个 `[ ]` = F6**（§14 导览 vs §9.5 的不动点裁决）。
+
+## F6 轮（2026-10-17）：D-17 从 OPEN 改判 —— `examples/tour` 写成 §9.5 的不动点，验收命令 exit 0
+
+**裁决**：§9.5 是"官方风格"的**定义源**（它自己写着「以下即规则本身；实现不得偏离（UB-014）」，UB-014 的判据是
+"对同一 AST 输出字节级唯一"），§14 只是"完整可编译示例"⇒ **样例侧改写到规范形态**。反方证据照实登记在 D-17：
+全规范 0 处把 `pub` 单独成行、5 处写同行。逐条判据（六种形状，谁错判谁）也在那一条里。
+
+**怎么写的**（第 0 条：写盘动作走脚本）：新增 `scripts/canonicalize-tour.ps1` —— 默认干跑只报 `fmt --check` 的结论 +
+将执行的命令 + 回滚命令；`-Apply` 才写；写完立刻回核 `--check`；**封闭白名单**只放开 `examples/tour/**/*.infy`
+（`MODULE.infy.toml` 与 `.infy-build/` 在名单外，越界即 `git checkout` 还原 + 退非 0）；日志 `logs/canonicalize-tour.log`
+带改动前后每个文件的 sha256。实测：干跑 rc **0** 未写盘 ⇒ `-Apply` rc **0**（`fmt -w` 打 `2 file(s) formatted`、
+回核 `0 file(s) formatted`）⇒ 第二次 `-Apply` 打「已是 §9.5 不动点 —— 幂等退出」且 md5 逐一未变。
+
+**语义没动的证据（不是自证）**：规范化前后各跑一次 `infy build`，`diff` 两份生成的 `ci.c` **只差一行** ——
+`Pipeline_locs[6]` 的六个行号常数 `8/9/10/11/16/19` → `7/8/9/10/16/20`；其余 **12512** 字节逐字节相同，节点数 6、
+`linkage_count`（`gate`/`retry_once` 各 1）、锚点（`begin`=0·`done`=5）、三处 `goto` 的编译期目标全未变；
+`fmt` 的第 12/13 条自检（`E-0091`/`E-0092`）全程沉默。⇒ "折叠连携块"与"块体恒逐行"是排版选择，不是语义改写。
+
+**随动的三组本机常数**（现状段已改，历史小节保留当时值，文件顶部还加了一行口径）：生成 C11 **12513 → 12512**、
+`build-id 4d8250b5…55ba → d7c4408e…370015`、节点表行号 **→ 7/8/9/10/16/20**；`infy test` 那一档 C11 **12681 → 12680**
+（差值仍是 harness driver 的 168 字节）；产物 **199975** 与段 blob **738** 未变。
+
+**锁点（各做过负对照、实测能红）**：`fmt::tests::the_tour_sources_are_the_9_5_fixpoint`（把两个 tour 文件读回来
+逐字节比格式化器自己的输出；把 `pub
+enum Phase` 拼回一行 ⇒ FAILED，`cmp` 验证复原）；`.github/workflows/ci.yml`
+步 12 **请进** `"$INFY" fmt --check examples/tour`（曾因"D-17 未裁决"刻意排除，注释里写明了改判），
+`conformance::tests::the_ci_workflow_covers_…` 的必需清单同批加该条（从 yaml 删掉那行 ⇒ FAILED）。
+新门的成立前提：`*.infy text eol=lf`（F1 轮那条）—— 检出成 CRLF 时 §2.1 的 `W-0001` 先手，门禁就不是在测风格。
+
+**基线（本轮收尾复跑）**：`cargo test --offline --lib` **541 passed / 0 failed**（= 540 + 1，`fmt` 39 → **40**）、
+`cargo test --offline` 全目标 = 541 + bin 0 + doc-test 0、`cargo check --offline --lib` **0 error / 0 warning**、
+`cargo build --offline --release` exit 0、`infy fmt --check examples/tour` **exit 0**（debug 与 release 各一次，
+`examples/tour/core`、`examples/tour/cmd`、单文件三种形态也各 exit 0）、tour 的 `check|build|run|test` +
+`--verify-reproducible` 全 exit **0**、`gcc -c` 三份（`ci.c` / `infy_rt.c` / `infy_ifbc.c`）各 stderr **0 字节**、
+C 侧零改动仍复跑四条链（rt **32335/0**、两条 IFBC **180/180** 且 stdout `cmp` 无差异）、
+`infy conformance --report` 仍 exit **1**（83 = 77/0/6 · 92.8% ⇒ 仍**不得**声称兼容）。yaml 的 9 个 run 段
+`bash -n` 全过（改过的步 12 在内）。
+
+**本轮实测收窄的一条**：**`fmt --check` 不写盘**（改前/改后 md5 逐一相同），写盘的是裸 `fmt` 与 `fmt -w` ⇒ **F44 保持 `[ ]`**，
+"任何 fmt 实验只做在 `target/scratch/` 副本上"这条口径**不许撤**（tour 现在自己是不动点，别的 module 不是）。
+**本轮新登记 F46**：`logs/*.log` 的中文按 ANSI(GBK) 落盘 ⇒ 审计日志跨工具读是乱码（`file logs/*.log` 三份同结论），
+新脚本已用 `-Encoding utf8`。**F43/F45 未动**。

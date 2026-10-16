@@ -976,10 +976,22 @@
       （§13.4 从没给 `infy fmt` 任何路径参数，`[mod|src.infy]` 是本实现的超集）。
       **本轮实测另揪出三条 `infy fmt`/开关面的真缺陷，按顺序登记在下面：F43 / F44 / F45**（F5 只修"目录参数"这一条，
       三条都保持 `[ ]`，各带回跑命令）。
-- [ ] F6 **§14 导览源码不是 §9.5 的格式化不动点**（A3 实测）：`(cd examples/tour && infy fmt --check)` →
+- [x] F6 **§14 导览源码不是 §9.5 的格式化不动点**（A3 实测）：`(cd examples/tour && infy fmt --check)` →
       `2 file(s) are not canonical`，exit 2。必须先判定是"§9.5 与 §14 互相矛盾（规范级缺陷，写 `docs/spec-deviations.md`）"
       还是"格式化器与 §14 样例之一写错了"（改实现/改样例）。裁决前，任何文档不得声称"§14 导览已是规范写法"。
       验收：`infy fmt --check examples/tour` exit 0，或偏差条目里给出规范方认可的逐条理由。
+      **F6 轮（2026-10-17）验收达成，两条路都走完了**：裁决 = **D-17 改判为"§9.5 是唯一定义源，样例侧改写"**，
+      并把格式化器实际改写的**六种形状逐条**判给哪一侧（含两处 §9.5 未定 → 本实现选定：块体恒逐行、连携块按 AST
+      发射成 `gate() {…};`）。交付提交 **`8d9c8e7`**：新脚本 `scripts/canonicalize-tour.ps1`（默认干跑 / `-Apply` 才写 /
+      写完回核 / 白名单守卫 / 第二次 `-Apply` 实测未改任何字节）把 `cmd/runner/main.infy` + `core/build/mod.infy` 写成
+      格式化器自己的不动点 ⇒ `infy fmt --check examples/tour` 实测 exit **0**（debug 与 release 各一次）。
+      **AST 不变性不是自证**：规范化前后各构建一次，生成的 C11 逐行 diff **只差一处**（`Pipeline_locs[6]` 的六个行号常数），
+      其余 12512 字节逐字节相同 ⇒ 断行与折叠确是排版。随动的三组本机常数已同步（C11 12513→**12512**、
+      build-id `4d8250b5…55ba`→**`d7c4408e…370015`**、节点表 **7/8/9/10/16/20**），产物仍 **199975** / blob 仍 **738**。
+      锁点两处、各自做过负对照（实测能红）：`fmt::tests::the_tour_sources_are_the_9_5_fixpoint`（把 tour 读回来逐字节比，
+      把 `pub\nenum Phase` 拼回一行即 FAILED）+ `ci.yml` 步 12 请进 `fmt --check examples/tour` 门禁
+      （yaml 覆盖面测试的必需清单同批加该条，删掉 yaml 那行即 FAILED）。**F6 勾上后仍不许说**的是：规范 §14 围栏代码块
+      自身是规范写法 —— 反方证据（全规范 0 处 `pub` 单独成行、5 处同行）如实写在 D-17 里供审签否决。
 - [ ] F7 **`E-0121` 的判据与 §4.3/UB-006 不一致**（A4 轮补测时确认，已写 `docs/spec-deviations.md` D-19，未改实现）：
       `src/borrow.rs:460` 的条件是 `mutable && !ty.is_numeric() && !matches!(ty, Ty::Rc{..})`。
       于是 (a) `var n: u32 = 0` 跨链可达时**静默通过**（数值绑定并不比结构体绑定安全，排除它没有规范依据）；
@@ -1340,8 +1352,55 @@
       两个键）同样在 `src/` 里**零调用点** ⇒ `.infyfmt` 里写的 `exclude` 与 `max_width` 对 `infy fmt` 一行也不生效。
       验收：非 `.infy` 的显式路径被跳过并打印一条 `N-`（不产诊断、不改写）；`.infyfmt` 的 `exclude` 命中时打 `excluded`、
       `max_width` 与 `--max-width` 的优先级定死并写进偏差；`check_file`/`InfyfmtConfig` 两条臂接进 `fmt_cmd`（或删除并登记不可达）。
+- [ ] F46 **`logs/*.log` 的中文以 ANSI(GBK) 落盘，跨工具读审计日志 = 乱码**（F6 轮实测）：
+      `Add-Content` 在 Windows PowerShell 5.1 下缺省编码是 `Default`（ANSI），而三个既有脚本（`cleanup.ps1`、
+      `push-branch.ps1`、`untrack-artifacts.ps1`）的 `Log` 函数都没写 `-Encoding` ⇒ 实测 `file logs/push-branch.log`
+      = `ISO-8859 text`，中文行在 bash / GitHub Actions / 任何 UTF-8 审阅器里全是乱码（`file logs/*.log` 三份同结论）。
+      第 0 条要求"动作与结果追加写 `logs/【脚本名】.log`"，写进去却读不出，等于审计面半截 —— 无人值守的判据是这份文件，
+      不是终端字形。**本轮新脚本 `canonicalize-tour.ps1` 已用 `-Encoding utf8`**（实测新行 UTF-8 可读，旧行保持原样没动）。
+      验收：三份既有脚本的 `Log` 都加 `-Encoding utf8`，并在 `scripts/README.md` 的 5.1 坑清单里补第三条
+      （与"必须带 BOM"同族）；成对锁点 = `conformance::tests` 里那条"每个 `.ps1` 的 log 必须在 `logs/`"的测试
+      扩成**同时**要求 `Add-Content` 带 `-Encoding utf8`（负对照：去掉一个就红）。
 
 ## 2. 当前指针
+
+> **F6 轮收尾（2026-10-17）：F6 勾 `[x]`，本段取代下一段** —— 交付提交 **`8d9c8e7`**（`examples/tour` 两个 `.infy` 的
+> 规范形态 + `scripts/canonicalize-tour.ps1` + `fmt`/`hir`/`codegen`/`conformance` 四处随动 + `ci.yml` 步 12 的新门禁）。
+> **裁决 = §9.5 胜、样例侧改写**（D-17 由 OPEN 改判，六种改写形状逐条判了哪一侧错）：规则 6「`package` 前 0 个」
+> （已由 **D-9** 裁过次序）+ 规则 10「`#[..]` 与 `pub` 各占一行前置」+ 规则 6「声明之间恰好 1 个空行」三条 ⇒ **样例错**；
+> 块体恒逐行、连携块发射成 `gate() {…};` 两条 ⇒ **§9.5 未定，本实现选定**。反方证据照实登记：全规范 **0** 处把 `pub`
+> 单独成行、**5** 处写同行（`spec:1796/2034/2037/2045/2047`）⇒ 审签若否决本条，要改的是 `fmt::vis_doc` 的 `HardLine`
+> 与 `fmt::tests::attrs_and_pub_each_get_their_own_line` 两条既有锁点，而不是只回滚样例。
+> **AST 不变是靠生成码证的，不是自证**：规范化前后各构建一次，`ci.c` 逐行 diff **只差一处**（`Pipeline_locs[6]` 的六个
+> 行号常数），其余 **12512** 字节逐字节相同；`fmt` 的第 12/13 条自检（`E-0091`/`E-0092`）全程沉默。
+> **本机三组常数随 tour 字节变了**（已同步 status/coverage/README 的现状段，历史行保留当时值）：生成 C11 **12513→12512**、
+> `build-id 4d8250b5…55ba`→**`d7c4408e84614ac24fe0475c31e1af24c9ab27c2790c605d9e371b4fac370015`**、节点表 6 行
+> **8/9/10/11/16/19→7/8/9/10/16/20**；产物 **199975** 与段 blob **738** 未变。远端口径仍别把本机数当断言（宿主 `cc` 的函数）。
+> **新基线（本轮收尾复跑）**：`cargo test --offline --lib` **541 passed / 0 failed**（= 540 + 1，`fmt` 39 → **40** =
+> 那条不动点锁点）、`cargo test --offline` 全目标 = 541 + bin 0 + doc-test 0、`cargo check --offline --lib` **0 error /
+> 0 warning**、`cargo build --offline --release` exit 0、tour 的 `check|build|run|test` + `--verify-reproducible` 全 exit **0**、
+> `infy fmt --check examples/tour` **exit 0**（debug 与 release 各一次 —— 这就是 F6 的验收本体）、`gcc -c` 三份
+> （生成的 `ci.c` / `infy_rt.c` / `infy_ifbc.c`）各 stderr **0 字节**、C 侧零改动仍复跑四条链（rt **32335/0**、两条 IFBC
+> **180/180** + `cmp` 无差异）、`infy conformance --report` 仍 exit **1**（83 = 77/0/6 · 92.8%）。
+> **两处锁点都做过负对照**：把 tour 的 `pub\nenum Phase` 拼回一行 ⇒ `fmt` 那条红；从 yaml 删掉 `fmt --check` 那行 ⇒
+> `conformance` 的覆盖面测试红。**新门禁的一条前提要一直带着**：`fmt --check examples/tour` 在 runner 上绿，靠的是 F1 轮加的
+> `*.infy text eol=lf` —— 检出成 CRLF 时 §2.1 的 `W-0001` 先手，动 `.gitattributes` 就是动这条门禁。
+> **本轮实测收窄了 F44 的范围**（不改它的 `[ ]`）：**`fmt --check` 不写盘**（改前/改后 md5 逐字节相同），
+> 写盘的是裸 `fmt` 与 `fmt -w`。另：`examples/tour` 现在是格式化器自己的不动点 ⇒ `fmt -w examples/tour` 变 no-op，
+> 但**别的 module 上 F44 的自伤面原样存在**，那条"任何 fmt 实验只做在 `target/scratch/` 副本上"的口径不许撤。
+> **本轮新登记 F46**（`logs/*.log` 的中文按 ANSI(GBK) 落盘 ⇒ 审计日志跨工具读不出；`file` 三份同结论，
+> 新脚本已用 `-Encoding utf8`）。F43/F44/F45 仍开，别跳指针去抓。
+> **推送纪律（F5 轮的 `cancelled` 教训本轮照做）**：本轮只推 **1 笔**（这笔做账提交），勾 F6 的远端判据挂下一轮 ——
+> 回查 `gh api …/actions/runs?branch=toolchain` 里 head 覆盖本轮交付的那条 run 的结论，`cancelled` 既不是红也不是绿；
+> 现在那条 run 还会多跑一步 `fmt --check`（步 12），红了先分辨是不是 EOL 或样例被动过，**不许**为此放宽任何断言。
+> **下一轮 = §1 第一个 `[ ]` = F7**（`E-0121` 的判据与 §4.3/UB-006 不一致，**D-19 仍 OPEN**）：正主
+> `src/borrow.rs:460` 的 `mutable && !ty.is_numeric() && !matches!(ty, Ty::Rc{..})` —— (a) 数值 `var` 跨链静默通过、
+> (b) 链内局部 `var` 反被当跨链共享（偏严）、同一诊断的 span 走 `b_span_default()` = `Span::empty_at(0,0)` 指不到绑定处。
+> 验收要求成对断言「数值绑定也报 / 局部 `var` 不报」并把结论写回 D-19；现状四条相关测试名在 BACKLOG 的 F7 条目里。
+> 措辞红线不变：覆盖 83/2300 ⇒ 任何文档不得出现「INFY v2.0 兼容」的肯定式声称（逐物理行判，否定标记须与声称同行）；
+> 「两侧装载期校验等价」仍不许讲（F26 前半 / D-42 (a)–(e)）。**F6 单独解禁一句**：可以说"仓库里 `examples/tour` 的副本是
+> §9.5 的规范写法"，不可以说"规范 §14 的围栏代码块本身是规范写法"。
+> **（以下为 F6 轮之前各轮的指针，已被上面一段取代，保留作历史）**
 
 > **F5 轮收尾（2026-10-17）：F5 勾 `[x]`，本段取代下一段** —— 交付提交 **`1282b92`**（只含 `src/cli.rs`：`VALUE_OPTS` +
 > `split_positional()` + fmt 的目录展开 + `--derive` 显式拒绝 + 5 条测试）。根因比原条目宽：**共享 positional 把取值型

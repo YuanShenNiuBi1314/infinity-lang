@@ -30,6 +30,8 @@
 | --- | --- | --- |
 | `cleanup.ps1` | 清理 `.infy-build/`、`target/scratch*`、一次性测试二进制 | 是（默认） |
 | `push-branch.ps1` | 带重试把 HEAD 推到受控分支，并回查远端算欠账（`main`/`master` 硬拒、绝不 force） | 有 `-DryRun`；推送是加法，正常调用即推 |
+| `untrack-artifacts.ps1` | 把仍在跟踪的一次性产物**只从索引摘掉**（`git rm --cached`，文件留磁盘），封闭白名单 + 回滚命令进日志 | 是（默认） |
+| `canonicalize-tour.ps1` | 把 `examples/tour` 写成 §9.5 的格式化不动点（F6/D-17 的执行入口）：范围只放开 `examples/tour/**/*.infy`，写完立刻回核 `fmt --check`，越界即还原 | 是（默认；`-Apply` 才写盘） |
 
 ## 本机调用方式（重要）
 
@@ -41,7 +43,11 @@
 
 1. **文件必须存成带 UTF-8 BOM**。5.1 对无 BOM 的文件按 ANSI 解码，中文注释与中文字符串会直接
    语法报错（`UnexpectedToken` / `TerminatorExpectedAtEndOfString`），跟脚本逻辑毫无关系。
-2. **不要在原生命令上开着 `$ErrorActionPreference='Stop'`**。PowerShell 5.1 会把原生命令写到
+2. **`Add-Content` 必须写 `-Encoding utf8`**（F6 轮实测的新坑，登记为 BACKLOG **F46**）：5.1 的缺省编码是
+   `Default` = ANSI(GBK)，于是 `logs/*.log` 里的中文行在 bash / GitHub Actions / 任何 UTF-8 审阅器里全是乱码
+   （`file logs/push-branch.log` = `ISO-8859 text`）。**审计面写进去却读不出，等于护栏只做一半**。既有三份脚本的
+   `Log` 还没改（F46 的活），新脚本一律带上。
+3. **不要在原生命令上开着 `$ErrorActionPreference='Stop'`**。PowerShell 5.1 会把原生命令写到
    stderr 的内容当成异常抛出，而 `git push` 的进度信息正是写 stderr —— 于是"推送失败"和
    "推送成功但有进度输出"都变成异常。脚本里的 `Run-Native` 已把这件事封好：临时降到
    `Continue`、拿回真实 `$LASTEXITCODE`、再恢复。新增脚本请复用它，别自己裸调。
