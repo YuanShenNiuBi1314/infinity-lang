@@ -1154,3 +1154,48 @@ exit 1 + `usage()` 措辞）、`cli::tests::a_std_package_call_is_refused_and_ne
 ⇒ 证明拒绝不在 [4]）、`hir::tests::the_vtable_offsets_published_in_the_abi_doc_are_the_ones_the_layouter_produces`
 （**负对照实测**：把文档里 `1@32:8` 改成 `1@33:8` ⇒ 该测试红并报"文档里的方法 #1 槽 ≠ 布局器"，改回即绿）。
 
+## D-51 F5 的四处规范没写或自相矛盾：`infy fmt` 根本没有路径参数、目录算一个 module 还是算一批文件、空集与不在 module 内怎么报、`infy expand --derive` 取值却没有入口 —— 全部定成确定实现
+
+F5 的验收要求"三条命令（`check`/`fmt`/`expand`）各带目录参数行为一致"，但一动手就撞上规范面：§13.4 的
+`infy fmt [-w] [--check]` **一个路径参数都没列**（同段的 `check [mod]`、`run [mod|src.infy]`、`ifbc dump|verify <artifact>` 都列了），
+而 §6.8 的 `infy expand [mod] [--macro name] [--derive Type] [--stage all|macro|derive]` 三个开关**全都取值**。
+⇒ "一致"没有可抄的定义，只能把实现选择定死并留锁点。四条裁定如下（(a)–(d) 各带实测命令行，全部是本轮命令输出）：
+
+1. **(a) `infy fmt` 接受 `[mod|src.infy…]`，作为 §13.4 的超集，而不是另造一套参数语法。**
+   理由：§9.5 的规则全是**逐文件**的（第 11 条甚至专门规定"`.infy` 之外的文件不处理"），而 §13.4 只给了
+   `[-w] [--check]` 两个开关，没说这些规则作用在哪些文件上；本实现早就接受文件路径（`fmt --check <file>`），
+   本轮补的是目录，两者共用同一条"路径 → 待格式化文件"的规则才不会出现第三种形状。`usage()` 那一行同步写成
+   `fmt [-w] [--check] [mod|src.infy…]`。**不声称**§13.4 写了这个参数：它没写。
+2. **(b) 目录参数 = 该目录下的每个 `.infy`（沿 §5.1 的目录跳过规则），不是"整个 module"。**
+   这是三条命令唯一允许不一致的地方，且理由是硬的：`check`/`expand` 的单位必须是 module —— 名字解析（§4.1/§5.3）
+   与 `[lints]`（§9.6）都以 `MODULE.infy.toml` 为准，所以 `check examples/tour/core` 必须解析到
+   `examples/tour` 这个根；而 `fmt -w` 是把字节**写回磁盘**的动作，把它的作用域悄悄扩到用户没指的两个目录之外
+   （`cmd/runner/`…）是破坏性的，不是"一致"。实测同一棵树两种写法各自稳定：`infy fmt --check examples/tour/core`
+   → `1 file(s) are not canonical` + exit 2（只有 `core/build/mod.infy`），`infy fmt --check examples/tour`
+   → `2 file(s) are not canonical` + exit 2（加上 `cmd/runner/main.infy`），后者与
+   `(cd examples/tour && infy fmt --check)` 逐字同结论 ⇒ "指向 module 根"这一档三条命令完全一致。
+3. **(c) 空集与不在 module 内 = 显式 exit 1，绝不许是 `0 file(s) formatted` + exit 0。**
+   修前两条都是静默的：无参数且当前目录不在 module 内时 `fmt` 打印 `0 file(s) formatted` 并 **exit 0**
+   （`default_infy_files()` 拿 `find_module_root(None)` 的 `None` 当"零个文件"继续跑），目录里一个 `.infy` 也没有时同样。
+   ⇒ 硬约束 (d)（未实现/无事可做必须显式）在这一支上的落点。裁定：无参数 → 报与 `check` 同一句话
+   （`找不到 MODULE.infy.toml——先 infy init <module-path>…（§5.1）`，exit 1）；显式目录无源文件 →
+   报 `… 下没有 .infy 文件（§9.5 第 11 条只处理 .infy）`，exit **1**（§13.4：1 = 一般性失败；2 是"诊断阻断"，
+   而这里一条诊断都没产生）。
+4. **(d) `infy expand --derive Type`：取值但本实现没有按类型筛选的入口 ⇒ 显式拒绝，exit 1。**
+   §6.8 把 `--derive` 和 `--macro`/`--stage` 并列为取值开关，而 `macro_expand::ExpandOptions` 只有
+   `only_macro` + `stage` 两个字段。三种可选形状里（静默忽略 / 当 module 路径 / 拒绝）前两种都是假成功：
+   静默忽略等于声称"按类型筛过了"，当路径用就是 F5 的那个根因（`--stage macro examples/tour` 当年报
+   `找不到 module 根`）。⇒ 本轮定成拒绝 + 文案指名缺的是"按类型筛选的入口"，并提示 `--stage derive` 是现有的全量档。
+   这条**不是**功能实现，`--derive Type` 仍属未实现（不勾任何 BACKLOG 项）。
+
+锁点（`src/cli.rs`，共 5 条，全部实测过负对照）：`an_option_value_is_never_read_as_the_module_path`（(d) 与 §13.4
+取值面的两头：11 项逐个跳值 + 布尔开关/`--x=y` 形态不吃 + 名单内容逐条相等）、
+`every_option_whose_value_the_cli_reads_is_declared_in_value_opts`（把 `src/cli.rs` 读回来扫每个
+`flag_value`/`opt_value` 调用点，实测扫到的 9 个名字逐条相等 ⇒ 新增取值点或把某处改成读变量都会红）、
+`a_directory_argument_reaches_check_fmt_and_expand_the_same_way`（(a)(b) 的验收本体，八条命令行全 exit 0）、
+`fmt_refuses_an_empty_directory_and_a_missing_module`（(c) 的两半）、
+`expand_refuses_the_derive_filter_it_does_not_implement`（(d)）。
+**没被这条偏差覆盖、仍开着的三件**：F43（未知开关被静默忽略）、F44（不带 `-w` 也原地改写文件）、
+F45（§9.5 第 11/14 条的两个入口 `fmt::check_file` / `InfyfmtConfig::parse` 在 `src/` 里零调用点）。
+D-51(b)(c) 只规定"目录→哪些文件"和"空集怎么报"，**没有**规定"`-w` 才写盘"和"非 `.infy` 跳过"，那两条要等 F44/F45 裁决。
+

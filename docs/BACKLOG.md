@@ -956,10 +956,26 @@
       `runtime-abi.md §1` / D-50(c) / F4；`stdlib.rs` 模块头声称 STD 表"驱动 name resolution / `infy doc` / codegen"是**假声称**
       ⇒ 本轮改成实话。三件仍**不声称**已实现：`.inf meta` 没有 vtable 槽位 ⇒ 跨 `.infib` 的 `dyn` 链接不做声称；
       本轮实测出的三条真缺陷按下方 **F40/F41/F42** 登记（拒绝的形态是对的，但 F40/F41 的**理由**是错的，不能混在一条正确的拒绝里）。
-- [ ] F5 `infy fmt` / `infy expand` 的目录参数与 `infy check` 不一致（A3 实测）：
+- [x] F5 `infy fmt` / `infy expand` 的目录参数与 `infy check` 不一致（A3 实测）：
       `infy fmt --check examples/tour` → `error: 无法读取 examples/tour: 拒绝访问。 (os error 5)`（把目录当文件读），
       `infy expand --stage macro examples/tour` → `error: 找不到 module 根（§5.1）`；只有 `cd` 进 module 或直接给 `.infy` 文件才可用。
       验收：三条命令（check/fmt/expand 各带目录参数）行为一致，且加进 `src/cli.rs` 的测试。
+      **F5 轮（2026-10-17）勾 `[x]`，交付提交 = `1282b92`**。根因不是"fmt/expand 少写了目录分支"，而是三条命令共用的
+      `positional` 计算 = 所有不以 `-` 开头的 token ⇒ **取值型选项的值被当成了路径**。实测范围比原条目大：
+      `infy check --target x86_64-pc-windows-gnu examples/tour` 当时也报 `找不到 MODULE.infy.toml` + exit 1，
+      `build` 同一条 ⇒ 修前"只有 `check <目录>` 不带选项能用"。落地 = `VALUE_OPTS`（11 项）+ `split_positional()`，
+      加上 fmt 的目录展开（`collect_infy`，沿用 §5.1 的跳过规则）与 `--derive` 的显式拒绝；
+      `--diag-json`/`--out`/`--target` 三处内联取值收拢成 `flag_value()`，让"谁取值"在源码里只剩一种写法（机检的前提）。
+      验收本体的实数（release 二进制，修前/修后同一批命令行）：`check <dir>` / `fmt --check <dir>` / `expand <dir>` /
+      `expand --stage macro <dir>` / `check --target <T> <dir>` / `fmt --check --max-width 100 <dir>` /
+      `expand --macro any --stage all <dir>` / `fmt --check <file>` **八条全 exit 0**；
+      `fmt --check examples/tour` 与 `(cd examples/tour && infy fmt --check)` 现在给**同一个** "2 file(s) are not canonical" + exit 2（F6 仍未裁决，改的是症状不是判据）。
+      测试 `cli` **41 → 46**（基线 **535 → 540 passed / 0 failed**）；两条负对照实测变红（改回旧 positional 语义 ⇒
+      表测试报 `--arg`、验收测试报 `expand --stage macro <dir>` left 1 / right 0；从 `VALUE_OPTS` 删 `--target` ⇒
+      源码回扫那条指名"`--target` 取一个值却没声明"），`cmp` 验证复原。目录参数一侧的裁定 = **D-51**
+      （§13.4 从没给 `infy fmt` 任何路径参数，`[mod|src.infy]` 是本实现的超集）。
+      **本轮实测另揪出三条 `infy fmt`/开关面的真缺陷，按顺序登记在下面：F43 / F44 / F45**（F5 只修"目录参数"这一条，
+      三条都保持 `[ ]`，各带回跑命令）。
 - [ ] F6 **§14 导览源码不是 §9.5 的格式化不动点**（A3 实测）：`(cd examples/tour && infy fmt --check)` →
       `2 file(s) are not canonical`，exit 2。必须先判定是"§9.5 与 §14 互相矛盾（规范级缺陷，写 `docs/spec-deviations.md`）"
       还是"格式化器与 §14 样例之一写错了"（改实现/改样例）。裁决前，任何文档不得声称"§14 导览已是规范写法"。
@@ -1302,8 +1318,61 @@
       的回退（`sema.rs:1418`）在体检查时已经是 `None` ⇒ `Ty::Invalid`。
       ⇒ 这条挡住的是**一切带字段的 impl**（§14 导览没有 impl 方法体，所以从没走到）。验收：上面那段最小复例 `infy check` exit **0**，
       并补一条 `trait` 版（`impl Shape for Sq { fn area(&self) -> f32 { self.side * self.side } }`，即 §14/§7.7.1 样例里那种写法）成对锁点。
+- [ ] F43 **除 `infy conformance` 外，每个命令都静默忽略未知开关**（F5 轮实测；F5 只修了 positional，没有动这一条）：
+      `infy check --bogus-flag examples/tour` → `check ok — 2 file(s) …` + exit **0**（同一条命令不带这个开关时输出逐字相同）。
+      对照面 = `conformance_cmd`（`cli.rs` 里唯一显式拒绝未知 `-` 开头 token 的命令，实测会报"未知开关"并 exit 1）。
+      危害不是"多了个没用开关"：`--arg`/`--feature` 这类**规范列了但本实现没有消费者**的开关（F19）从 `check`/`build` 进来时
+      与打错的开关不可区分 ⇒ 使用者以为构建参数生效了。验收：`infy check --bogus-flag examples/tour` 与
+      `infy build --strict-no-such examples/tour` 各 exit **1** 且错误串指名那个开关；已认得的开关逐条不受影响
+      （`--strict`/`--deadlock`/`--lenient`/`--target`/`--diag-json`/`--verify-reproducible`/`--reproducible`/`-O0..-O3`/`-Oz`/`--profile`）。
+- [ ] F44 **`infy fmt` 不带 `-w` 就原地改写文件**（F5 轮实测；`-w` 在 §13.4 是"写回"那一档）：
+      复跑 = 复制一个 `.infy` 到 `target/scratch/` → `infy fmt <file>`（不给 `-w`、不给 `--check`）→ `cmp` 与副本。
+      实测 `1 file(s) formatted` + exit 0，而**字节变了**：`fn main() { }` → `fn main() {}`，且 `#![infy_version]` 与 `package`
+      之间的空行被折叠（§9.5 第 6 条）。根因：`fmt_cmd` 只按 `check_only` 分流，写文件那一支从不看 `in_place`
+      （`opts.in_place = in_place` 设进了 `FmtOptions`，但 `format_file` 不读它）。
+      验收：`infy fmt <file>` 不写盘（把规范字节打到 stdout，或明确报"要写请加 `-w`"并 exit 1，二选一，选定后写 `docs/spec-deviations.md`）；
+      成对锁点 = 不带 `-w` 之后 `cmp` 原文件不变 + 带 `-w` 才变。
+- [ ] F45 **§9.5 第 11 条"`.infy` 之外的文件不处理"与第 14 条 `.infyfmt` 从 CLI 不可达**（F5 轮定位；与 F44 同一支代码）：
+      `fmt::check_file` 是实现了这两条的入口（`FmtStatus::NotInfy` / `Excluded` 两臂，`fmt.rs:4735` 起），
+      但 `grep -rn "check_file" src/*.rs \| grep -v ^src/fmt.rs` = **0 个调用点** ⇒ 只有 `fmt.rs` 自己的测试走得到；
+      `cli::fmt_cmd` 直接调 `format_file`，所以实测 `infy fmt --check target/scratch/f5-probe.txt`（内容是 `hello`）
+      报的是 **2 条 `E-0053` 语法错误** + exit 2，而不是"不处理"。`InfyfmtConfig::parse`（§9.5 第 14 条的 `exclude`/`max_width`
+      两个键）同样在 `src/` 里**零调用点** ⇒ `.infyfmt` 里写的 `exclude` 与 `max_width` 对 `infy fmt` 一行也不生效。
+      验收：非 `.infy` 的显式路径被跳过并打印一条 `N-`（不产诊断、不改写）；`.infyfmt` 的 `exclude` 命中时打 `excluded`、
+      `max_width` 与 `--max-width` 的优先级定死并写进偏差；`check_file`/`InfyfmtConfig` 两条臂接进 `fmt_cmd`（或删除并登记不可达）。
 
 ## 2. 当前指针
+
+> **F5 轮收尾（2026-10-17）：F5 勾 `[x]`，本段取代下一段** —— 交付提交 **`1282b92`**（只含 `src/cli.rs`：`VALUE_OPTS` +
+> `split_positional()` + fmt 的目录展开 + `--derive` 显式拒绝 + 5 条测试）。根因比原条目宽：**共享 positional 把取值型
+> 选项的值当成路径** ⇒ `check --target <T> <dir>` / `build` 同一条当时也是 exit 1，不只是 fmt/expand 少写目录分支。
+> **上一轮留的第一件事（回查 run #7）已有答案，而且不是红**：`scripts/push-branch.ps1` 之后的三个 run 里
+> **#7（`e77d180`）与 #8（`98037dd`）= `conclusion cancelled`**，机制在 `.github/workflows/ci.yml:35-37`
+> （`concurrency.group = infy-ci-${{ github.ref }}` + `cancel-in-progress: true` ⇒ 同一分支上后来的推送取消还在跑的那条，
+> 不是构建失败）；**#9（`76bbad4`）= `success`，步 1-12 逐条 `success`，步 7 = 535 passed / 0 failed**。
+> `git merge-base --is-ancestor e77d180 76bbad4` 实测为真 ⇒ **#9 的树包含 F4 轮那笔 `src/` 改动**，所以 F1 的判据
+> （"任何一次 run 变红就把本条重新打开"）由 #9 给出，**F1 保持 `[x]`，不重开**。别把 cancelled 读成回归，也别拿它当"CI 绿"的证据 —— 绿的是 #9。
+> **下一轮 = §1 第一个 `[ ]` = F6**（§14 导览源码不是 §9.5 的格式化不动点 ⇒ 先判定"规范互相矛盾"还是"格式化器/样例有一处写错"，
+> 裁决进 `docs/spec-deviations.md`）。起手现成件（本轮已量，不必重审）：`infy fmt --check examples/tour` 现在直接可用，
+> 报 **"2 file(s) are not canonical"** + exit 2，脏的两个文件 = `cmd/runner/main.infy`、`core/build/mod.infy`，
+> 与 `(cd examples/tour && infy fmt --check)` **逐字同结论**（只差路径显示：前者相对、后者绝对，因为无参数形态从
+> `find_module_root(None)` 拿到的是绝对路径 —— 显示差异，不是判据差异）。
+> **本轮实测出三条真缺陷，已按顺序登记在 F42 之后：F43 / F44 / F45**（F43 = 除 conformance 外每个命令静默忽略未知开关，
+> 实测 `check --bogus-flag examples/tour` exit 0；F44 = **`infy fmt` 不带 `-w` 也原地改写文件**，`cmp` 实测字节变了，
+> 根因是 `fmt_cmd` 的写盘支从不读 `in_place`；F45 = §9.5 第 11/14 条的两个入口 `fmt::check_file` 与 `InfyfmtConfig::parse`
+> 在 `src/` 里**零调用点** ⇒ 非 `.infy` 文件被当源码解析出 2 条 `E-0053`、`.infyfmt` 一行也不生效）。
+> **别跳指针去抓它们**；但 F44/F45 与 F6 都在 `fmt_cmd` 这一支上 ⇒ 做 F6 时若顺手看清了那两条臂，就把复例贴进 RUNLOG，**不要半修**。
+> 一条**动手前的安全口径**（本轮差点自伤）：`infy fmt -w` 与不带 `-w` 都会写盘（F44），所以**任何 `fmt` 实验只准在
+> `target/scratch/` 的副本上做**，`examples/tour` 的源码在 F6 裁决前不许被格式化器改写。
+> **基线（本轮收尾复跑）**：`cargo test --offline --lib` **540 passed / 0 failed**（= 535 + 5，`cli` 41 → **46**）、
+> `cargo check --offline --lib` **0 error / 0 warning**、`cargo build --offline --release` exit 0、
+> tour 的 `check`/`build`/`run`/`test` + `--verify-reproducible` 全 exit **0**（本机产物仍 **199975**）、C 侧零改动仍复跑四条链
+> （两份 `-c` 各 **0 告警**、rt **32335/0**、两条 IFBC **180/180** + `cmp` 无差异）、
+> `infy conformance --report` 仍 exit **1**（83 = 77/0/6 · 92.8%）、`fmt --check examples/tour` 仍 exit **2**（F6）。
+> 措辞红线不变：「两侧装载期校验等价」仍不许讲（F26 前半 / D-42 (a)–(e)）；覆盖 83/2300 ⇒ 任何文档
+> 不得出现「INFY v2.0 兼容」的肯定式声称（逐物理行判，否定标记必须与声称同一行）。
+> **F5 勾 `[x]` 不声称的两件**：`infy fmt` 现在会写盘这件事本身是对的（F44 未修）；`.infyfmt` 生效（F45 未修）。
+> **（以下为 F5 轮之前各轮的指针，已被上面一段取代，保留作历史）**
 
 > **F4 轮收尾（2026-10-16）：F4 勾 `[x]`，本段取代下一段** —— 走的是验收允许的**记录**路（裁定 = 偏差 **D-50(a)–(c)**，
 > 4 条锁点 + 1 次实测负对照）。**为什么不走实现路**：附录 C-7「仍缺 ④」把 LSP 的增量诊断/§9.4 逐字节一致性定义为空白，
