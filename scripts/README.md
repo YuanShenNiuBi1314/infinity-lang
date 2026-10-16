@@ -29,14 +29,23 @@
 | 脚本 | 用途 | 干跑 |
 | --- | --- | --- |
 | `cleanup.ps1` | 清理 `.infy-build/`、`target/scratch*`、一次性测试二进制 | 是（默认） |
-| `push-branch.ps1` | 带重试地把当前 HEAD 推到指定分支（`github.com:443` 不稳时的绕行） | 是（默认） |
+| `push-branch.ps1` | 带重试把 HEAD 推到受控分支，并回查远端算欠账（`main`/`master` 硬拒、绝不 force） | 有 `-DryRun`；推送是加法，正常调用即推 |
 
 ## 本机调用方式（重要）
 
-这台机**没有** （PowerShell 7），只有 Windows PowerShell 5.1。一律这样调：
+这台机**没有** `pwsh`（PowerShell 7），只有 Windows PowerShell 5.1。一律这样调：
 
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/<name>.ps1 [-Apply|-DryRun]
 
+写 `.ps1` 有两条必须遵守的 5.1 坑（本轮踩过，两次都真实红过）：
 
- 存盘必须带 **UTF-8 BOM**：5.1 对无 BOM 文件按 ANSI 解码，中文注释会直接语法报错；
-且  下原生命令的 stderr（ 的进度）会被当异常抛出，
-调原生命令前必须临时降到 （脚本里的  已封装）。新增脚本请沿用这两条。
+1. **文件必须存成带 UTF-8 BOM**。5.1 对无 BOM 的文件按 ANSI 解码，中文注释与中文字符串会直接
+   语法报错（`UnexpectedToken` / `TerminatorExpectedAtEndOfString`），跟脚本逻辑毫无关系。
+2. **不要在原生命令上开着 `$ErrorActionPreference='Stop'`**。PowerShell 5.1 会把原生命令写到
+   stderr 的内容当成异常抛出，而 `git push` 的进度信息正是写 stderr —— 于是"推送失败"和
+   "推送成功但有进度输出"都变成异常。脚本里的 `Run-Native` 已把这件事封好：临时降到
+   `Continue`、拿回真实 `$LASTEXITCODE`、再恢复。新增脚本请复用它，别自己裸调。
+
+另外：中文输出在本机控制台会显示成乱码（代码页问题），不影响判断——**以 `logs/*.log` 与
+`gh api` 的回查结果为准**，不要信终端里的字形。
+
