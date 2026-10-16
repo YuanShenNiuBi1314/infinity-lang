@@ -1299,7 +1299,7 @@ mod tests {
             assert!(
                 line.contains("windows"),
                 "runner 是 `{line}`：阶段 [9] 产 PE + 追加 INFYART2 段、std.fs 走 CreateFileW，\
-                 别的平台上跑的不是这 529 项测过的形状"
+                 别的平台上跑的不是这 530 项测过的形状"
             );
         }
         assert!(y.contains("git status --porcelain"), "行尾/改写守卫没了");
@@ -1320,5 +1320,65 @@ mod tests {
             doc_text(".gitattributes").contains(".github/workflows/*.yml"),
             "workflow 的行尾没钉成 LF"
         );
+    }
+
+    /// F3：仓库里只留 `docs/RUNLOG.md` 这一份审计线。
+    ///
+    /// 一次性产物（手工 `gcc` 的落点、`push*.log` 那一族碎片）从 `725042a` 起一路被跟踪，因为
+    /// `.gitignore` 只写了 `push.log` 这一条具体名字 —— 换轮次换个名字就又是一条漏网的脏文件。
+    /// 这条测试钉的是**名单形状**（按"谁产生它"列），不是磁盘上今天有什么；同时钉住反向红线：
+    /// 名单不得宽到把真值源（夹具 `.bin`、文档 `.md`、源码 `.rs`、整个目录）一起吞掉 ——
+    /// 那种"更干净"的写法会让跨语言逐字节锁点静默脱钩，比脏树坏得多。
+    #[test]
+    fn the_gitignore_lists_the_one_off_families_and_never_a_truth_source() {
+        let lines: Vec<String> = doc_text(".gitignore")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| l.to_string())
+            .collect();
+
+        // 谁产生它：`*.log` + `logs/` = 三个脚本的审计日志；`*.tmp` = 写回时的中转文件；
+        // `*.o` 与无扩展名那一族 = 手工 gcc 的输出（cleanup.ps1 的白名单里有它们）。
+        for required in ["*.log", "logs/", "*.tmp", "*.o", "/rt_tests", "/ifbc_tests", "/a.out"] {
+            assert!(
+                lines.iter().any(|l| l == required),
+                ".gitignore 少了 `{required}` —— 它对应的产物一产生就变成未跟踪的脏树，\
+                 而 CI 的工作树守卫正是拿脏树当红"
+            );
+        }
+
+        // 反向红线：整目录或整个源文件后缀一旦进名单，真值源就悄悄脱离跟踪。
+        for forbidden in [
+            "*.bin", "*.md", "*.rs", "*.c", "*.h", "*.txt", "*.infy", "*.toml", "*.ps1",
+            "docs/", "docs", "src/", "runtime/", "spec/", "conformance/", "scripts/",
+            "capabilities/", "examples/", ".github/", "*",
+        ] {
+            assert!(
+                !lines.iter().any(|l| l == forbidden),
+                ".gitignore 里出现了 `{forbidden}` —— 这条会连真值源一起吞掉 \
+                 （fixtures 的 .bin 锁点、逐条款文档、脚本自身）"
+            );
+        }
+
+        // 脚本的审计 log 必须落在 logs/ 下，否则 `*.log` 只救了仓库根、救不了子目录。
+        let scripts = repo_root().join("scripts");
+        let mut n_scripts = 0;
+        for entry in std::fs::read_dir(&scripts).expect("scripts/ 目录读不到") {
+            let path = entry.expect("scripts/ 条目").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("ps1") {
+                continue;
+            }
+            n_scripts += 1;
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("读不到 {}: {e}", path.display()));
+            assert!(
+                text.contains("Join-Path $repo 'logs'"),
+                "{} 把审计日志写在 logs/ 外面 —— F3 之后仓库只该有一份审计线（docs/RUNLOG.md），\
+                 log 落在仓库根就是重新长出 push2.log 那一族",
+                path.file_name().unwrap().to_string_lossy()
+            );
+        }
+        assert!(n_scripts >= 3, "scripts/ 里只剩 {n_scripts} 个 .ps1？风险操作走脚本是 §0.0 的硬规矩");
     }
 }

@@ -9,6 +9,20 @@
 *.infypkg
 .infy-build/
 MODULE.infy.lock.generated
-push.log
+
+# F3：一次性产物。仓库里只留 docs/RUNLOG.md 这一份审计线 —— 脚本的 log 写在 logs/ 下、本地留存不入库。
+# 名单按「谁会产生它」来列，不是按「今天磁盘上有什么」：手工 gcc 的落点会随轮次变。
+*.log
+logs/
+*.tmp
+*.o
+# 无扩展名的那一族：cleanup.ps1 的封闭白名单里就有它们（rt_tests / ifbc_tests / a.out），
+# 只写 *.exe 的话同一命令在别的 shell 里少打一个后缀就变成未跟踪的脏树。
+/rt_tests
+/ifbc_tests
+/ifbc_real
+/a.out
+# 某次截断会话留下的 Rust 碎片，全仓库零引用（git grep 过）
+/chunk.txt
 # Qoder 本地会话/用量数据（含提示词原文），不入库
 .qoder-credits/

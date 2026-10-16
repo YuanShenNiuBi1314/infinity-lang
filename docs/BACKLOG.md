@@ -860,10 +860,34 @@
       `build-id 4d8250b5…55ba` 逐字节不变、C 侧四条链复跑未变（两份 `-c` 各 0 告警、rt 32335/0、IFBC 两条链 180/180 + `cmp` 无差异）、
       `infy conformance --report` 仍 exit 1（83 = 77/0/6 · 92.8%）、`fmt --check` 仍 exit 2（F6）。
       **F2 的口径只覆盖 `--lib`**：release 构建与 bin 目标的告警未逐条清理（本轮改动不涉及它们的源代码形状）。
-- [ ] F3 把 `push*.log`/`rt_tests`/`ifbc_tests` 等一次性产物加进 `.gitignore`，仓库里只留 `docs/RUNLOG.md` 这一份审计线。
+- [x] F3 把 `push*.log`/`rt_tests`/`ifbc_tests` 等一次性产物加进 `.gitignore`，仓库里只留 `docs/RUNLOG.md` 这一份审计线。
       **F2 轮顺手做掉的一项**：删掉被跟踪的 `src/fmt.rs.tmp`（3984 行的旧 `fmt.rs` 快照，`418a34c` 起入库、
-      cargo 不编译它、无人引用，与 `src/fmt.rs` 已差 1382 行）。**仍未做** = `.gitignore` 里没有 `*.tmp`/`*.log`
-      这一族（现只有 `push.log` 一条），一次性输出二进制仍靠手工不落库。
+      cargo 不编译它、无人引用，与 `src/fmt.rs` 已差 1382 行）。
+      **F3 轮（2026-10-16）做完剩下那一族并勾 `[x]`**：`.gitignore` 从"记具体名字"（原来只有 `push.log` 一条，
+      所以 `push2.log`/`push3.log` 一路入库）改成"记**产物形状**" = `*.log` + `logs/` + `*.tmp` + `*.o` +
+      无扩展名那一族（`/rt_tests`、`/ifbc_tests`、`/ifbc_real`、`/a.out` —— `cleanup.ps1` 的白名单里就有它们，
+      只写 `*.exe` 的话同一命令少打个后缀就又是一条脏文件）+ `/chunk.txt`（某次截断会话留下的 Rust 碎片，
+      全仓库零引用：`grep -rn 'chunk\.txt'` 除自身为空）。
+      **仍在跟踪的 5 项只从索引里摘掉**（新脚本 `scripts/untrack-artifacts.ps1`，`git rm --cached` ⇒ 工作树
+      一字节未动、文件全部留在磁盘上；那些 log 是历史轮次的现场记录，删掉等于销毁证据，F3 要的是"仓库里
+      只有一份审计线"而不是本机不留痕）。§0.0 四条硬规矩齐：默认干跑、幂等、动作逐条进 `logs/untrack-artifacts.log`
+      （含回滚命令 `git add -- <路径>`）、白名单**封闭**（`docs/`/`spec/`/`src/`/`runtime/`/`conformance/`/
+      `scripts/`/`.github/`/`.gitignore`/`.gitattributes` 命中即拒，解析到仓库外即拒）。
+      实测：干跑命中 **5**、拒绝 **0**；`-Apply` exit **0**、`VERIFY mode=APPLY 命中=5 失败=0 剩余跟踪=0`；
+      复跑 = `NOOP` exit **0**（幂等）；`git ls-files | grep -Ei '\.(log|tmp|o)$|^logs/|chunk\.txt'` = **0** 行；
+      `git check-ignore -v` 逐条命中 `.gitignore:15:*.log` / `:16:logs/` / `:17:*.tmp` / `:18:*.o` / `:3:*.exe`；
+      5 个文件 `ls` 全部在场。细节见 `docs/status.md` 的 F3 一节与 `docs/coverage.md` **P31**。
+      **两条不是"顺手"的判断**：① 反向红线进了测试 —— 名单宽到 `*.bin`/`*.md`/`*.rs` 或某个整目录会让真值源
+      （跨语言逐字节夹具、逐条款文档）**悄悄脱离跟踪而测试照样全绿**，所以新测试两头都查（六条必需模式按
+      **整行相等**比对，`contains` 会被 `*.logx` 糊过去；十四种禁止形状一个不许出现）；② 「`.gitignore` 自己会不会
+      也被 `core.autocrlf` 改坏」没有猜：隔离 `git init` 仓库里写一份 **CRLF** 的 `.gitignore`，两条模式照常命中
+      ⇒ **不**给它补 `text eol=lf`（行尾这一族 F1 的 run #1 已经红过一次，值得每次实测而不是背规则）。
+      回归：基线 `cargo test --offline --lib` **530 passed / 0 failed**（+1 全在 `conformance`：**17 → 18**）、
+      `cargo check --offline --lib` **0 error / 0 warning**、`cargo build --offline --release` exit 0、
+      tour 的 `check|build|run|test` + `--verify-reproducible` 全 exit **0**（两份 `ci.exe` 各 199173 字节且 `cmp` 相同）、
+      C11 仍 **12513** 字节 / 产物仍 **199975** 字节 / `build-id 4d8250b5…55ba` 逐字节不变（`src/` 生产代码一字未动）、
+      `infy conformance --report` 仍 exit **1**（83 = 77/0/6 · 92.8%）、`fmt --check` 仍 exit **2**（F6）；
+      **C 侧零改动**仍复跑四条链（两份 `-c` 各 **0 告警**、rt **32335/0**、两条 IFBC **180/180** + `cmp` 无差异）。
 - [ ] F4 `infy lsp`、`std.net` TLS、`dyn Trait` vtable 偏移表：要么实现，要么在 `docs/spec-deviations.md` 里保持"明确未实现"的记录，不许静默。
 - [ ] F5 `infy fmt` / `infy expand` 的目录参数与 `infy check` 不一致（A3 实测）：
       `infy fmt --check examples/tour` → `error: 无法读取 examples/tour: 拒绝访问。 (os error 5)`（把目录当文件读），
@@ -1187,7 +1211,25 @@
 
 ## 2. 当前指针
 
-> **下一轮第一件事：先补推 `toolchain`**（F2 轮推送两次全败，远端停在 `1896c2a` 而本地 = `304c3b4` ⇒ **现算欠账 3**（含并行会话的 2 个提交），欠账只认 `gh api` 回查现算，别抄固定数；**EOL 修复没上远端 ⇒ run #2 还没被触发**），再用 `gh api …/actions/runs?branch=toolchain` 回查 F1 那条 workflow 有没有被创建、需不需要手动批准 ⇒ 做到了才把 F1 勾 `[x]`；红了就按「runner 供给」逐条判（`gcc` 在不在 PATH、`setup-python` 缓存里有没有 CPython 3.14），照实记结论。之后就做 §1 的第一个 `[ ]` = **F3**（`.gitignore` 那一族；`src/fmt.rs.tmp` 已由 F2 轮删掉）。
+> **下一轮第一件事：还是先补推 `toolchain`**（F3 轮开头走 `scripts/push-branch.ps1`，两次全败 = 第 1 次
+> `Recv failure: Connection was reset`、第 2 次 `Failed to connect to github.com:443 after 21071 ms`，而同一时刻
+> `gh api` 正常 ⇒ 仍是 `github.com` 侧抖动，**不动 git 配置、不换凭据**；远端 `toolchain` 回查仍 = `1896c2a`
+> ⇒ **EOL 修复还没上远端、run #2 还没被触发**。欠账每次**现算**（`gh api …/git/refs/heads/toolchain --jq .object.sha`
+> + `git rev-list --count <远端SHA>..HEAD`），别抄固定数），再用 `gh api …/actions/runs?branch=toolchain` 取 **run #2**
+> 的逐步结论 ⇒ 做到了才把 F1 勾 `[x]`。**「runner 供给」那两条疑问 run #1 已经答过了**（步 1-6 全 success ⇒
+> `windows-latest` 有 `gcc`、`setup-python@v7` 装得上 CPython 3.14），run #2 真正要看的是**步 8-12**：它们在 run #1
+> 里因 `set -e` 全 `skipped`，**在远端从没跑过一次**（`cargo check` 告警数、两份 `-Wall -Wextra -c`、rt harness 的
+> `cd target/scratch`、IFBC 两条链 + `cmp`、tour 四条 + `--verify-reproducible` + `artifact info --nodes`）。
+> 红了按逐条根因处置、照实记，**不许**放宽断言。之后就做 §1 的第一个 `[ ]` = **F4**
+> （`infy lsp`、`std.net` TLS、`dyn Trait` vtable 偏移表：要么实现，要么在 `docs/spec-deviations.md` 里保持"明确未实现"的记录）。
+> **F3 轮（2026-10-16）已勾 `[x]`**：`.gitignore` 改成按**产物形状**列（`*.log` + `logs/` + `*.tmp` + `*.o` +
+> `/rt_tests` `/ifbc_tests` `/ifbc_real` `/a.out` `/chunk.txt`），5 项仍在跟踪的一次性产物由新脚本
+> `scripts/untrack-artifacts.ps1` **只摘索引**（`git rm --cached` ⇒ 文件留磁盘、逐条写回滚命令；干跑命中 5 拒绝 0、
+> `-Apply` exit 0、复跑 `NOOP` exit 0、`git ls-files` 产物形状 = 0 行），新测试把名单**两头**钉住
+> （六条必需整行相等 + 十四种禁止形状不许出现 + 每个 `.ps1` 的 log 必须在 `logs/`）= `conformance` **17 → 18**、
+> 基线换为 **530 passed / 0 failed**、check **0 error / 0 warning**（口径未变）。证据 = `docs/coverage.md` **P31**
+> 与 `docs/status.md` 的 F3 一节。**一条实测掉的假设**：CRLF 版 `.gitignore` 在隔离仓库里模式照常命中 ⇒ 没给它补
+> `text eol=lf`。`src/` 生产代码一字未动 ⇒ 12513 / 199975 / `4d8250b5…55ba` 逐字节不变是**预期**，四条 C 链仍复跑未变。
 > **F1 轮（2026-10-16）= 落地但仍未勾 `[ ]`**（远端回查没做到）：`.github/workflows/ci.yml` 落成 = `cargo build --offline --release` + `cargo test --offline` + `-Wall -Wextra` 的 C 侧编译自检（stderr 非空即红）+ rt/IFBC 两份 harness（IFBC 两条链 + `cmp`）+ tour 端到端 9 个 run 段，全部在本地按 GitHub 的执行方式逐步 exit 0；`conformance` **14 → 17** 把 yaml 的命令覆盖面、四个重写夹具的开关、Windows-only 与两条防假红守卫钉住。基线 **527 passed / 0 failed**、check **0 error / 50 warning**（只报不门禁）、`infy conformance --report` 仍 83 = Pass 77 / Fail 0 / Blocked 6 ⇒ **exit 1**、`fmt --check` 仍 **exit 2**（F6 未裁决）。证据 = `docs/coverage.md` **P30** 与 `docs/status.md` 的 F1 一节；远端 run 的结论只认 RUNLOG `cron-23-push` 行的 `gh api` 回查。
 > **E3 轮（2026-10-16）已勾 `[x]`**：§12 逐分类通过率落进 `docs/coverage.md` **§6**（20 行 × 11 列 + 三档小计 + 合计 + 缺口三分类）与 README 的「距 §12 的 100% 还差哪些类」，副本配了逐格回核 + 红线机检 ⇒ `conformance` **11 → 14**、基线 **524 passed / 0 failed**、`cargo check` **0 error / 50 warning**（HEAD 全量重检的告警**集合**与工作树逐条 `diff` 相同）、`infy conformance --report` 的数字**一字未变**（83 = Pass 77 / Fail 0 / Blocked 6 · 92.8% · 覆盖 83/2300 ⇒ exit 1）。证据提交 `008bd93`。
 > **F2 轮（2026-10-16）已勾 `[x]`**：`cargo check --offline --lib` 的告警 **50 → 0**（0 error，未用 `#[allow(...)]` 消数、未新增），基线换为 **529 passed / 0 failed**（+2 = `cli` 39、`btrack` 31）。逐条去处 = `docs/status.md` 的 F2 一节，对外行 = `docs/coverage.md` **P1/P2/P30**；两处判成「没接上」的已接线 = 偏差 **D-49**（§9.6 的 `[lints]`）与 `btrack` 的 ZIP 成员偏移（`lho` → `data_off`，带**负对照实测**）。

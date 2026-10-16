@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 529 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 530 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
 Finished `dev` profile  (0 warnings —— F2 轮把 50 条一次清零：20 条 `unreachable pattern`、6 条 unused import、6 条 unused variable、3 条 `depth` 赋值不读、2 条多余 `mut`、2 条 never-constructed 变体、11 条 never-used fn/method/field；**没有用 `#[allow(...)]` 消数**，其中两处是「没接上」而非「没用」，见下文 F2 一节。口径 = `cargo check --offline --lib --message-format=short` 先 `touch src/lib.rs` 再计数；上一档 50 = F1 轮，51 → 50 = D4(1) 轮删掉 `CodeBuilder.bounds`)
 $ infy check examples/tour
@@ -132,13 +132,13 @@ $ infy conformance --update-golden                 # §12.4 要求显式授权�
 error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权（`--i-know-this-is-breaking`），因为改动黄金文件等于改语义。
 ```
 
-529 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 529；F2 轮实测）：
+530 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 530；F3 轮实测）：
 `lexer` 79 · `derive` 57 · `fmt` 39 · `cli` **39**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → **F2 轮 39** = §9.6 `[lints]` 的成对断言） ·
 `macro_expand` 35 · `btrack` **31**（D1(1) 前是 0，D1(2) 轮 23 → 30，**F2 轮 +1** = wheel 归档里每个成员按自己的 local header 偏移取数据） ·
 `atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **26**（D3 轮 22 → 26） · `pkg` 24 · `sema` 22 ·
 `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` 20 · `artifact` 18 ·
-`toml` 15 · `borrow` 15 · `sha256` 12 · `conformance` **17**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫） · `codes` 9 ·
-`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = 529。
+`toml` 15 · `borrow` 15 · `sha256` 12 · `conformance` **18**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫，**F3 轮 +1** = `.gitignore` 的一次性产物名单形状（按"谁产生它"列的六条一条不能少）+ 反向红线（不得宽到吞掉 `*.bin`/`*.md`/`*.rs` 或整个目录）+ 每个 `scripts/*.ps1` 的审计日志必须落在 `logs/`） · `codes` 9 ·
+`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = 530。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -1355,3 +1355,41 @@ cargo 也不会编译它）删除 —— 这是 BACKLOG F3 早已点名的一项
 把 `examples/tour` 的两个 `.infy` 换成 CRLF 后命中 **2** 条且指名这两个文件，`infy check` 对同一份 CRLF 副本
 exit **2** 并打 **2** 条 `W-0001` ⇒ 与远端逐字相符。**F1 仍 `[ ]`**：勾它的条件是那一次 run 的 conclusion = success，
 run #1 是红的；修复已推送 ⇒ 下一轮取 run #2 的逐步结论（步 8-12 从没在远端跑过，仍可能另有红）。
+
+## F3 轮（2026-10-16）：一次性产物脱离跟踪，仓库里只剩 `docs/RUNLOG.md` 这一份审计线
+
+**改了什么**：① `.gitignore` 从"记具体名字"改成"记产物形状"（原来只有 `push.log` 一条，所以
+`push2.log`/`push3.log` 一路被跟踪）；② 新脚本 `scripts/untrack-artifacts.ps1` 把仍在跟踪的 5 项
+**只从索引里摘掉**（`git rm --cached`），文件留在磁盘；③ `conformance` 加 1 条回核，把这份名单与
+"脚本的审计日志必须落在 `logs/`"钉成测试。
+
+**为什么是 `--cached` 而不是删除**：那些 log 是历史轮次的现场记录，删掉等于销毁证据；F3 要求的是
+**仓库里只有一份审计线**，不是本机不留痕。脚本逐条写了回滚命令（`git add -- <路径>`），完全可逆。
+
+**实测**：干跑命中 **5** 项（`chunk.txt`、`logs/cleanup.log`、`logs/push-branch.log`、`push2.log`、
+`push3.log`）、拒绝 **0** 项；`-Apply` exit **0**，`VERIFY mode=APPLY 命中=5 失败=0 剩余跟踪=0`；
+复跑一次 = `NOOP 没有仍在跟踪的一次性产物` exit **0**（幂等）；5 个文件仍全部在磁盘上；
+`git ls-files | grep -Ei '\.(log|tmp|o)$|^logs/|chunk\.txt'` = **0** 行。
+`git check-ignore -v` 逐条命中：`push2.log` ← `.gitignore:15:*.log`、`logs/push-branch.log` ← `:16:logs/`、
+`ifbc_tests.exe` ← `:3:*.exe`、`foo.tmp` ← `:17:*.tmp`、`bar.o` ← `:18:*.o`。
+
+**顺带量掉的一条假设**：`.gitignore` 自己会不会也踩行尾（这台机 `core.autocrlf=true`，F1 的 run #1 就是被
+这个坑红过一次）？在 `target/scratch/` 里 `git init` 一个隔离仓库、写入 **CRLF** 的 `.gitignore`
+（`push2.log\r\n` + `*.tmp\r\n`），`git status --porcelain` 只剩 `?? .gitignore` ⇒ 两条模式**照常命中**，
+git 的 ignore 解析器吃 CRLF ⇒ 不需要给 `.gitignore` 补 `text eol=lf`。**没有为这条没需要的规则去改文件。**
+
+**反向红线（这条比名单本身更要紧）**：名单一旦宽到 `*.bin` / `*.md` / `*.rs` / 某个整目录，真值源会
+**悄悄脱离跟踪** —— 跨语言逐字节夹具（`runtime/fixtures/*.bin`）不再入库、逐条款文档不再入库，而所有
+测试仍然全绿。新测试因此两头都查：六条必需模式按**整行相等**比对（不是 `contains`，`*.log` 的
+`contains` 会被 `*.logx` 糊过去），十四种禁止形状一个都不许出现。
+
+**回归面**：`cargo test --offline --lib` **530 passed / 0 failed**（基线 529，+1 全在 `conformance`：
+**17 → 18**）、`cargo check --offline --lib` **0 error / 0 warning**（口径未变）、
+`cargo build --offline --release` exit 0、`infy check|build|run|test examples/tour` 全 exit **0**、
+`--verify-reproducible` exit **0**（`verify-a/ci.exe` 与 `verify-b/ci.exe` 各 199173 字节且 `cmp` 相同）、
+`infy artifact info … --nodes` exit **0**、生成 C11 仍 **12513** 字节、产物仍 **199975** 字节、
+`build-id 4d8250b5…55ba` **逐字节不变**（本轮没碰 `src/` 的生产代码，只加了一条测试）、
+`infy conformance --report` 仍 **exit 1**（83 = Pass 77 / Fail 0 / Blocked 6 · 92.8%）、
+`(cd examples/tour && infy fmt --check)` 仍 **exit 2**（F6 未裁决）；
+**C 侧零改动**仍复跑四条链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警**（stderr 0 字节）、
+rt **32335 assertions / 0 failures**、替身链与生产链 IFBC 各 **180/180** 且两份 stdout `cmp` **无差异**。
