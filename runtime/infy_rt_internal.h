@@ -135,6 +135,11 @@ typedef struct InfyTry {
     InfyRCode        code;
     char             detail[256];
     uint8_t          caught;
+    /* §11.1: host-call state as observed when this try point was installed. A panic that
+     * longjmps across an in-flight infy_host_call_event skips that frame's decrement and
+     * unlock, so every catch path must roll both back to these snapshots. */
+    int32_t          host_depth;
+    int32_t          host_lock_depth;
 } InfyTry;
 
 extern INFY_TLS InfyTry*      infy_tls_try;
@@ -154,6 +159,9 @@ typedef void (*InfyExitHook)(int code);
 void infy_test_set_exit_hook(InfyExitHook hook);
 /* Drives the §11.1 nesting limit (R-0902) without a re-entrant host callback. */
 void infy_test_set_host_nesting(int32_t depth);
+/* Read sides of the same two counters: a catch point must leave both at its own snapshot. */
+int32_t infy_test_host_nesting(void);
+int32_t infy_test_host_lock_depth(void);
 
 /* ---------------- allocation header ----------------
  * §3 of runtime-abi.md: every heap block carries a 16-byte header {size, chain_id, flags}.

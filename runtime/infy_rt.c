@@ -50,6 +50,14 @@ INFY_TLS InfyTry*     infy_tls_try     = 0;
 INFY_TLS InfyCleanup* infy_tls_cleanup = 0;
 INFY_TLS uint8_t      infy_tls_unwinding = 0;
 
+/* §11.1 rollback used by every catch path: defined with the host protocol section, because the
+ * counters it restores live there. */
+static void host_call_rollback(int32_t to_depth, int32_t to_lock_depth);
+
+/* Kept above the unwind plumbing: both catch points snapshot these two at install time. */
+static int32_t g_host_nesting = 0;
+static int32_t g_host_lock_depth = 0;  /* g_host_mu acquisitions in flight = rollback unit */
+
 /* Allocation counters (§10.14 std.rt.mem_stats). */
 static _Atomic uint64_t g_live_bytes = 0, g_live_objs = 0, g_total_allocs = 0, g_arena_bytes = 0;
 
@@ -477,6 +485,8 @@ int infy_rt_catch(void (*fn)(void*), void* ctx, InfyRCode* out_code) {
     t.focus_id = tls_has_focus ? tls_focus_id : 0;
     t.chain_id = tls_has_focus ? tls_chain_id : 0;
     t.node_idx = tls_has_focus ? tls_node_idx : 0;
+    t.host_depth = g_host_nesting;
+    t.host_lock_depth = g_host_lock_depth;
     infy_tls_try = &t;
     if (setjmp(t.jb) == 0) {
         fn(ctx);
@@ -485,6 +495,7 @@ int infy_rt_catch(void (*fn)(void*), void* ctx, InfyRCode* out_code) {
         return 0;
     }
     infy_tls_try = t.prev;
+    host_call_rollback(t.host_depth, t.host_lock_depth);
     if (out_code) *out_code = t.code;
     return 1;
 }
@@ -2258,6 +2269,8 @@ static void dispatch_node(InfyFocus* f) {
     memset(&t, 0, sizeof t);
     t.prev = infy_tls_try;
     t.focus_id = f->id; t.chain_id = f->chain_id; t.node_idx = f->node_idx;
+    t.host_depth = g_host_nesting;
+    t.host_lock_depth = g_host_lock_depth;
     infy_tls_try = &t;
 
     tls_has_focus = 1;
@@ -2274,6 +2287,7 @@ static void dispatch_node(InfyFocus* f) {
     } else {
         /* a panic already drained the cleanup deque and marked the focus Failed (§4.16) */
         infy_tls_try = t.prev;
+        host_call_rollback(t.host_depth, t.host_lock_depth);
     }
     f->cleanup = infy_tls_cleanup;
     infy_tls_cleanup = saved_cleanup;
@@ -2651,7 +2665,6 @@ static InfyHostApi    g_host;
 static uint8_t        g_host_registered = 0;
 static uint8_t        g_handshake_done = 0;
 static InfySrw        g_host_mu;          /* serialises call_native_event (§11.1) */
-static int32_t        g_host_nesting = 0;
 static uint8_t        g_chains_started = 0;
 static InfySrw        g_query_mu;
 static uint8_t        g_query_ready = 0;
@@ -2797,9 +2810,11 @@ InfyOutVal infy_host_call_event(uint32_t id, const InfyArgFrame* args, const Inf
     const InfyArgFrame* a = args ? args : &empty;
     int8_t rc;
     infy_mtx_lock(&g_host_mu);          /* §11.1: hosts need not lock themselves */
+    g_host_lock_depth++;
     g_host_nesting++;
     rc = g_host.call_native_event(g_host.self, id, a, &out);
     g_host_nesting--;
+    g_host_lock_depth--;
     infy_mtx_unlock(&g_host_mu);
     if (rc != 0) {
         char b[128];
@@ -2903,6 +2918,17 @@ uint8_t infy_host_is_registered(void) { return g_host_registered; }
 uint8_t infy_host_handshake_done(void) { return g_handshake_done; }
 void infy_host_mark_chains_started(void) { g_chains_started = 1; }
 void infy_test_set_host_nesting(int32_t n) { g_host_nesting = n; }
+int32_t infy_test_host_nesting(void) { return g_host_nesting; }
+int32_t infy_test_host_lock_depth(void) { return g_host_lock_depth; }
+
+static void host_call_rollback(int32_t to_depth, int32_t to_lock_depth) {
+    /* A panic whose unwind target sits above an infy_host_call_event frame skips that frame's
+     * `g_host_nesting--` *and* its unlock. Left alone, the focus then reports R-0902 for every
+     * later host call (§11.1) and the next call deadlocks on the non-recursive g_host_mu.
+     * Rolls back only — rolling forward would invent levels this catch point never saw. */
+    while (g_host_lock_depth > to_lock_depth) { g_host_lock_depth--; infy_mtx_unlock(&g_host_mu); }
+    if (g_host_nesting > to_depth) g_host_nesting = to_depth;
+}
 /* ======================= artifact container (§7.4) ======================= */
 
 int infy_art_parse_trailer(const uint8_t* file, uint64_t len, InfyArtTrailer* t, const char** why) {

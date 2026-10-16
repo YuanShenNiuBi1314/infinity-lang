@@ -1549,6 +1549,15 @@ static const InfyEnvSnapshot* fake_env(void* self) { (void)self; return fake_env
 static int8_t fake_event(void* self, uint32_t id, const InfyArgFrame* args, InfyOutVal* out) {
     (void)self; (void)args;
     if (id == 4040u) return -1;                       /* a host that reports an unmapped error */
+    if (id == 9002u) {
+        /* §11.1 mutual recursion: the host calls back into the runtime and that call panics, so
+         * the longjmp target is above *this* frame — the in-flight nesting level and the host
+         * lock are then both owed a rollback. */
+        InfyArgFrame inner;
+        memset(&inner, 0, sizeof inner);
+        (void)infy_host_call_event(31337, &inner, LOC(304, 1, 0));
+        return 0;                                     /* not reached: the panic unwinds past here */
+    }
     if (out) { out->tag = 1; out->v.i = (int64_t)id * 2; }
     return 0;
 }
@@ -1583,8 +1592,12 @@ static void e_call_deep(void) {
     infy_test_set_host_nesting(8);
     InfyArgFrame fr; memset(&fr, 0, sizeof fr);
     (void)infy_host_call_event(5, &fr, LOC(302, 1, 0));
-    /* unreachable: the panic unwinds past this call, so the reset lives with the expect_panic
-     * that catches it (leaving the depth at 8 would make every later host call panic) */
+    /* unreachable: the panic unwinds to expect_panic's catch point, which owns the rollback (F8) */
+}
+static void e_host_panic_inside(void) {
+    InfyArgFrame fr; memset(&fr, 0, sizeof fr);
+    (void)infy_host_call_event(9002, &fr, LOC(306, 1, 0));
+    /* unreachable: fake_event's inner call panicked, so this frame never returns to decrement */
 }
 static void e_query_wrong_type(void) {
     int64_t x = 0;
@@ -1614,15 +1627,25 @@ static void test_host(void) {
 
     /* unknown id -> R-0900 (the version-mismatch symptom, §11.2); host error -> R-0900 */
     infy_host_register_events(0, 0, 0);                 /* no registry: only the host answers */
-    static const uint32_t both[2] = { 5, 4040 };
-    infy_host_register_events(both, 2, 0);
+    static const uint32_t both[3] = { 5, 4040, 9002 };
+    infy_host_register_events(both, 3, 0);
     expect_panic("event id unknown to host", R_HOST_UNMAPPED, e_call_unknown);
     expect_panic("host returned an error", R_HOST_UNMAPPED, e_call_err);
     /* nesting deeper than 8 is R-0902 (§11.1) */
     expect_panic("host nesting > 8", R_HOST_NESTING, e_call_deep);
-    infy_test_set_host_nesting(0);              /* the panic skipped e_call_deep's own reset */
+    /* F8, first half: the catch point — not the harness — must hand the depth back. The old code
+     * needed `infy_test_set_host_nesting(0)` here; reading 0 now is what replaces that crutch. */
+    CK_EQ(infy_test_host_nesting(), 0);
+    CK_EQ(infy_test_host_lock_depth(), 0);
 
-    /* a well-formed call returns the value the host wrote */
+    /* F8, second half: a panic raised *inside* the host callback crosses the frame that holds the
+     * lock, so the rollback owes both a decrement and an unlock (g_host_mu is not re-entrant). */
+    expect_panic("host callback panics mid-frame", R_HOST_UNMAPPED, e_host_panic_inside);
+    CK_EQ(infy_test_host_nesting(), 0);
+    CK_EQ(infy_test_host_lock_depth(), 0);
+
+    /* a well-formed call returns the value the host wrote — this is the end-to-end half of F8:
+     * before the rollback it either deadlocked on the leaked lock or false-reported R-0902 */
     InfyArgFrame fr; memset(&fr, 0, sizeof fr);
     InfyOutVal v = infy_host_call_event(5, &fr, LOC(303, 1, 0));
     CK_EQ(v.tag, 1u);
