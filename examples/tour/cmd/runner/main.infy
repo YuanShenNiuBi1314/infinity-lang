@@ -1,5 +1,4 @@
 #![entry_chain = "Pipeline"]
-
 package runner
 
 // §8.4：只有顶层 expr_stmt 开节点；label 归入其后节点的序言
@@ -8,21 +7,31 @@ chain Pipeline {
     spawn();
     harvest();
     report();
-    gate();
-    {
-        if (all_green()) { goto("done"); }
+    gate() {
+        if (all_green()) {
+            goto("done");
+        }
         goto(+1);
-    }
-    retry_once();
-    { goto("begin"); }
+    };
+    retry_once() {
+        goto("begin");
+    };
     label done:
     finalize();
 }
 
-fn spawn() { }
-fn harvest() { }
-fn report() { }
-fn gate() { }
-fn retry_once() { }
-fn finalize() { }
-fn all_green() -> bool { true }
+fn spawn() {}
+
+fn harvest() {}
+
+fn report() {}
+
+fn gate() {}
+
+fn retry_once() {}
+
+fn finalize() {}
+
+fn all_green() -> bool {
+    true
+}

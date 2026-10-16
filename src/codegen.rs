@@ -4149,8 +4149,9 @@ mod tests {
     }
 
     /// §8.4: the node table is `chain_id, node_idx, file:line:col, linkage_count`, and only a
-    /// top-level `expr_stmt` opens a node. `Pipeline` has six nodes on lines 8/9/10/11/16/19 — the
-    /// same table stage [7] was pinned to in C1, now produced by stage [8].
+    /// top-level `expr_stmt` opens a node. `Pipeline` has six nodes on lines 7/8/9/10/16/20 — the
+    /// §9.5-canonical layout of `examples/tour` (偏差 D-17), the same table stage [7] was pinned
+    /// to in C1, now produced by stage [8].
     #[test]
     fn tour_chain_node_table_rows_are_the_c1_golden_lines() {
         let t = tour_text();
@@ -4158,10 +4159,10 @@ mod tests {
             .lines()
             .find(|l| l.contains("Pipeline_locs[6]"))
             .expect("six-node table");
-        for line in ["8u", "9u", "10u", "11u", "16u", "19u"] {
-            assert!(locs.contains(line), "node line {line} missing from {locs}");
+        for line in ["7u", "8u", "9u", "10u", "16u", "20u"] {
+            let probe = format!("{{ \"cmd/runner/main.infy\", {line}, 5u");
+            assert!(locs.contains(&probe), "node row missing: {probe} in {locs}");
         }
-        assert!(locs.contains("\"cmd/runner/main.infy\""), "display path must be §9.2-relative: {locs}");
         assert!(locs.contains(" 1u }, { \"cmd/runner/main.infy\", 16u"), "nodes 3 and 4 each carry one linkage block: {locs}");
         assert!(t.contains("Pipeline_desc = { \"Pipeline\", 6u, 0u, 4u, 4u,"), "InfyChainDesc header row");
     }

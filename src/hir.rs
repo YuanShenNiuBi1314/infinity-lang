@@ -1520,18 +1520,19 @@ pub enum Wide { Lo = 1, Hi = 4294967296 }
             .iter()
             .map(|n| (n.idx, n.line, n.col, n.linkage_count, n.host_event.clone()))
             .collect();
-        // Measured against examples/tour/cmd/runner/main.infy: the `{ … }` blocks on lines 12-15
-        // and 17 are linkage blocks of `gate();`/`retry_once();`, so they add a linkage count but
-        // no node — and `label` lines 7/18 are preambles, which is why `finalize` is node 5.
+        // Measured against examples/tour/cmd/runner/main.infy as `infy fmt` writes it (偏差 D-17):
+        // `gate()` owns lines 10-15 and `retry_once()` lines 16-18, each carrying its `{ … }`
+        // linkage block, so they add a linkage count but no node — and `label` lines 6/19 are
+        // preambles, which is why `finalize` is node 5.
         assert_eq!(
             rows,
             vec![
-                (0, 8, 5, 0, Some("spawn".into())),
-                (1, 9, 5, 0, Some("harvest".into())),
-                (2, 10, 5, 0, Some("report".into())),
-                (3, 11, 5, 1, Some("gate".into())),
+                (0, 7, 5, 0, Some("spawn".into())),
+                (1, 8, 5, 0, Some("harvest".into())),
+                (2, 9, 5, 0, Some("report".into())),
+                (3, 10, 5, 1, Some("gate".into())),
                 (4, 16, 5, 1, Some("retry_once".into())),
-                (5, 19, 5, 0, Some("finalize".into())),
+                (5, 20, 5, 0, Some("finalize".into())),
             ]
         );
         let labels: Vec<(String, u32)> = c.labels.iter().map(|(k, v)| (k.clone(), *v)).collect();

@@ -16,10 +16,11 @@
 #   3. rt harness 的**工作目录必须是 `target/scratch`**：它按 `../../runtime/fixtures/…` 取夹具，
 #      换目录 = 两条假失败 + exit 139（现场复现三次）。二进制也产在那里（`*.exe` 已被 .gitignore）。
 #
-# 刻意**不进** CI 的两条命令（不是遗漏）：
+# 刻意**不进** CI 的一条命令（不是遗漏）：
 #   - `infy conformance --report`：今天 exit **1**，因为 D-48(a) 裁定 `0` 要求 20 个分类都达到 §12 的
 #     `required` 且 Fail=0、Blocked=0，而用例集只覆盖 83/2300。把它当门禁 = 把"缺口"读成"回归"。
-#   - `(cd examples/tour && infy fmt --check)`：exit **2**，F6（§14 源码不是 §9.5 的不动点）未裁决。
+#   （F6 轮改判：`infy fmt --check examples/tour` 曾以"exit 2 = D-17 未裁决"为由排除，D-17 裁决后
+#    样例侧已按 §9.5 规范化，该命令实测 exit **0** ⇒ 现已请进步 12 当门禁。）
 name: infy-toolchain
 
 on:
@@ -152,6 +153,7 @@ jobs:
         run: |
           set -euo pipefail
           INFY=./target/release/infy.exe
+          "$INFY" fmt --check examples/tour   # §9.5 不动点（偏差 D-17 裁决后红=样例被改坏）
           "$INFY" check examples/tour
           "$INFY" build examples/tour
           "$INFY" run   examples/tour

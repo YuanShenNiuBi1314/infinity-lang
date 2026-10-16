@@ -5095,6 +5095,31 @@ fn a() {}\n";
 
     // ---------------------------------------------------------------------------- rule 11/12/13/14
 
+    /// 偏差 D-17 的锁点：`examples/tour`（§14 导览）的源码必须**就是** §9.5 的不动点。
+    /// 谁把它手改回"看着顺眼"的写法（`pub enum` 挤一行、`#![attr]` 后空一行、`{ }` 带空格），
+    /// 这条就红 —— 它比 CI 里的 `fmt --check examples/tour` 更早，且不依赖构建产物。
+    #[test]
+    fn the_tour_sources_are_the_9_5_fixpoint() {
+        for (path, text) in [
+            (
+                "cmd/runner/main.infy",
+                include_str!("../examples/tour/cmd/runner/main.infy"),
+            ),
+            (
+                "core/build/mod.infy",
+                include_str!("../examples/tour/core/build/mod.infy"),
+            ),
+        ] {
+            let (out, codes) = run(text, path);
+            assert!(codes.is_empty(), "{path}: formatting raised {codes:?}");
+            assert_eq!(
+                out.as_deref(),
+                Some(text),
+                "{path} is not the §9.5 canonical form"
+            );
+        }
+    }
+
     #[test]
     fn empty_file_is_e0090() {
         let (_, codes) = run("", "t/a.infy");

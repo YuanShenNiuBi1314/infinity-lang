@@ -1247,6 +1247,7 @@ mod tests {
             "gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/test_ifbc.c runtime/test_ifbc_stubs.c",
             "gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c runtime/infy_rt.c runtime/test_ifbc.c",
             "cmp stubs.out real.out",
+            "\"$INFY\" fmt --check examples/tour",
             "\"$INFY\" check examples/tour",
             "\"$INFY\" build examples/tour --verify-reproducible",
             "\"$INFY\" artifact info \"$exe\" --nodes",
