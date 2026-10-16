@@ -1083,3 +1083,27 @@ E2 轮（命令行层）落地时定。数据面（分类表、用例格式、�
 `a_filtered_conformance_run_marks_the_unrun_categories_and_offers_no_verdict`,
 `conformance_refuses_misuse_and_golden_updates_by_name`, `conformance_is_no_longer_a_refused_command}`（拒绝名单与 `usage()` 两处都要红，因为拒绝臂和已接线的命令可以共享同一个退出码）。
 
+
+## D-49 §9.6 给了 `[lints]` 的封闭集与 `E-0093`，却没说这条配置在哪个阶段进入诊断、也没说 `E-0093` 该指向何处：本轮把两件事都定成可复现的行为
+
+规范原文只到"只有 `W-`/`N-` 可调（`E-0063` 是唯一例外）；试图降级 `E-`/`R-` ⇒ `E-0093`"。两处空白：
+
+1. **(a) 生效阶段**。`[lints]` 来自 `MODULE.infy.toml`，而清单是阶段 [1] 读的，诊断从 [2] 起产生。
+   裁成 **在 `load_scoped()` 里、清单解析完就写进 `Handler::lint`** —— 于是 `[lints]` 也管得住 [1] 自己
+   （词法阶段的 `W-0001`/`W-0002` 是本轮实测的那条路径）。若留到渲染前才应用，"过滤"与"计数/退出码"
+   会读到两份不同的配置（`Handler::visible()`、`count()`、`strict` 三处都读 `self.lint`）。
+   **改前的事实**：`Loaded::lint()` 会把 `[lints]` 翻成 `LintConfig`，但全仓零调用点，而 `load_scoped()` 里
+   活着的那三行只赋 `strict` ⇒ 清单里的 `[lints]` **被静默忽略**（写 `allow` 不生效、写降级也不报错 = 假成功）。
+2. **(b) `E-0093` 的落点**。它说的是清单里的一行，而清单不是 `Sources` 里的文件、没有 span，规范也没给
+   "配置诊断该打哪个 file/行/列"。裁成 **`Phase::Lex` + file `0` + `1:1`**，与同一处早已存在的
+   `E-0570`（清单读不出来）用同一套坐标；被拒的具体原因进 `note`（`LintConfig::set` 的返回串点名是哪条码）。
+   没有为它新增 `Phase` 变体（§9.2 的渲染表按现有 11 个阶段分列，凭空加一档会让渲染器与 `--diag-json` 都缺一行）。
+3. **(c) 只作用在主 module**。§9.6 的 help 明写"调整只在主 module 生效，不传递给依赖"，因此应用点取
+   `load_scoped()` 读到的**那一份**清单，不去合并依赖清单里的 `[lints]`。
+4. **(d) 降级请求不改变被降级的那条诊断**。`E-0063` 之外的 `E-`/`R-` 条目**只报 `E-0093`**，原意图不生效
+   —— 实现不接受"降级了但没人知道"的中间态，也不因为报了就顺手把该码删掉。
+
+锁点 = `cli::tests::manifest_lints_reach_check_and_a_downgrade_is_refused`（同一份源码三份清单的成对断言：
+无 `[lints]` ⇒ 诊断集恰为 `["W-0002"]` 且 exit `2`；`W-0002 = "allow"` ⇒ 诊断集为空且 exit `0`；
+`E-0101 = "allow"` ⇒ 含 `E-0093` 且 exit `2`）。实测语料（`examples/`、`conformance/cases/`、`runtime/`）
+里没有任何一份清单写过 `[lints]` ⇒ 这条接线不会改动既有用例的期望码。

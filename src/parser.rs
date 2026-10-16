@@ -1216,7 +1216,6 @@ impl<'a> P<'a> {
                 depth += 1;
             }
             if self.at_p(Punct::Gt) {
-                depth -= 1;
                 self.bump();
                 break;
             }
@@ -1484,13 +1483,11 @@ impl<'a> P<'a> {
                 continue;
             }
             if self.at_p(Punct::Gt) {
-                depth -= 1;
                 self.bump();
                 break;
             }
             if self.at_p(Punct::GtEq) {
                 // `>=` closes one level and leaves the `=`; treat as closer only (§3.8 casts)
-                depth -= 1;
                 self.bump();
                 break;
             }
@@ -1672,7 +1669,7 @@ impl<'a> P<'a> {
     /// Can the current token begin an expression? Anything that is not a statement keyword.
     fn starts_expr(&self) -> bool {
         match &self.peek().kind {
-            Kind::Lit(_) | Kind::Lit(Lit::Int(_)) | Kind::Ident(_) | Kind::EmbedLang(_) | Kind::AttrOpen { .. } => true,
+            Kind::Lit(_) | Kind::Ident(_) | Kind::EmbedLang(_) | Kind::AttrOpen { .. } => true,
             Kind::Punct(p) => matches!(p, Punct::LParen | Punct::LBracket | Punct::LBrace | Punct::Amp | Punct::Star | Punct::Bang | Punct::Minus | Punct::Pipe | Punct::At),
             // §3.5 makes return/break/continue/for STATEMENTS, not expressions: they must go
             // through stmt(), otherwise `return Err(..)` inside a block mis-parses.
@@ -2176,7 +2173,7 @@ impl<'a> P<'a> {
                 let sub = if self.eat_p(Punct::At) { Some(Box::new(self.pat_unary())) } else { None };
                 Pat { kind: PatKind::Binding { name, by_ref, mutable, sub }, span: Span::new(self.file, start, self.prev_end()) }
             }
-            Kind::Lit(_) | Kind::Lit(Lit::Int(_)) => self.pat_lit(),
+            Kind::Lit(_) => self.pat_lit(),
             Kind::Ident(_) | Kind::Keyword(Kw::SelfTy) | Kind::Keyword(Kw::SelfVal) => {
                 let mut segs: Vec<String> = Vec::new();
                 if let Some(s) = t.ident() {
@@ -2253,7 +2250,6 @@ impl<'a> P<'a> {
         let t = self.bump();
         let lit = match &t.kind {
             Kind::Lit(l) => l.clone(),
-            Kind::Lit(Lit::Int(i)) => Lit::Int(i.clone()),
             _ => {
                 self.syntax_err(&t, "字面量");
                 return Pat { kind: PatKind::Invalid, span: t.span };
@@ -2532,15 +2528,11 @@ impl<'a> P<'a> {
     fn primary(&mut self, start: u32) -> Option<Expr> {
         let t = self.peek().clone();
         match &t.kind {
+            // Ints also come out as `ExprKind::Lit`; `ExprKind::Int` is only ever built by `derive` (F9).
             Kind::Lit(l) => {
                 let l = l.clone();
                 self.bump();
                 Some(Expr::new(ExprKind::Lit(l), t.span))
-            }
-            Kind::Lit(Lit::Int(i)) => {
-                let i = i.clone();
-                self.bump();
-                Some(Expr::new(ExprKind::Int(i), t.span))
             }
             Kind::Keyword(Kw::True) => {
                 self.bump();

@@ -160,8 +160,6 @@ struct ArmC {
     items: Vec<MItem>,
     expander: Vec<Tree>,
     introduced: Vec<String>,
-    span: Span,
-    file: FileId,
 }
 
 #[derive(Clone, Debug)]
@@ -609,7 +607,7 @@ fn expand_site(
         Some(ItemKind::MacroRules { arms, .. }) => arms.clone(),
         _ => return Outcome::Skip,
     };
-    let compiled: Vec<ArmC> = arms.iter().map(|a| compile_arm(a, def.file)).collect();
+    let compiled: Vec<ArmC> = arms.iter().map(|a| compile_arm(a)).collect();
 
     for (arm_no, arm) in compiled.iter().enumerate() {
         let mut env: Scope = BTreeMap::new();
@@ -782,7 +780,7 @@ fn expand_nested(
     let call_file = site.call_span.file;
     let v = Validator { sources: ctx.sources, file: call_file, anchor: site.call_span };
     for a in &arms {
-        let arm = compile_arm(a, def.file);
+        let arm = compile_arm(a);
         let mut env: Scope = BTreeMap::new();
         if match_seq(&arm.items, input, 0, &mut env, &v) == Some(input.len()) {
             let exp_id = ctx.next_expansion_id;
@@ -808,7 +806,7 @@ fn unwrap_outer_brace(out: &mut Vec<Tree>) {
 
 // ---------------------------------------------------------------- matcher compilation
 
-fn compile_arm(a: &crate::ast::MacroArm, file: FileId) -> ArmC {
+fn compile_arm(a: &crate::ast::MacroArm) -> ArmC {
     // §3.9: `macro_matcher = "$(" macro_pat ")"` — the parser stores the whole matcher as one
     // parenthesised group; accept a bare sequence too.
     let matcher_trees: Vec<Tree> = match a.matcher.as_slice() {
@@ -819,7 +817,7 @@ fn compile_arm(a: &crate::ast::MacroArm, file: FileId) -> ArmC {
     let mut introduced = collect_introduced(&a.expander);
     introduced.sort();
     introduced.dedup();
-    ArmC { items, expander: a.expander.clone(), introduced, span: a.span, file }
+    ArmC { items, expander: a.expander.clone(), introduced }
 }
 
 fn compile_matcher(trees: &[Tree]) -> Vec<MItem> {

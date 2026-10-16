@@ -2344,7 +2344,6 @@ pub fn build_token_tree(toks: &[Tok]) -> (Vec<Tree>, usize) {
     #[derive(Clone)]
     struct Frame {
         delim: Delim,
-        expect: Punct,
         children: Vec<Tree>,
         open: Span,
     }
@@ -2354,10 +2353,9 @@ pub fn build_token_tree(toks: &[Tok]) -> (Vec<Tree>, usize) {
 
     for (idx, t) in toks.iter().enumerate() {
         consumed = idx + 1;
-        if let Some((d, expect)) = open_delim(&t.kind) {
+        if let Some((d, _)) = open_delim(&t.kind) {
             frames.push(Frame {
                 delim: d,
-                expect,
                 children: Vec::new(),
                 open: t.span,
             });

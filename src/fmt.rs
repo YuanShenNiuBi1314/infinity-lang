@@ -60,10 +60,10 @@
 
 use crate::ast::*;
 use crate::diag::{Diagnostic, Handler, Phase};
-use crate::lexer::{self, Lexed};
+use crate::lexer;
 use crate::parser;
 use crate::span::{FileId, SourceFile, Sources, Span};
-use crate::token::{Comment, CommentKind, Delim, Kind, Lit, Punct, Tok, Tree, Kw};
+use crate::token::{Comment, CommentKind, Delim, Kind, Lit, Punct, Tok, Tree};
 
 // --------------------------------------------------------------------------------------------
 // §9.5 rule 1 + rule 14: options. There is no other configuration surface.
@@ -525,7 +525,6 @@ fn is_extended_pictographic(c: char) -> bool {
             | 0x1FA70..=0x1FAFF
             | 0x2600..=0x26FF
             | 0x2700..=0x27BF
-            | 0x1F3FB..=0x1F3FF
     )
 }
 
@@ -631,25 +630,6 @@ pub fn display_width(s: &str) -> usize {
         cols += w;
     }
     cols
-}
-
-/// §9.5 rule 2: tabs are never emitted; for width arithmetic an input tab advances to the next
-/// multiple of 4 (only relevant while measuring the *input*).
-fn expand_tabs_for_width(s: &str, mut col: usize) -> (usize, String) {
-    let mut out = String::new();
-    for c in s.chars() {
-        if c == '\t' {
-            let pad = 4 - (col % 4);
-            col += pad;
-            for _ in 0..pad {
-                out.push(' ');
-            }
-        } else {
-            col += base_columns(c);
-            out.push(c);
-        }
-    }
-    (col, out)
 }
 
 // --------------------------------------------------------------------------------------------
@@ -987,25 +967,6 @@ impl Pool {
     fn take_before(&mut self, off: u32) -> Vec<usize> {
         self.take_in(0, off)
     }
-
-    fn take_rest(&mut self) -> Vec<usize> {
-        let mut out = Vec::new();
-        for i in 0..self.items.len() {
-            if self.claimed[i] || self.in_consumed(self.items[i].start) {
-                continue;
-            }
-            self.claimed[i] = true;
-            out.push(i);
-        }
-        out
-    }
-
-    /// The byte offset where the next comment (that still has to be emitted) begins.
-    fn next_start(&self) -> Option<u32> {
-        (0..self.items.len())
-            .find(|&i| !self.claimed[i] && !self.in_consumed(self.items[i].start))
-            .map(|i| self.items[i].start)
-    }
 }
 
 /// True when only spaces/tabs precede `off` on its line.
@@ -1075,7 +1036,6 @@ pub struct Printer<'a> {
     next_mark: u32,
     /// Output offsets, filled by [`Printer::print_file`].
     offsets: Vec<(u32, usize)>,
-    unsafe_blocks: Vec<Span>,
     comment_lines: Vec<(u32, u32, u32)>,
 }
 
@@ -1094,7 +1054,6 @@ impl<'a> Printer<'a> {
             marks: Vec::new(),
             next_mark: 1,
             offsets: Vec::new(),
-            unsafe_blocks: Vec::new(),
             comment_lines: Vec::new(),
         }
     }
@@ -2434,7 +2393,7 @@ impl<'a> Printer<'a> {
                 v.push(self.expr_doc(expr, 14));
                 Doc::Cat(v)
             }
-            ExprKind::Binary { op, lhs, rhs } => self.binary_doc(e, *op, lhs, rhs),
+            ExprKind::Binary { op, lhs, rhs } => self.binary_doc(*op, lhs, rhs),
             ExprKind::Assign { target, op, value } => {
                 let mut v = vec![self.expr_doc(target, 3)];
                 v.push(Doc::Text(format!(" {}", punct_text(*op))));
@@ -2657,7 +2616,6 @@ impl<'a> Printer<'a> {
                 v.push(Doc::Text("]".to_string()));
                 Doc::Cat(v)
             }
-            Seg::Try => Doc::Text("?".to_string()),
             Seg::Glue(t) => Doc::Text(t),
             Seg::Leaf(_) => Doc::Nil,
         }
@@ -2677,24 +2635,6 @@ impl<'a> Printer<'a> {
             })
             .collect();
         delimited("(", ds, ")", INDENT, false)
-    }
-
-    fn call_doc(&mut self, e: &Expr, callee: &Expr, args: &[CallArg]) -> Doc {
-        let _ = e;
-        if matches!(callee.kind, ExprKind::Method { .. } | ExprKind::Call { .. } | ExprKind::Field { .. } | ExprKind::Index { .. }) {
-            return self.chain_doc(callee, false);
-        }
-        let mut v: Vec<Doc> = Vec::new();
-        let head = self.expr_doc(callee, 16);
-        // `path::<T>(args)`: the parser drops the turbofish arguments from the AST, so their source
-        // bytes are re-emitted verbatim (they would otherwise silently disappear, §9.5 rule 9).
-        let tail = self.turbofish_between(callee.span);
-        v.push(head);
-        if !tail.is_empty() {
-            v.push(Doc::Text(tail));
-        }
-        v.push(self.args_doc(args));
-        Doc::Cat(v)
     }
 
     /// The value text of every embed argument, taken from the `( … )` region of the source so that
@@ -2813,7 +2753,7 @@ impl<'a> Printer<'a> {
 
     /// §9.5 rules 3/4: same-precedence operators collapse into one breakable run, always with the
     /// operator at the end of the line (§2.11's trailing-operator normalisation).
-    fn binary_doc(&mut self, e: &Expr, op: Punct, lhs: &Expr, rhs: &Expr) -> Doc {
+    fn binary_doc(&mut self, op: Punct, lhs: &Expr, rhs: &Expr) -> Doc {
         let (prec, _right) = binop_prec(op).unwrap_or((12, false));
         let mut operands: Vec<&Expr> = Vec::new();
         collect_binary(lhs, op, prec, &mut operands);
@@ -2909,7 +2849,6 @@ enum Seg<'x> {
     Field(FieldName),
     Index(Box<Expr>),
     /// `?` — glued to the segment it belongs to (§9.5 rule 3).
-    Try,
     Glue(String),
     /// A link that must not start a line on its own; it is appended to the previous segment.
     #[allow(dead_code)]

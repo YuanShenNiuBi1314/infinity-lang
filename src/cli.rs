@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{ItemKind, ParsedFile};
+use crate::ast::ParsedFile;
 use crate::diag::{Diagnostic, Handler, LintConfig, Phase};
 use crate::span::Position;
 use crate::span::{FileId, Sources};
@@ -51,7 +51,6 @@ static RUN_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new
 pub fn run(args: &[String]) -> i32 {
     let argv: Vec<String> = args.iter().skip(1).cloned().collect();
     let cmd = argv.first().map(|s| s.as_str()).unwrap_or("--help");
-    let rest = &argv[argv.len().saturating_sub(argv.len())..];
     let rest: Vec<String> = if argv.is_empty() { Vec::new() } else { argv[1..].to_vec() };
     let _ = rest;
     let flag = |name: &str| rest.contains(&name.to_string());
@@ -149,16 +148,20 @@ pub struct Loaded {
     pub handler: Handler,
 }
 
-impl Loaded {
-    fn lint(&self) -> LintConfig {
-        let mut lint = LintConfig { strict: matches!(self.manifest.profile.diagnostic_level, crate::pkg::DiagLevel::Strict), ..Default::default() };
-        for (code, level) in &self.manifest.lints {
-            if let Some(msg) = lint.set(code, level) {
-                let _ = msg; // reported by check() as E-0093
-            }
+/// §9.6: `[lints]` may adjust only `W-`/`N-` (plus the `E-0063` exception the spec names). An entry
+/// that tries to downgrade `E-`/`R-` is not dropped silently — `LintConfig::set` hands back the
+/// reason, which [`lint_config`] collects into `rejected` for the caller to emit as `E-0093`.
+fn lint_config(base: LintConfig, manifest: &pkg::Manifest) -> LintConfig {
+    let mut lint = LintConfig {
+        strict: matches!(manifest.profile.diagnostic_level, crate::pkg::DiagLevel::Strict),
+        ..base
+    };
+    for (code, level) in &manifest.lints {
+        if let Some(msg) = lint.set(code, level) {
+            lint.rejected.push(msg);
         }
-        lint
     }
+    lint
 }
 
 /// Walk up from `path` looking for `MODULE.infy.toml` (§5.1: a module is the directory tree that
@@ -278,8 +281,12 @@ pub fn load_scoped(root: &Path, handler: &mut Handler, scope: &Scope, triple: &s
             files.insert(id, pf);
         }
     }
-    let mut lint = handler.lint.clone();
-    lint.strict = matches!(manifest.profile.diagnostic_level, crate::pkg::DiagLevel::Strict);
+    let lint = lint_config(handler.lint.clone(), &manifest);
+    for msg in &lint.rejected {
+        handler.emit(
+            Diagnostic::new("E-0093", Phase::Lex, 0, Position { line: 1, column: 1 }).note(msg.clone()),
+        );
+    }
     handler.lint = lint;
     Some(Loaded { root: root.to_path_buf(), manifest, sources, files, file_pkg, scope: *scope, embed_images: Vec::new(), handler: std::mem::take(handler) })
 }
@@ -1710,7 +1717,7 @@ fn expand_cmd(positional: &[String], only_macro: Option<String>, stage: Option<S
         }
     };
     let mut handler = Handler::default();
-    let mut l = match load(&root, &mut handler) {
+    let l = match load(&root, &mut handler) {
         Some(l) => l,
         None => return exit::DIAGNOSED,
     };
@@ -2998,6 +3005,32 @@ mod tests {
         .expect("manifest");
         std::fs::write(dir.join("core").join("embed").join("mod.infy"), src).expect("source");
         dir
+    }
+
+    /// §9.6: `[lints]` is not decorative. `W-0002` (missing trailing LF, §2.1) is the smallest
+    /// warning a module can produce, so one source under three manifests pins both halves of the
+    /// rule: an adjustable entry reaches the handler, and an entry that tries to downgrade an `E-`
+    /// is refused out loud as `E-0093` instead of being dropped.
+    #[test]
+    fn manifest_lints_reach_check_and_a_downgrade_is_refused() {
+        let src = "#![infy_version = \"2.0\"]\n\npackage embed\n\nfn main() { }\n";
+        let no_final_lf = src.trim_end_matches('\n');
+        let plain_dir = scratch_module("cli-lints-plain", "", no_final_lf);
+        let allow_dir = scratch_module("cli-lints-allow", "[lints]\nW-0002 = \"allow\"\n", no_final_lf);
+        let plain = check_verdict(&plain_dir, &Scope::default()).expect("module loads");
+        let allowed = check_verdict(&allow_dir, &Scope::default()).expect("module loads");
+        assert_eq!(plain.codes, vec!["W-0002".to_string()], "无 `[lints]`：只有缺尾换行这一条");
+        assert_eq!(plain.exit, exit::DIAGNOSED);
+        assert!(allowed.codes.is_empty(), "`allow` 必须真的压住它：{:?}", allowed.codes);
+        assert_eq!(allowed.exit, exit::OK, "压住唯一一条警告后应当通过");
+
+        let refuse_dir = scratch_module("cli-lints-downgrade", "[lints]\nE-0101 = \"allow\"\n", src);
+        let refused = check_verdict(&refuse_dir, &Scope::default()).expect("module loads");
+        assert!(refused.codes.contains(&"E-0093".to_string()), "试图降级 `E-` 必须显式报 E-0093：{:?}", refused.codes);
+        assert_eq!(refused.exit, exit::DIAGNOSED, "E-0093 是 E 级，不许静默通过");
+        for d in [&plain_dir, &allow_dir, &refuse_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 
     /// §7.1's stage note: `infy check` runs [6a], so a module with a `@py` unit gets its IFBC image

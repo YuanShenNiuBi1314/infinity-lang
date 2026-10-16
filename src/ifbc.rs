@@ -1135,8 +1135,9 @@ impl Op {
     }
 
     /// `(pops, pushes)` for the stack-height validation (§7.8.3 item 2), for the instructions whose
-    /// effect is opcode-implied. Table-dependent instructions (`call.*`, `new.list`, `new.dict`,
-    /// `closure.new`) are resolved by the verifier from the tables — see `effect`.
+    /// effect is opcode-implied. Count- or table-dependent instructions (`call.*`, `new.list`,
+    /// `new.tuple`, `new.set`, `new.dict`, `closure.new`) are resolved from the operands by the
+    /// verifier — see `effect`; the `(0, 0)` they get here is a placeholder no caller reads.
     pub fn stack_effect(self) -> (usize, usize) {
         use Op::*;
         match self {
@@ -1148,7 +1149,7 @@ impl Op {
             Switch => (1, 0),
             Ldl | Ldw | Push | PushB | LdNull | Ldg | SeqLen | NewStr | NewFrame | TypeOfIdx
             | SizeOf | AlignOf | FieldOff | DynTruthy => (0, 1),
-            Stl | Stg | Pop | MoveOut | NewTuple | NewSet => (1, 0),
+            Stl | Stg | Pop | MoveOut => (1, 0),
             Dup => (1, 2),
             Dup2 => (2, 4),
             Swap => (2, 2),

@@ -821,8 +821,22 @@
       **验收只能验到「命令 + 文件 + 远端是否登记」**：远端那次 run 的实际结论只认 `gh api …/actions/runs` 的回查，写在紧随其后的
       RUNLOG `cron-23-push` 行里；本机量不到 runner 镜像装了什么（`github/runner-images` 在本机 API 返 404），
       所以 `gcc` 与 Python 3.14 两条都做成「缺了就红并打 PATH」而不是「缺了就跳」。
-- [ ] F2 消 40 条编译告警（unused/dead code），每轮清一批，`cargo check` 输出为 0 warning 时勾掉。
+- [x] F2 消 40 条编译告警（unused/dead code），每轮清一批，`cargo check` 输出为 0 warning 时勾掉。
+      **F2 轮（2026-10-16）一次清零**：口径 `cargo check --offline --lib --message-format=short`（先 `touch src/lib.rs`）
+      实测 **50 → 0**、0 error；**没有用 `#[allow(...)]` 消数**，也没新增。形状分解与逐条去处见 `docs/status.md` 的 F2 一节、
+      对外行 = `docs/coverage.md` **P2**。两处判成「没接上」的都接上了：§9.6 的 `[lints]`（裁定 = 偏差 **D-49**，
+      成对断言的测试 1 条）与 wheel 归档的成员偏移（`lho` → `ZipEntry.data_off`，测试 1 条 + **负对照实测**：
+      把 `data_off` 改回写死 0 该测试即红）。基线换为 `cargo test --offline --lib` **529 passed / 0 failed**
+      （+2 = `cli` 38→**39**、`btrack` 30→**31**）、`cargo test --offline` 全目标 exit 0（529 / bin 0 / doc 0）、
+      `cargo build --offline --release` exit 0（22.5s）、`infy check|build|run|test examples/tour` 全 exit 0、
+      `--verify-reproducible` exit 0（199975 == 199975）、C11 仍 12513 字节 / 产物仍 199975 字节 /
+      `build-id 4d8250b5…55ba` 逐字节不变、C 侧四条链复跑未变（两份 `-c` 各 0 告警、rt 32335/0、IFBC 两条链 180/180 + `cmp` 无差异）、
+      `infy conformance --report` 仍 exit 1（83 = 77/0/6 · 92.8%）、`fmt --check` 仍 exit 2（F6）。
+      **F2 的口径只覆盖 `--lib`**：release 构建与 bin 目标的告警未逐条清理（本轮改动不涉及它们的源代码形状）。
 - [ ] F3 把 `push*.log`/`rt_tests`/`ifbc_tests` 等一次性产物加进 `.gitignore`，仓库里只留 `docs/RUNLOG.md` 这一份审计线。
+      **F2 轮顺手做掉的一项**：删掉被跟踪的 `src/fmt.rs.tmp`（3984 行的旧 `fmt.rs` 快照，`418a34c` 起入库、
+      cargo 不编译它、无人引用，与 `src/fmt.rs` 已差 1382 行）。**仍未做** = `.gitignore` 里没有 `*.tmp`/`*.log`
+      这一族（现只有 `push.log` 一条），一次性输出二进制仍靠手工不落库。
 - [ ] F4 `infy lsp`、`std.net` TLS、`dyn Trait` vtable 偏移表：要么实现，要么在 `docs/spec-deviations.md` 里保持"明确未实现"的记录，不许静默。
 - [ ] F5 `infy fmt` / `infy expand` 的目录参数与 `infy check` 不一致（A3 实测）：
       `infy fmt --check examples/tour` → `error: 无法读取 examples/tour: 拒绝访问。 (os error 5)`（把目录当文件读），
@@ -850,12 +864,15 @@
       再给 `test_rt.c` 加一对断言：深度 8 的调用 panic 被捕获后，下一次正常 `infy_host_call_event` 必须成功返回而不是 `R-0902`。
       同类风险请一并核：`infy_tls_unwinding`（`drain_scope`/`scope_end_common` 里 1→0 的赋值若被 panic 打断同样悬挂）。
 
-- [ ] F9 **`parser::primary()` 的 `Kind::Lit(Lit::Int(i))` 臂永不可达**（C1 轮定位，未改）：
-      它排在 `Kind::Lit(l)` 之后，而后者匹配所有字面量，于是 `ExprKind::Int(IntLit)` 这一形状**在全树从不产生**。
-      后果是凡只匹配 `ExprKind::Int` 的代码都是死代码 —— `variant()` 那条已由 C1 修掉（`A = 3` 曾静默丢判别式），
-      但 `ast::Attr::int_arg()`（`#[link(name = "…", ordinal = 3)]` 一类）、`cli.rs` 与 `sema.rs` 里的
-      `ExprKind::Int` 判据仍需逐条审计：要么改成双形状匹配，要么删掉死臂让 `primary` 先匹配 `Lit::Int`。
-      验收：`grep -n "ExprKind::Int" src/*.rs` 的每一处都有测试证明它可达（或已删除），`primary` 的臂顺序有回归测试。
+- [ ] F9 **`ExprKind::Int(IntLit)` 这一形状从不由 parser 产生**（C1 轮定位；**死臂本身已由 F2 轮删除**）：
+      `parser::primary()` 原先在 `Kind::Lit(l)`（匹配所有字面量）之后还挂着一条 `Kind::Lit(Lit::Int(i))` 臂，永不可达
+      ⇒ 整数永远以 `ExprKind::Lit(Lit::Int(..))` 进 AST。F2 轮删掉了那条死臂并在原地留一行注释
+      （`ExprKind::Int` 的唯一产地是 `derive`：`derive.rs:235`/`1595` 现造整数节点），同族的
+      `parser.rs:1675/2179/2256` 三处重复臂一并清掉。**仍未做**：凡**只**匹配 `ExprKind::Int` 的判据现在只靠
+      `derive` 才可达，而 `derive` 不产的场景（例如 `#[link(name = "…", ordinal = 3)]` 那类属性参数走的是
+      `Attr::int_arg`）是否可达仍需逐条审 —— `ast::Attr::int_arg()`、`cli.rs` 与 `sema.rs` 里的 `ExprKind::Int`
+      判据在名单内。验收：`grep -n "ExprKind::Int" src/*.rs` 的每一处都有测试证明它可达（或已删除），
+      且 `primary` 的臂顺序有回归测试（F2 轮**没有**新增"整数字面量 = `ExprKind::Lit`"这条锁，仍欠）。
 
 - [ ] F10 **`sema` 收集枚举判别式时 `u128 as u64` 截断**（C1 轮定位，未改）：
       `Variant.disc` 是 `Option<u128>`，`sema.rs:616` 直接 `as u64`，所以宽于 `u64` 的字面量**先回绕**才交给 HIR，
@@ -1133,16 +1150,25 @@
       验收：把黑名单落成仓库内文件（并在 §10 的 std 表 + `stdlib.rs` 的导出符号上真跑一次），
       加 `infy conformance` 的一档或 `infy check` 的一条诊断，再为该分类补正反用例。
 
+- [ ] F39 **§9.5 第 2 条的「输入 tab 参与宽度测量」这一半没接**（F2 轮删死码时确认，未实现）：
+      `src/fmt.rs` 里那个 `expand_tabs_for_width()`（输入 tab 进位到 4 的倍数、只为测量而存在）**从未被调用**，
+      F2 轮把它删了而不是接通 —— 因为接通它要先回答一个规范没答的问题：§9.5 的 100/120/40 三档宽度是
+      **输出**列数，而同一条规则的前半禁止输出里出现 tab，于是「含 tab 的注释按几列参与断行」没有金样可依。
+      现状 = 宽度一律按 `base_columns()` 逐码点算，tab 按 1 列计。
+      认法：`grep -rn "	" examples/ conformance/cases/` 为空 ⇒ 这条今天不可测，**别**为它编造期望。
+      验收：先决定「含 tab 的注释按几列」并把裁定写成本文件的偏差条目，再让测量走那条规则并配正反例。
+
 ## 2. 当前指针
 
-> **下一轮第一件事：先补推 `toolchain`（现算欠账 2 = `ae2c58e` + 本轮做账提交），再用 `gh api …/actions/runs?branch=toolchain` 回查 F1 那条 workflow 有没有被创建/需不需要手动批准** ⇒ 做到了才把 F1 勾 `[x]`；红了就按「runner 供给」逐条判（`gcc`/CPython 3.14），照实记结论。之后就做 §1 的第一个 `[ ]` = **F2 —— 消那 50 条编译告警**（F2 自己写明「`cargo check` 输出为 0 warning 时勾掉」）。
+> **下一轮第一件事：先补推 `toolchain`**（F2 轮两次推送全败，远端仍停在 `6fceaa5` ⇒ 欠账只认 `gh api` 回查现算，别抄固定数），再用 `gh api …/actions/runs?branch=toolchain` 回查 F1 那条 workflow 有没有被创建、需不需要手动批准 ⇒ 做到了才把 F1 勾 `[x]`；红了就按「runner 供给」逐条判（`gcc` 在不在 PATH、`setup-python` 缓存里有没有 CPython 3.14），照实记结论。之后就做 §1 的第一个 `[ ]` = **F3**（`.gitignore` 那一族；`src/fmt.rs.tmp` 已由 F2 轮删掉）。
 > **F1 轮（2026-10-16）= 落地但仍未勾 `[ ]`**（远端回查没做到）：`.github/workflows/ci.yml` 落成 = `cargo build --offline --release` + `cargo test --offline` + `-Wall -Wextra` 的 C 侧编译自检（stderr 非空即红）+ rt/IFBC 两份 harness（IFBC 两条链 + `cmp`）+ tour 端到端 9 个 run 段，全部在本地按 GitHub 的执行方式逐步 exit 0；`conformance` **14 → 17** 把 yaml 的命令覆盖面、四个重写夹具的开关、Windows-only 与两条防假红守卫钉住。基线 **527 passed / 0 failed**、check **0 error / 50 warning**（只报不门禁）、`infy conformance --report` 仍 83 = Pass 77 / Fail 0 / Blocked 6 ⇒ **exit 1**、`fmt --check` 仍 **exit 2**（F6 未裁决）。证据 = `docs/coverage.md` **P30** 与 `docs/status.md` 的 F1 一节；远端 run 的结论只认 RUNLOG `cron-23-push` 行的 `gh api` 回查。
 > **E3 轮（2026-10-16）已勾 `[x]`**：§12 逐分类通过率落进 `docs/coverage.md` **§6**（20 行 × 11 列 + 三档小计 + 合计 + 缺口三分类）与 README 的「距 §12 的 100% 还差哪些类」，副本配了逐格回核 + 红线机检 ⇒ `conformance` **11 → 14**、基线 **524 passed / 0 failed**、`cargo check` **0 error / 50 warning**（HEAD 全量重检的告警**集合**与工作树逐条 `diff` 相同）、`infy conformance --report` 的数字**一字未变**（83 = Pass 77 / Fail 0 / Blocked 6 · 92.8% · 覆盖 83/2300 ⇒ exit 1）。证据提交 `008bd93`。
-> F2 的接手要点（四条都不用重新审计，本轮刚量过）：
-> (1) **50 条里有 20 条是 `unreachable pattern`** ⇒ 这不是工程卫生，是 **F9 那一族**（永不执行的臂）。位置 = `src/borrow.rs:436`（**同一条长行上 11 个臂**）· `src/parser.rs:1675/2179/2256/2540` · `src/ifbc.rs:1166`（两条）· `src/btrack.rs:1406` · `src/fmt.rs:528` · `src/pkg.rs:837`。逐条要么删臂、要么承认**上游判据写错**（parser 那四处按 F9 的结论就是 `ExprKind::Int` 从不产生 ⇒ 死臂该删，但 `Attr::int_arg()` 这类**只匹配它**的判据要先审）。**不许**用 `#[allow(unreachable_patterns)]` 消数：那是把 F2 变成「看起来 0 告警」。
-> (2) 其余 30 条的形状：unused imports 6（`ImportKind`/`Instr`/`Sources`/`Read`/`Lexed`/`Kw`/`ItemKind`）· unused variables 6（`rest`/`name`/`lho`/`idx`/`file`/`e`）· never-used fn/method（`take_rest`/`next_start`/`lint`/`call_doc`/`intern_list`/`expand_tabs_for_width`）· never constructed variants 2（`Try`、`None`）· `value assigned to depth is never read` 3 · `does not need to be mutable` 2 · never read fields 若干（`ArmC.span`/`file`、`Checker.negated_child`、`Lexed.expect`）。按文件 = `borrow` 11 · `fmt` 9 · `btrack` 9 · `parser` 7 · `cli` 4 · `sema` 3 · `ifbc` 2 · `span`/`pkg`/`macro_expand`/`lexer`/`derive` 各 1。
-> (3) **测量口径只认** `cargo check --offline --lib --message-format=short 2>&1 | grep -c ': warning:'`（现在 = 50）。**别**用 `grep -c warning`：那句 `generated 50 warnings` 的总结也会被数进去 ⇒ 51（D3 轮踩过）。改完判断「未新增」仍按**告警集合逐条 `diff`**（`git archive HEAD` 解到 `target/scratch/basecheck` 全量重检）—— 单看数字会被「消一条又造一条」骗过。缓存会让 `cargo check` 一个字都不打，所以量之前 `touch src/lib.rs`。
-> (4) **删之前先分清「没用」与「没接上」**：`codes.rs` 的码表、`host.rs`/`doc.rs` 的 1 行占位、`hir::HirFn::signature_text`（D3 轮前零调用点，现在是包装哈希的输入）都属后者 ⇒ 认法见经验库 `infy-unreachable-implementation-branch`。同批还挂着一处入口顺序问题：`codegen::emit_driver` 在 `chains.is_empty()` 时直接 `return 1;`，而 `HirEntry::Main` 那条分支在它**后面**（D3 轮记的，本轮没动）。告警数一变要同步的地方 = `docs/coverage.md` P2、`docs/status.md` 的计数块、README 那一行、F2 自己（CI 从 F1 起会把数打出来）。
+> **F2 轮（2026-10-16）已勾 `[x]`**：`cargo check --offline --lib` 的告警 **50 → 0**（0 error，未用 `#[allow(...)]` 消数、未新增），基线换为 **529 passed / 0 failed**（+2 = `cli` 39、`btrack` 31）。逐条去处 = `docs/status.md` 的 F2 一节，对外行 = `docs/coverage.md` **P1/P2/P30**；两处判成「没接上」的已接线 = 偏差 **D-49**（§9.6 的 `[lints]`）与 `btrack` 的 ZIP 成员偏移（`lho` → `data_off`，带**负对照实测**）。
+> F2 轮留下的**新欠账**（四条都量过，不用重审）：
+> (1) **F2 的口径只覆盖 `--lib`** —— `cargo build --offline --release` 与 bin 目标里若另有告警，本轮没逐条清（release 构建本身 exit 0）。
+> (2) **`primary` 的臂顺序仍无回归锁** —— 死臂删了，但「整数字面量 = `ExprKind::Lit(Lit::Int)`」这句话今天没有测试钉住（= F9 验收的第二半）。
+> (3) **§9.5 第 2 条的 tab 测量半边** = 新登记 **F39**（删掉的 `expand_tabs_for_width` 是它的残骸，不是它的实现）。
+> (4) 一处入口顺序问题仍未动：`codegen::emit_driver` 在 `chains.is_empty()` 时直接 `return 1;`，而 `HirEntry::Main` 那条分支在它**后面**（D3 轮记的）。
 > **E3 轮的现成件（别再造）**：`docs/coverage.md` §6 = 逐分类数字的对外副本（§1 的证据命令表仍按 P 编号引用）；`conformance::tests` 的三条文档回核/红线测试 = CI 该跑的红线看门狗；E2 的 `cli::NOT_IMPLEMENTED` / `conformance_report_text` / `conformance_exit` 不变；跑用例集的三条测试共用 `CORPUS_SERIAL` 锁（`run_case` 的 scratch 目录只按用例 id 命名，同进程并发会互删 module，现场症状是**语义码** `E-0600` 而不是文件锁错误）。
 > **E2 轮（2026-10-16）已勾 `[x]`**：`infy conformance --report` 接进 `cli.rs`，实测 20 行逐分类 + 三档小计 + 合计 ⇒ **exit 1**（裁定 = 偏差 **D-48 (a)–(g)**）。
 > **E2 轮新增的常驻面（别再造）**：`cli::NOT_IMPLEMENTED`（拒绝臂名单常量，`conformance_is_no_longer_a_refused_command` 钉它

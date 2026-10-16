@@ -609,7 +609,6 @@ pub struct PackageCtx {
 }
 
 struct DeclInfo {
-    is_enum: bool,
     derives: Vec<String>,
 }
 
@@ -621,8 +620,7 @@ impl PackageCtx {
             for item in &pf.items {
                 match &item.kind {
                     ItemKind::Struct { name, .. } | ItemKind::Enum { name, .. } => {
-                        let is_enum = matches!(item.kind, ItemKind::Enum { .. });
-                        decls.entry(name.clone()).or_insert(DeclInfo { is_enum, derives: derive_list(item) });
+                        decls.entry(name.clone()).or_insert(DeclInfo { derives: derive_list(item) });
                     }
                     ItemKind::Impl { trait_: Some(tr), self_ty, .. }
                         if tr.last().map(|s| s.as_str()) == Some("Drop") =>

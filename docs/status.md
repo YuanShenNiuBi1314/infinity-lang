@@ -36,9 +36,9 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 527 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 529 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
-Finished `dev` profile  (50 warnings，全部为 unused/dead code，见 BACKLOG F2；D4(1) 清掉一处死字段；E1/E2/E3 轮未新增——E2 轮改动前后的告警**集合**逐条 diff 相同；E3 轮只加了三条 `#[cfg(test)]` 测试、一处 `pub(crate)` 与一把用例集串行锁；F1 轮 +3 条 CI 回核测试，并把那把锁从 `mod tests` 挪进 `run_case`（`SCRATCH_SERIAL`，见下文 F1 一节）)
+Finished `dev` profile  (0 warnings —— F2 轮把 50 条一次清零：20 条 `unreachable pattern`、6 条 unused import、6 条 unused variable、3 条 `depth` 赋值不读、2 条多余 `mut`、2 条 never-constructed 变体、11 条 never-used fn/method/field；**没有用 `#[allow(...)]` 消数**，其中两处是「没接上」而非「没用」，见下文 F2 一节。口径 = `cargo check --offline --lib --message-format=short` 先 `touch src/lib.rs` 再计数；上一档 50 = F1 轮，51 → 50 = D4(1) 轮删掉 `CodeBuilder.bounds`)
 $ infy check examples/tour
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)   # exit 0
 $ infy build examples/tour
@@ -132,13 +132,13 @@ $ infy conformance --update-golden                 # §12.4 要求显式授权�
 error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权（`--i-know-this-is-breaking`），因为改动黄金文件等于改语义。
 ```
 
-527 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 527；F1 轮实测）：
-`lexer` 79 · `derive` 57 · `fmt` 39 · `cli` **38**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → **E2 轮 38**） ·
-`macro_expand` 35 · `btrack` **30**（D1(1) 前是 0，D1(2) 轮 23 → 30） ·
+529 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 529；F2 轮实测）：
+`lexer` 79 · `derive` 57 · `fmt` 39 · `cli` **39**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → **F2 轮 39** = §9.6 `[lints]` 的成对断言） ·
+`macro_expand` 35 · `btrack` **31**（D1(1) 前是 0，D1(2) 轮 23 → 30，**F2 轮 +1** = wheel 归档里每个成员按自己的 local header 偏移取数据） ·
 `atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **26**（D3 轮 22 → 26） · `pkg` 24 · `sema` 22 ·
 `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` 20 · `artifact` 18 ·
 `toml` 15 · `borrow` 15 · `sha256` 12 · `conformance` **17**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫） · `codes` 9 ·
-`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = 527。
+`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = 529。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -1266,3 +1266,65 @@ remedy 是备解释器，不是放宽断言）⇒ yaml 用官方 `actions/setup-
 runner 镜像里到底有没有 `gcc`、`setup-python` 的缓存里有没有 3.14，都是**本轮无法在本机测量的事实**
 （`windows-latest` 映射到哪张镜像、镜像装了什么的仓库 `github/runner-images` 在本机 API 返回 404），
 yaml 因此把两者都做成"缺了就红并打 PATH"而不是"缺了就跳"。
+
+## F2 轮（2026-10-16）：`cargo check --offline --lib` 的 50 条告警一次清零，其中两条是「没接上」
+
+**口径**：`touch src/lib.rs` 后 `cargo check --offline --lib --message-format=short`，计数 = 冒号 warning 的行数
+（`grep -c warning` 会把"generated 50 warnings"那句总结也数进去）。开工 50 → 收尾 **0**，0 error。
+**没有用 `#[allow(...)]` 消数**（仓库里既有的两处 `#[allow(dead_code)]` 未动，也不新增）。
+
+**按形状分掉的 50 条**：20 条 `unreachable pattern`（`borrow.rs:436` 一行里 11 条重复臂，437 又重复
+`NestedItem`；`parser.rs` 4 条 = 1675/2179/2256 的 `Kind::Lit(Lit::Int(_))` 重复 + **2540 就是 F9 那条死臂**；
+`ifbc.rs:1166`×2、`btrack.rs:1406`、`fmt.rs:528`、`pkg.rs:837`）· 6 条 unused import · 6 条 unused variable ·
+3 条 `depth` 赋值不读（`parser.rs:1219/1487/1493`，三处都是 `depth -= 1; bump(); break;`， break 之后不再读）·
+2 条多余 `mut` · 2 条 never-constructed 变体（`btrack::Selected::None`、`fmt::Seg::Try`）·
+11 条 never-used fn/method/field（`intern_list`、`expand_tabs_for_width`、`call_doc`、`take_rest`/`next_start`、
+`cli::lint`、字段 `saved`/`is_enum`/`unsafe_blocks`/`expect`/`span`+`file`/`negated_child`）。
+
+**两条判成「没接上」而不是「没用」的，本轮接上了**：
+
+1. **§9.6 的 `[lints]` 此前被静默忽略**。`pkg.rs` 把 `[lints]` 解析进 `Manifest::lints`，`Loaded::lint()`
+   会把它翻成 `LintConfig`，但**全仓零调用点**，而 `load_scoped()` 里那段"活的"代码只赋了 `strict` 一个字段。
+   ⇒ 清单里写 `W-0002 = "allow"` 完全不生效，写 `E-0101 = "allow"`（§9.6 明令拒绝的降级）也不报错 = 假成功。
+   **改法**：`Loaded::lint()` → `cli::lint_config(base, &manifest)`，在 `load_scoped()` 里真调用；
+   `LintConfig::set` 退回的理由进 `rejected`，每条发一条 `E-0093`（`Phase::Lex`、file 0、1:1 —— §9.6 没说这条
+   诊断该指哪，裁定记偏差 **D-49**）。测试 `cli::tests::manifest_lints_reach_check_and_a_downgrade_is_refused`
+   是**同一份源码三份清单的成对断言**：无 `[lints]` ⇒ 诊断集恰为 `["W-0002"]` 且 exit 2；
+   `W-0002 = "allow"` ⇒ 诊断集为空且 **exit 0**；`E-0101 = "allow"` ⇒ 含 `E-0093` 且 exit 2。
+   实测语料三份目录（`examples/`、`conformance/cases/`、`runtime/`）**没有任何一份清单写过 `[lints]`** ⇒
+   接线不会改动既有用例，527 项旧测试一条没转红。
+2. **wheel 归档的 ZIP 成员偏移**。`btrack.rs` 解析中央目录时算出了 `lho`（APPNOTE 8.6.16 的
+   "relative offset of local header"，偏移 42）**却丢掉**，`ZipEntry.data_off` 一律先写 `0`，随后的
+   "Resolve each member's data start from its local header" 循环就从 `data_off`（= 恒 0）取本地头 ——
+   ⇒ **每个成员都按第 0 个成员的本地头算数据起点**。两成员归档里第二条要么 CRC/长度不符显式报错，
+   要么静默读到别人的字节。`loop` 头里那三行 `let o` / `(e.data_off as u64) as usize` / `let _ = o` 是同一次
+   改动的残留。**改法**：`data_off: lho`，循环头收成 `let off = e.data_off as usize;`。
+   回归测试 `btrack::tests::each_wheel_member_reads_through_its_own_local_header` 现造一份两成员 stored 归档
+   （stored、CRC 由 `btrack::crc32` 现场算，不用编造常数），断言 `read(0)` 得 `AAA`、`read(1)` 得 `BBBBBB`；
+   **负对照实测**：把 `data_off` 改回写死 `0` ⇒ 该测试在 `zip.read(&bytes, 1)` 处 panic（`解压 3 字节，但要 6 字节`），
+   改回后 `data_off: lho` 在场、测试绿。这条就是 F2 指针里那句「删之前先分清『没用』与『没接上』」的兑现。
+
+**判成「没用」而删掉的，都留了去处或替代锁点**：`parser.rs:2540` 的死臂删掉后，`ExprKind::Int` 的唯一产地是
+`derive`（`primary` 的 `Kind::Lit(l)` 臂匹配所有字面量，F9 的剩余待审计面因此缩小到"只匹配 `ExprKind::Int`
+的判据"，`primary` 那条已不可能再被写回来）；`Seg::Try` 删掉是因为 `flatten_chain` 早就用 `Seg::Glue("?")`
+发 `?`，输出不变；`call_doc` 与 `ExprKind::Call` 那条活臂逐行同形（`turbofish_between` + `args_doc`），
+`expand_tabs_for_width` 没有替代实现 ⇒ 登记 **F39**（§9.5 第 2 条"输入 tab 参与宽度测量"这一半未接）而不是假装做过。
+
+**回归面**：`cargo test --offline --lib` **529 passed / 0 failed**（基线 527，+2 = `cli` 38→**39**、
+`btrack` 30→**31**）、`cargo test --offline` 全目标 exit 0（lib 529 / bin 0 / doc 0）、
+`cargo build --offline --release` exit 0（22.5s，`infy.exe` 3061248 字节）、
+`infy check|build|run|test examples/tour` 全 exit 0、`--verify-reproducible` exit 0（199975 == 199975）、
+`infy artifact info … --nodes` exit 0（6 行 = 8/9/10/11/16/19）、生成 C11 仍 **12513** 字节、
+产物仍 **199975** 字节、`build-id 4d8250b5…55ba` **逐字节不变**（本轮没碰阶段 [7]-[9] 的发射与容器写入）、
+`infy conformance --report` 仍 **exit 1**（83 = Pass 77 / Fail 0 / Blocked 6 · 92.8% · 覆盖 83/2300）、
+`(cd examples/tour && infy fmt --check)` 仍 **exit 2**（F6 未裁决）。
+**C 侧零改动**仍复跑四条链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警**（stderr 0 字节）、
+rt **32335 assertions / 0 failures**、替身链与生产链 IFBC 各 **180/180** 且 stdout `cmp` **无差异**。
+
+**顺手清掉的仓库卫生**：`src/fmt.rs.tmp`（3984 行的旧 `fmt.rs` 快照，`418a34c` 起被跟踪、无人引用、
+cargo 也不会编译它）删除 —— 这是 BACKLOG F3 早已点名的一项，本轮动手时它已经和 `src/fmt.rs` 差 1382 行。
+
+**明确未做 / 不能声称**：F2 勾掉只覆盖 `cargo check --offline --lib` 这一个口径；
+`cargo build --offline --release` 与 bin 目标的告警本轮未逐条清理（release 构建 exit 0、无新告警来源改动）。
+"两侧装载期校验等价"仍不许讲（F26 前半，清单 = D-42 (a)–(e)）；`[lints]` 的接线只证明**配置进入了诊断**，
+不证明 §9.6 的其余表面（`.infyfmt`、`--diag-json` 的 lint 字段）已实现。

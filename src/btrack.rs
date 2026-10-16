@@ -26,7 +26,7 @@
 //! byte-identical images.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -35,12 +35,12 @@ use crate::codes;
 use crate::diag::{Diagnostic, Handler, Origin, Phase};
 use crate::span::Position;
 use crate::ifbc::{
-    self, CodeBuilder, ExcEntry, ExcKind, HostSig, HostSigTable, IfbcModule, ImportKind, Instr,
-    Op, TyKind, F_ENTRY, NONE32,
+    self, CodeBuilder, ExcEntry, ExcKind, HostSig, HostSigTable, IfbcModule, Op, TyKind, F_ENTRY,
+    NONE32,
 };
 use crate::pkg::Manifest;
 use crate::sha256;
-use crate::span::{FileId, Sources};
+use crate::span::FileId;
 
 // ------------------------------------------------------------------ a minimal JSON reader
 
@@ -1403,7 +1403,6 @@ pub fn dispatch_key(instr: &PyInstr) -> String {
                     "MAKE_FUNCTION" => match instr.arg {
                         Some(0) | None => "plain".to_string(),
                         Some(_) => "flags".to_string(),
-                        _ => "flags".to_string(),
                     },
                     _ => k,
                 }
@@ -1908,7 +1907,6 @@ enum Selected {
     Object(Op, u32),
     /// A `call.host` target from the row's `host:` form.
     Host(String),
-    None,
 }
 
 /// `tickloop`'s quota operand: §8.5 preemption point ④ fixes the count at 65536.
@@ -1929,10 +1927,6 @@ pub fn unit_signature(co: &CodeObj, hosts: &HostSigTable) -> HostSig {
 
 fn intern_kind(m: &mut IfbcModule, k: TyKind) -> u32 {
     m.intern_type(k, k.suffix(), NONE32, NONE32)
-}
-
-fn intern_list(m: &mut IfbcModule, elem: u32) -> u32 {
-    m.intern_type(TyKind::List, "list", elem, NONE32)
 }
 
 /// §7.7.1's mechanical mapping: code object tree → one IFBC module. The capability scan of §7.7.2
@@ -2072,7 +2066,6 @@ struct Lowerer<'a> {
     off_map: BTreeMap<u32, u32>,
     fixups: Vec<(u32, u32)>,
     pending_entry: BTreeMap<u32, Vec<(u32, u32)>>,
-    saved: Vec<(u32, u32)>,
     viol: Vec<ScanViolation>,
     lines: Vec<(u32, u32)>,
     exc: Vec<ExcEntry>,
@@ -2124,7 +2117,6 @@ impl<'a> Lowerer<'a> {
             off_map: BTreeMap::new(),
             fixups: Vec::new(),
             pending_entry: BTreeMap::new(),
-            saved: Vec::new(),
             viol: Vec::new(),
             lines: Vec::new(),
             exc: Vec::new(),
@@ -2322,7 +2314,7 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             self.off_map.insert(at.offset, self.b.offset());
-            let step = self.instr(&at, i, &instrs, &back_edges);
+            let step = self.instr(&at, &instrs, &back_edges);
             match step {
                 Ok(n) => i += n,
                 Err(()) => {
@@ -2709,7 +2701,6 @@ impl<'a> Lowerer<'a> {
     fn instr(
         &mut self,
         at: &PyInstr,
-        idx: usize,
         all: &[PyInstr],
         back: &std::collections::BTreeSet<u32>,
     ) -> Result<usize, ()> {
@@ -3453,15 +3444,6 @@ impl<'a> Lowerer<'a> {
                 let ty = self.emit_host(&name, &refs, at)?;
                 self.stack.push(Val::Stack { ty });
             }
-            Selected::None => {
-                self.err(
-                    format!("{}({})", at.opname, dispatch_key(at)),
-                    "能力表给出的候选映射都不适用于这里的操作数类型（§7.7.2：按诊断列出的具体项扩容）"
-                        .to_string(),
-                    at,
-                );
-                return Err(());
-            }
         }
         Ok(())
     }
@@ -3855,15 +3837,13 @@ impl ZipArchive {
                 crc32: crc,
                 comp_size: comp,
                 size,
-                data_off: 0,
+                data_off: lho,
             });
             p = name_end + extra_len + comment_len;
         }
         // Resolve each member's data start from its local header (variable-length name/extra).
         for e in entries.iter_mut() {
-            let o = e.data_off as usize;
-            let off = (e.data_off as u64) as usize;
-            let _ = o;
+            let off = e.data_off as usize;
             if off + 30 > n || le32(bytes, off) != SIG_LOCAL {
                 return Err(IngestErr::Zip(format!("{} 的本地文件头损坏", e.name)));
             }
@@ -5407,5 +5387,76 @@ mod tests {
             file: 0,
             pos: Position { line: 1, column: 1 },
         }
+    }
+
+    /// §7.7.4 reads a wheel with PKZIP APPNOTE 8.6.16 central-directory records, where each member's
+    /// data start is reached through **its own** local header offset. A two-member stored archive is
+    /// the smallest input that distinguishes that from reusing the first member's offset.
+    #[test]
+    fn each_wheel_member_reads_through_its_own_local_header() {
+        fn push32(out: &mut Vec<u8>, v: u32) {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        fn push16(out: &mut Vec<u8>, v: u16) {
+            out.extend_from_slice(&(v as u16).to_le_bytes());
+        }
+        let members: [(&[u8], &[u8]); 2] = [(b"a.txt", b"AAA"), (b"pkg/sub/b.txt", b"BBBBBB")];
+
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut local_at = Vec::new();
+        for (name, data) in members.iter() {
+            local_at.push(bytes.len() as u32);
+            push32(&mut bytes, 0x0403_4b50);
+            push16(&mut bytes, 20);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push32(&mut bytes, crc32(data));
+            push32(&mut bytes, data.len() as u32);
+            push32(&mut bytes, data.len() as u32);
+            push16(&mut bytes, name.len() as u16);
+            push16(&mut bytes, 0);
+            bytes.extend_from_slice(name);
+            bytes.extend_from_slice(data);
+        }
+
+        let cd_off = bytes.len() as u32;
+        for (i, (name, data)) in members.iter().enumerate() {
+            push32(&mut bytes, 0x0201_4b50);
+            push16(&mut bytes, 20);
+            push16(&mut bytes, 20);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push32(&mut bytes, crc32(data));
+            push32(&mut bytes, data.len() as u32);
+            push32(&mut bytes, data.len() as u32);
+            push16(&mut bytes, name.len() as u16);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push16(&mut bytes, 0);
+            push32(&mut bytes, 0);
+            push32(&mut bytes, local_at[i]);
+            bytes.extend_from_slice(name);
+        }
+        let cd_size = bytes.len() as u32 - cd_off;
+        push32(&mut bytes, 0x0605_4b50);
+        push16(&mut bytes, 0);
+        push16(&mut bytes, 0);
+        push16(&mut bytes, members.len() as u16);
+        push16(&mut bytes, members.len() as u16);
+        push32(&mut bytes, cd_size);
+        push32(&mut bytes, cd_off);
+        push16(&mut bytes, 0);
+
+        let zip = ZipArchive::open(&bytes).expect("two-member stored archive must open");
+        assert_eq!(zip.entries.len(), 2);
+        assert_eq!(zip.entries[0].name, "a.txt");
+        assert_eq!(zip.entries[1].name, "pkg/sub/b.txt");
+        assert_eq!(zip.read(&bytes, 0).unwrap(), b"AAA");
+        assert_eq!(zip.read(&bytes, 1).unwrap(), b"BBBBBB");
     }
 }

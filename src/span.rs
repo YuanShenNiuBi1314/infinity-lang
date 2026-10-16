@@ -88,7 +88,7 @@ impl SourceFile {
     /// Byte offset of `column` (1-based code-point column) on 1-based `line`.
     pub fn offset_of_line_col(&self, line: u32, column: u32) -> Option<u32> {
         let text = self.line_text(line);
-        let mut off = self.line_starts.get(line as usize - 1).copied()?;
+        let off = self.line_starts.get(line as usize - 1).copied()?;
         for (i, _) in text.char_indices() {
             if (i as u32) + 1 == column {
                 return Some(off + i as u32);

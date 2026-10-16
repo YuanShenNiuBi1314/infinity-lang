@@ -326,7 +326,6 @@ pub struct Checker<'a> {
     in_defer: bool,
     /// inside an `unsafe` block (§4.7.5)
     in_unsafe: bool,
-    negated_child: Option<bool>,
     /// §8.4: nodes of the chain currently being checked.
     chain_nodes: Vec<NodeDesc>,
     /// index of the node whose body is being checked (drives goto(+N) bounds, §8.2)
@@ -352,7 +351,7 @@ impl<'a> Checker<'a> {
         Checker {
             src, h, prog: Program::new(), package: String::new(), file: 0, self_ty: None,
             scopes: vec![Vec::new()], ret_ty: Ty::Unit, in_chain: false, in_defer: false,
-            chain_nodes: Vec::new(), cur_node: 0, cur_chain: None, closure_counter: 0, manifest_module: module.to_string(), in_unsafe: false, negated_child: None,
+            chain_nodes: Vec::new(), cur_node: 0, cur_chain: None, closure_counter: 0, manifest_module: module.to_string(), in_unsafe: false,
             a_track_declared: false, b_track_versions: Vec::new(), link_unit_names: Vec::new(),
             cur_link_unit: None,
         }
@@ -857,7 +856,7 @@ impl<'a> Checker<'a> {
             for it in &pf.items {
                 if let ItemKind::Chain { name, stmts, .. } = &it.kind {
                     if let Some(idx) = self.prog.lookup_chain(name) {
-                        let (nodes, labels) = build_node_table(self.src, *file, stmts);
+                        let (nodes, labels) = build_node_table(self.src, stmts);
                         self.prog.chains[idx].nodes = nodes;
                         self.prog.chains[idx].labels = labels;
                     }
@@ -1063,8 +1062,7 @@ impl<'a> Checker<'a> {
                 }
                 // §4.3: assigning to a `let` binding is E-0120
                 let name = match &target.kind { ExprKind::Ident(x) => Some(x.clone()), ExprKind::Path(p) => p.last().cloned(), _ => None };
-                if let Some(name) = name.clone() {
-                    let name = match &target.kind { ExprKind::Ident(x) => x.clone(), ExprKind::Path(p) => p.last().cloned().unwrap_or_default(), _ => unreachable!() };
+                if let Some(name) = name {
                     if let Some((ty, mutable)) = self.lookup(&name) {
                         if !mutable {
                             self.emit("E-0120", target.span, "修改 let 不可变绑定", &name, Some("§4.3：let 是不可变绑定".into()), Some(format!("改 `var {name} = …`，或使用 `std.sync.RefCell`")));
@@ -2311,7 +2309,7 @@ fn scrut_is_enum(t: &Ty) -> bool {
 /// §8.4 — the node table. Nodes are top-level `expr_stmt`s of a chain body; `let`/`var`/plain
 /// assignment/`label` are the preamble of the node that follows them; `if`/`match` bodies never
 /// open a node.
-pub fn build_node_table(src: &Sources, file: FileId, stmts: &[Stmt]) -> (Vec<NodeDesc>, BTreeMap<String, usize>) {
+pub fn build_node_table(src: &Sources, stmts: &[Stmt]) -> (Vec<NodeDesc>, BTreeMap<String, usize>) {
     let mut nodes: Vec<NodeDesc> = Vec::new();
     let mut labels: BTreeMap<String, usize> = BTreeMap::new();
     let mut pending_preamble_has_node = false;

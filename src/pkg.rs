@@ -834,7 +834,6 @@ impl ConstraintParser {
                 Ok(CNode::Name(name))
             }
             None => Err("构建约束表达式不完整".to_string()),
-            _ => Err("构建约束表达式不完整".to_string()),
         }
     }
 }

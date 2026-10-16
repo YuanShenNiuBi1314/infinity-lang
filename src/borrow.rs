@@ -433,8 +433,8 @@ impl<'a> Borrowck<'a> {
                     self.expr(v);
                 }
             }
-            StmtKind::Continue { .. } | StmtKind::Pause | StmtKind::Stop | StmtKind::Resume | StmtKind::Label { .. } | StmtKind::ConstAssert { .. } | StmtKind::Unsafe(_) | StmtKind::Defer(_) | StmtKind::NestedItem(_) | StmtKind::While { .. } | StmtKind::Loop { .. } | StmtKind::For { .. } | StmtKind::Match { .. } | StmtKind::If { .. } | StmtKind::Let { .. } | StmtKind::Assign { .. } | StmtKind::Expr { .. } => {}
-            StmtKind::NestedItem(_) => {}
+            StmtKind::Continue { .. } | StmtKind::Pause | StmtKind::Stop | StmtKind::Resume
+            | StmtKind::Label { .. } | StmtKind::ConstAssert { .. } | StmtKind::NestedItem(_) => {}
         }
     }
 
