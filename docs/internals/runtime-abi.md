@@ -69,6 +69,25 @@ the `: Base` clause lists them; generic methods make the trait not object-safe (
 so the pointer list is always monomorphic.
 ```
 
+Spec 附录 C-7「仍缺 ②」确认这份顺序**没有偏移表**（§4.1 只说"由 `IFABI` 固定"）。本实现在
+`docs/spec-deviations.md` D-50(c) 把它定死成下面的数，并让测试**读这一块**去比
+`hir::Layouter::vtable_record` —— 数是 `src/hir.rs` 算出来的，本页是被测的那一侧，不是抄一份：
+
+```
+prefix  drop@0:8  size@8:8  align@16:8
+method  0@24:8    1@32:8    2@40:8      // 第 i 个方法指针 = 24 + 8·i
+total   n=0:24    n=1:32    n=2:40    n=3:48    n=5:64
+```
+
+`@off:width`，`total n=k` 是 `k` 个方法时的表大小。胖指针本身 = 上表第一行的 `{data, vt}` 两指针
+（16/8，与 §1 表里 `dyn Trait` 那一行同）。
+
+**这份表目前只是"定了、没发射"**：阶段 [8] 的 `Ty::Dyn` 臂以条款号拒绝（`codegen.rs`），所以没有任何
+产物真带过 vtable，`.inf meta`（§7.4 的冻结容器）也没有装它的槽位 ⇒ 跨 `.infib` 的 `dyn` 链接
+**不是**本实现现在能做的声称（BACKLOG F4 / D-50(c)）。C 侧另有一个 `InfyDebugVt`
+（`runtime/infy_rt.h` §1，只有 `write` 一个指针），那是 §6.7 derive 的 Debug 派发，与 `dyn` 表无关，
+两者不许在文档里混称 "vtable"。
+
 ### Growth factors (§10.13 — observable through `capacity()`, therefore ABI)
 
 `Vec`/`String`: start at 4; `×2` while the new capacity ≤ 1024; `×3/2` while ≤ 1 MiB; `×5/4`

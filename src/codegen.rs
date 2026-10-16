@@ -667,7 +667,8 @@ impl<'a> Cg<'a> {
             Ty::Dyn(_) => {
                 return Err(CgError::new(
                     "§4.1 / §7.7.7",
-                    "codegen: `dyn Trait` 的 vtable 发射未实现（`docs/coverage.md` §11 记为 🟡）",
+                    "codegen: `dyn Trait` 的 vtable 发射未实现（偏移表定在 `docs/internals/runtime-abi.md` §1 与 \
+                     `docs/spec-deviations.md` D-50(c)，缺的是发射点和 `.inf meta` 的槽位，见 docs/BACKLOG.md F4）",
                 ))
             }
             Ty::Closure(_) => {
@@ -2392,7 +2393,7 @@ impl<'a> Cg<'a> {
             )),
             ExprKind::Is { .. } => Err(CgError::new(
                 "§4.14 / §7.7.7",
-                "codegen: `is` 需要 `dyn` vtable，未实现",
+                "codegen: `is` 需要 `dyn` vtable，未实现（表已定在 `docs/internals/runtime-abi.md` §1 / D-50(c)，F4）",
             )),
             ExprKind::Range { .. } => Err(CgError::new(
                 "§3.8 / §10.10",
@@ -4407,6 +4408,18 @@ mod tests {
             .join("\n");
         assert!(e.contains("§7.6.4") && e.contains("dec_read"), "{e}");
         assert!(!e.contains("E-0723"), "an unimplemented row must not be reported as a compliance error: {e}");
+    }
+
+    /// D-50(c)：`dyn Trait` 出现在**合法**位置（形参）时，阶段 [1]-[5] 是过的，拒绝发生在 [8] 且
+    /// 以条款号指名 —— 锁的是"那一臂还活着"。偏移表已定（`docs/internals/runtime-abi.md` §1），
+    /// 缺的是发射点；既不许多生成一份近似代码，也不许把未实现报成 `E-`（假合规失败）。
+    #[test]
+    fn a_dyn_type_is_refused_at_build_by_name() {
+        let e = emit_try("trait Shape {\n    fn area(&self) -> f32;\n}\nfn f(x: dyn Shape) { }\n")
+            .unwrap_err()
+            .join("\n");
+        assert!(e.contains("§4.1") && e.contains("vtable"), "拒绝要指名条款与缺的东西：{e}");
+        assert!(!e.contains("E-0"), "未实现的发射不许伪装成语义诊断：{e}");
     }
 
     /// §7.6.1: a `;`-bodied declaration that no `#[link]` block claims has no wrapper, so calling it

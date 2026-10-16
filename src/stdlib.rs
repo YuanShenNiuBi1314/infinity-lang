@@ -5,12 +5,12 @@
 //! with the toolchain as a wheel-edition `.infib` plus a source edition for audit and breakpoint
 //! mapping (§10 preamble).
 //!
-//! This module holds the normative signature table (`STD`), which drives:
-//! * name resolution of `import "std/fmt"` and friends;
-//! * §12.1's domain-neutrality scan (the scan input is exactly this table plus the language-level
-//!   export set — no domain vocabulary may appear in either, §1.3);
-//! * `infy doc` and `infy std list`;
-//! * codegen, which maps each entry onto an `infy_rt.h` entry point.
+//! This module holds the normative signature table (`STD`). **The table has no consumer outside
+//! this file as of now** — `std_packages()`, `lookup()` and `all_symbol_paths()` are each called
+//! only by the tests below, and stage [3] classifies `import "std/…"` then drops it
+//! (`cli.rs::ImportSource::Std => {}`), so **no INFY source can reach any `std` item**, including
+//! the ones with a native entry point. That gap is `docs/BACKLOG.md` F40; §10.4's `std.net` refusal
+//! is `docs/spec-deviations.md` D-50(b). §12.1's domain scan currently uses `nfkc_case_fold` only.
 //!
 //! §2.10's `NFKCCaseFold` is used by the domain scan so that `Numpy` and `numpy` cannot both slip
 //! past a lowercase blacklist.
@@ -99,7 +99,8 @@ pub static STD: &[StdItem] = &[
     StdItem { path: "std.rt.abort", signature: "abort()", native: Some("infy_panic"), clause: "§10.14" },
 ];
 
-/// The package names of `std`, used by import resolution (§5.3 step 2).
+/// The package names of `std` (§5.3 step 2). **No caller yet** — stage [3] does not build a `std`
+/// binding out of them (`docs/BACKLOG.md` F40).
 pub fn std_packages() -> Vec<&'static str> {
     let mut set = BTreeSet::new();
     for it in STD {
@@ -114,7 +115,8 @@ pub fn lookup(path: &str) -> Option<&'static StdItem> {
     STD.iter().find(|i| i.path == path)
 }
 
-/// §12.1: every `std` path, used as the input of the domain-neutrality scan (§1.3).
+/// §12.1: every `std` path, the intended input of the domain-neutrality scan (§1.3).
+/// **No caller yet** — see `docs/BACKLOG.md` F38 (the scan has no call site) and F40.
 pub fn all_symbol_paths() -> Vec<&'static str> {
     STD.iter().map(|i| i.path).collect()
 }

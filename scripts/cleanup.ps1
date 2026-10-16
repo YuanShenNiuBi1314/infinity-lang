@@ -46,6 +46,23 @@ foreach ($p in $allow) {
   if ($full -and (Test-Path -LiteralPath $full)) { $targets += $full }
 }
 
+# F4 轮补的 stray 族：C harness 的夹具路径按 `cd target/scratch` 的配方写死（`test_rt.c:1501`），
+# 从错误的 CWD 跑就往**运行目录**里拉 `rt_artifact*.bin/.txt`、`rt_diag.log` 等一次性文件。
+# 只扫两个**具体目录的这一层**（仓库根与 runtime/），名字族是封闭清单；不进 runtime/fixtures/ ——
+# 那里是提交进仓库的真值源，任何通配都不许覆盖它。
+$strayDirs = @($repo, (Join-Path $repo 'runtime'))
+$strayPats = @('rt_artifact*.bin','rt_artifact*.txt','rt_diag.log','rt_render*.log','rt_sample.infy','rt_fs_*')
+$repoRoot  = $repo.TrimEnd('\','/')
+$sep       = [IO.Path]::DirectorySeparatorChar
+foreach ($d in $strayDirs) {
+  $full = $d.TrimEnd('\','/')
+  if (-not (Test-Path -LiteralPath $full)) { continue }
+  if ($full -ne $repoRoot -and -not $full.StartsWith($repoRoot + $sep)) { Log "REFUSED stray 目录在仓库外：$full"; continue }
+  foreach ($pat in $strayPats) {
+    Get-ChildItem -LiteralPath $full -Filter $pat -File -ErrorAction SilentlyContinue | ForEach-Object { $targets += $_.FullName }
+  }
+}
+
 if ($targets.Count -eq 0) { Log "NOOP   没有可清理项"; Write-Host 'nothing to clean'; exit 0 }
 
 $mode = if ($Apply) { 'APPLY' } else { 'DRYRUN' }

@@ -1107,3 +1107,50 @@ E2 轮（命令行层）落地时定。数据面（分类表、用例格式、�
 无 `[lints]` ⇒ 诊断集恰为 `["W-0002"]` 且 exit `2`；`W-0002 = "allow"` ⇒ 诊断集为空且 exit `0`；
 `E-0101 = "allow"` ⇒ 含 `E-0093` 且 exit `2`）。实测语料（`examples/`、`conformance/cases/`、`runtime/`）
 里没有任何一份清单写过 `[lints]` ⇒ 这条接线不会改动既有用例的期望码。
+
+## D-50 F4 的三件「明确未实现」：`infy lsp`、`std.net` 的 TLS 后端、`dyn Trait` 的 vtable —— 逐条给出**实测的**拒绝形态，并把规范没写的偏移表定成有主、可测的数
+
+F4 的验收是"要么实现，要么在本文档保持明确记录，不许静默"。三件**今天都是显式拒绝**（下面的数字都是
+本轮实测，不是推断），所以本轮不写实现，而做三件事：(1) 把拒绝的**形态**钉成回归锁点；(2) 把规范唯一
+没给的东西 —— `dyn Trait` 的偏移表（附录 C-7「仍缺 ②」）—— 定成本实现冻结的数，并让**文档成为被测的那一侧**；
+(3) 把实测出来的"拒绝的理由是错的"那两条挪进 `docs/BACKLOG.md` F40/F41，不让它们藏在一条正确的拒绝里。
+
+1. **(a) `infy lsp` 保持拒绝，且不降级成空 server**。规范面只有 §13.1 的 `infy lsp  Language Server（可选）`
+   一行，而附录 C-7「仍缺 ④」明写"增量诊断与 §9.4 的逐字节一致性"从未定义：局部修改后 LSP 缓存的阶段
+   [1]-[5] 如何与全量 `infy check` 同码同文没有判据，而 §9.4 恰恰把"同码同文"当合规要求。⇒ 实现之前先有规范，
+   否则只能造一个**看起来在服务**的东西，那是假成功。实现面 `cli.rs:33` 的 `NOT_IMPLEMENTED` 含 `lsp`。
+   实测：`infy lsp` 与 `infy lsp examples/tour` 都打印 `notice: 'infy lsp' is not implemented in this build …`
+   并 **exit 1**（§13.4 的 generic 档）。**注意档位不够**：拒绝臂与"未知子命令"臂同为 exit 1，
+   所以锁点必须是名单本身 + `usage()` 那一行（D2/conformance 的同一条教训）。
+2. **(b) `std.net` 的三条 + §10.4 的 TLS 后端：本实现的约束下不可实现，记成明确未实现**。
+   §10.4 要求"TLS 后端由产物 `.inf rt` 段内置（不依赖系统解释器）"，而 §1.3 与 BACKLOG §0.7 的硬约束是
+   只依赖 std / libc、crates.io 被策略拦截 ⇒ 没有可依赖的密码学实现，内置 TLS 属于要 vendoring 才有的一档，
+   本轮**不做**。实测拒绝形态：`import "std/net" as net;` 之后 `net.http_get(…)` ⇒ `E-0101 未声明的标识符 'net'`
+   + `E-0110 类型 <invalid> 没有方法 'http_get'`；换全限定 `std.net.http_get(…)` 同样是 `E-0101`（`未声明的标识符 'std'`）
+   + `E-0110`；`infy check` **exit 2**。`runtime/infy_rt.c` 里 grep `TLS` 只命中 thread-local 的 `INFY_TLS`
+   宏（**同一个三字首两种含义**，写记录时别看错），没有任何 socket / 握手代码。
+   **必须一并记下的**：这条拒绝**理由目前是错的** —— 它不是"net 未实现"，而是"任何 `import \"std/*\"` 都不产生绑定"，
+   连有 native 入口的 `std.fs.read_to_str` 也吃同一对码（`stdlib::std_packages()` / `all_symbol_paths()` 全仓零调用点）。
+   ⇒ 拆出去登记 **F40**；`stdlib.rs` 模块头那句"STD 表驱动 name resolution / `infy doc` / codegen"在 F40 修掉之前是**假声称**，
+   本轮先把该注释改成"表尚未接进解析"（见锁点段）。
+3. **(c) `dyn Trait` 的 vtable 偏移表：本实现定死如下，且文档是被测方**。
+   §4.1 只承诺"胖指针（数据 ptr + vtable ptr）；vtable 布局由 `IFABI` 固定"，附录 C-7「仍缺 ②」确认偏移表从未写出。
+   裁定 = `docs/internals/runtime-abi.md` §1 新增的那三行（`drop@0:8 size@8:8 align@16:8`、第 `i` 个方法指针 `24+8i`、
+   `total = 24+8n`；胖指针 16/8），数的**唯一真值**是 `hir::Layouter::vtable_record`，测试从文档里把那三行
+   **读出来**再比 —— 与经验库 doc-claims 那条一致：差分文本由对方生成，不许两侧各自算。改动这张表 = `IFABI` 变更 = MAJOR（§1.2）。
+   表"定了但没发射"：阶段 [8] 的 `Ty::Dyn` 臂与 `ExprKind::Is` 臂都是显式 `CgError`，`.inf meta`（§7.4 的冻结容器）
+   没有装 vtable 的槽位 ⇒ **跨 `.infib` 的 `dyn` 链接不是本实现现在能做的声称**。
+   实测：`fn f(x: dyn Shape) { }` 配入口链 —— 阶段 [1]-[5] **过得去**（`infy check` exit 0），拒绝发生在 [8]：
+   `error: codegen: 'dyn Trait' 的 vtable 发射未实现 …`、`infy build` **exit 6**。
+   而 `let s: dyn Shape = Sq{ side: 1.0 };` 在阶段 [4] 就吃 `E-0110 绑定类型不匹配：声明 Shape，实际 Sq`
+   —— 缺的是**上转（强制转换）**，不是 vtable 发射；这一条拆出去登记 **F41**，不许把它误读成"[8] 的臂不可达所以偏移表白定"。
+   另记：C 侧的 `InfyDebugVt`（`runtime/infy_rt.h`，只有 `write` 一个指针）是 §6.7 derive 的 Debug 派发，
+   与 `dyn` 表**不是同一个对象**，两份文档不许混称 "vtable"。
+
+锁点 = 四条，各测一层：`cli::tests::lsp_is_refused_out_loud_and_never_as_a_working_server`（名单 + 两种参数形态的
+exit 1 + `usage()` 措辞）、`cli::tests::a_std_package_call_is_refused_and_never_faked`（`net`/`fs` 两条调用的码集
+恰为 `["E-0101","E-0110","E-0101","E-0110"]` 且 exit 2 —— 修 F40 时必须连同 (b) 一起改这条期望，不许只放宽）、
+`codegen::tests::a_dyn_type_is_refused_at_build_by_name`（合法 `dyn` 形参走到 [8] 以条款号被拒，且错误串里不含 `E-0`
+⇒ 证明拒绝不在 [4]）、`hir::tests::the_vtable_offsets_published_in_the_abi_doc_are_the_ones_the_layouter_produces`
+（**负对照实测**：把文档里 `1@32:8` 改成 `1@33:8` ⇒ 该测试红并报"文档里的方法 #1 槽 ≠ 布局器"，改回即绿）。
+

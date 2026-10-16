@@ -651,12 +651,18 @@ impl HirCrate {
         self.events.iter().position(|i| self.items[*i].name() == name).map(|p| p as u32)
     }
 
+    /// The same table as a record, so the per-slot offsets are reachable: `docs/internals/runtime-abi.md`
+    /// §1 publishes them and a test reads that block back against here (D-50(c)).
+    pub fn vtable_record(&self, n_methods: u64) -> Record {
+        let mut fields = vec![self.target.ptr(), self.target.u64f(), self.target.u64f()];
+        fields.extend((0..n_methods).map(|_| self.target.ptr()));
+        record_layout(&fields)
+    }
+
     /// ABI §1 vtable prefix: `drop`, `size`, `align`, then the method pointers in declaration
     /// order (§4.1: the vtable layout is fixed by IFABI).
     pub fn vtable_layout(&self, n_methods: u64) -> Layout {
-        let mut fields = vec![self.target.ptr(), self.target.u64f(), self.target.u64f()];
-        fields.extend((0..n_methods).map(|_| self.target.ptr()));
-        record_layout(&fields).layout
+        self.vtable_record(n_methods).layout
     }
 }
 
@@ -1670,6 +1676,66 @@ pub enum Wide { Lo = 1, Hi = 4294967296 }
         assert_eq!(h.vtable_layout(2), Layout::new(40, 8), "measured: drop@0 size@8 align@16 m0@24 m1@32");
         for n in 0..6u64 {
             assert_eq!(h.vtable_layout(n).size, 24 + 8 * n);
+        }
+    }
+
+    /// D-50(c): 规范只说"vtable 布局由 `IFABI` 固定"、附录 C-7「仍缺 ②」确认偏移表从未写出，
+    /// 所以偏移是本实现定的。**数只有一份真值 = `vtable_record`**，`docs/internals/runtime-abi.md`
+    /// §1 那个代码块是**被读出来比对的**那一侧（经验库 checkout-eol / doc-claims 的口径：
+    /// 差分文本由对方生成，不许两侧各自算）。改偏移就得同时改文档，否则这里红。
+    #[test]
+    fn the_vtable_offsets_published_in_the_abi_doc_are_the_ones_the_layouter_produces() {
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join("internals").join("runtime-abi.md"),
+        )
+        .expect("docs/internals/runtime-abi.md");
+        let slot = |t: &str| -> (String, u64, u64) {
+            // `drop@0:8` / `0@24:8`
+            let (name, rest) = t.split_once('@').unwrap_or_else(|| panic!("不是一个槽位：{t}"));
+            let (off, w) = rest.split_once(':').unwrap_or_else(|| panic!("缺宽度：{t}"));
+            (name.to_string(), off.parse().expect("偏移是十进制"), w.parse().expect("宽度是十进制"))
+        };
+        let mut prefix: Vec<(String, u64, u64)> = Vec::new();
+        let mut methods: Vec<(u64, u64, u64)> = Vec::new();
+        let mut totals: Vec<(u64, u64)> = Vec::new();
+        for line in doc.lines().filter(|l| l.starts_with("prefix ") || l.starts_with("method ") || l.starts_with("total ")) {
+            let body = line.split("//").next().expect("注释切得开");
+            let mut toks = body.split_whitespace();
+            match toks.next() {
+                Some("prefix") => prefix = toks.map(slot).collect(),
+                Some("method") => methods = toks.map(|t| { let (i, o, w) = slot(t); (i.parse().expect("方法是数字下标"), o, w) }).collect(),
+                Some("total") => {
+                    totals = toks
+                        .map(|t| {
+                            let v = t.split('=').nth(1).unwrap_or_else(|| panic!("total 写成 n=<k>:<size>：{t}"));
+                            let (k, s) = v.split_once(':').unwrap_or_else(|| panic!("total 写成 n=<k>:<size>：{t}"));
+                            (k.parse().expect("n 是十进制"), s.parse().expect("size 是十进制"))
+                        })
+                        .collect()
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(prefix.len(), 3, "`prefix` 行必须列出 drop/size/align 三个槽：{prefix:?}");
+        assert!(!methods.is_empty() && !totals.is_empty(), "文档里必须给出方法槽与 total 的实数");
+        let h = lower_program(&tour(), Some("Pipeline"));
+        let wide = *methods.iter().map(|(i, _, _)| i).max().expect("有方法下标") + 1;
+        let r = h.vtable_record(wide);
+        for (i, (name, off, w)) in prefix.iter().enumerate() {
+            assert_eq!((off, w), (&r.offsets[i], &r.layouts[i].size), "文档里的 `{name}` 槽 ≠ 布局器：{name}@{off}:{w}");
+        }
+        assert_eq!(
+            prefix.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["drop", "size", "align"],
+            "前缀顺序就是 D-50(c) 定的顺序"
+        );
+        for (i, off, w) in &methods {
+            let slot_i = (*i as usize) + 3;
+            assert_eq!((off, w), (&r.offsets[slot_i], &r.layouts[slot_i].size), "文档里的方法 #{i} 槽 ≠ 布局器");
+            assert_eq!(*off, 24 + 8 * i, "方法 i 落在 24 + 8·i（{off}）");
+        }
+        for (n, size) in &totals {
+            assert_eq!(*size, h.vtable_layout(*n).size, "文档里的 total(n={n}) ≠ 布局器");
         }
     }
 

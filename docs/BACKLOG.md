@@ -939,7 +939,23 @@
       C11 仍 **12513** 字节 / 产物仍 **199975** 字节 / `build-id 4d8250b5…55ba` 逐字节不变（`src/` 生产代码一字未动）、
       `infy conformance --report` 仍 exit **1**（83 = 77/0/6 · 92.8%）、`fmt --check` 仍 exit **2**（F6）；
       **C 侧零改动**仍复跑四条链（两份 `-c` 各 **0 告警**、rt **32335/0**、两条 IFBC **180/180** + `cmp` 无差异）。
-- [ ] F4 `infy lsp`、`std.net` TLS、`dyn Trait` vtable 偏移表：要么实现，要么在 `docs/spec-deviations.md` 里保持"明确未实现"的记录，不许静默。
+- [x] F4 `infy lsp`、`std.net` TLS、`dyn Trait` vtable 偏移表：要么实现，要么在 `docs/spec-deviations.md` 里保持"明确未实现"的记录，不许静默。
+      **F4 轮（2026-10-16）走"记录"这条验收路** ⇒ 裁定 = 偏差 **D-50(a)–(c)**（提交号由紧随的做账提交补记，同 F1 的做法；
+      本轮的 4 条锁点与全部数字在 `docs/status.md` 的 F4 一节）。为什么不走实现：三件里两件被**规范本身**挡住 ——
+      附录 C-7「仍缺 ④」明写 LSP 的增量诊断与 §9.4 的逐字节一致性从未定义（实现了也只能造一个看起来在服务的空 server = 假成功），
+      §10.4 又要求"TLS 后端由 `.inf rt` 段内置"而 §1.3 的零第三方依赖约束下没有可依赖的密码学实现（`runtime/infy_rt.c` 里
+      grep `TLS` 只命中 thread-local 的 `INFY_TLS` 宏 —— **同一三字首两种含义**）。第三件（vtable）是唯一有真实落点的：
+      偏移表**由本实现定死**并写进 `docs/internals/runtime-abi.md` §1（`drop@0:8 size@8:8 align@16:8`、方法 `i` = `24+8i`、
+      `total = 24+8n`、胖指针 16/8），`hir::Layouter::vtable_record`（新增，`vtable_layout` 改为委托它）是唯一真值，
+      测试**把文档那三行读回来**再比 —— 负对照实测：`1@32:8` 改成 `1@33:8` ⇒ 该测试红并报"文档里的方法 #1 槽 ≠ 布局器"，改回即绿。
+      实测的拒绝形态（每条都是命令输出）：`infy lsp` 与 `infy lsp examples/tour` = `notice: … not implemented …` + exit **1**；
+      `net.http_get(…)` 与全限定 `std.net.http_get(…)` = `E-0101` + `E-0110`、`infy check` exit **2**；
+      合法 `dyn` 形参（`fn f(x: dyn Shape) { }`）阶段 [1]-[5] **过得去**（check exit 0），拒绝在 [8]：
+      `error: codegen: 'dyn Trait' 的 vtable 发射未实现 …`、`infy build` exit **6**。
+      **顺带纠两处旧记录**：`codegen` 的 dyn 文案原本指 `docs/coverage.md §11`（那一行讲的是 `HostApi`，指错）⇒ 改指
+      `runtime-abi.md §1` / D-50(c) / F4；`stdlib.rs` 模块头声称 STD 表"驱动 name resolution / `infy doc` / codegen"是**假声称**
+      ⇒ 本轮改成实话。三件仍**不声称**已实现：`.inf meta` 没有 vtable 槽位 ⇒ 跨 `.infib` 的 `dyn` 链接不做声称；
+      本轮实测出的三条真缺陷按下方 **F40/F41/F42** 登记（拒绝的形态是对的，但 F40/F41 的**理由**是错的，不能混在一条正确的拒绝里）。
 - [ ] F5 `infy fmt` / `infy expand` 的目录参数与 `infy check` 不一致（A3 实测）：
       `infy fmt --check examples/tour` → `error: 无法读取 examples/tour: 拒绝访问。 (os error 5)`（把目录当文件读），
       `infy expand --stage macro examples/tour` → `error: 找不到 module 根（§5.1）`；只有 `cd` 进 module 或直接给 `.infy` 文件才可用。
@@ -1259,8 +1275,60 @@
       现状 = 宽度一律按 `base_columns()` 逐码点算，tab 按 1 列计。
       认法：`grep -rn "	" examples/ conformance/cases/` 为空 ⇒ 这条今天不可测，**别**为它编造期望。
       验收：先决定「含 tab 的注释按几列」并把裁定写成本文件的偏差条目，再让测量走那条规则并配正反例。
+- [ ] F40 **任何 `import "std/…"` 都不产生绑定 ⇒ 整个 §10 的 std 面从 INFY 源码够不到**（F4 轮实测）：
+      阶段 [3] 的 `cli.rs:330` 是 `pkg::ImportSource::Std => {}` 空臂，`stdlib::std_packages()` / `lookup()` / `all_symbol_paths()`
+      在 `stdlib.rs` 之外**零消费者**（只有 `nfkc_case_fold` 被 `pkg.rs:1182` 用）。后果：`import "std/fs" as fs;` 之后
+      `fs.read_to_str("x.txt")` 吃 `E-0101 未声明的标识符 'fs'` + `E-0110 类型 <invalid> 没有方法 'read_to_str'`，
+      与没有 native 的 `std.net.http_get` **一模一样**、`infy check` exit **2**；全限定 `std.fs.read_to_str(…)` 同样 `E-0101`（`'std'`）。
+      ⇒ `native: Some("infy_fs_read_all")` 那些映射**从源码路径永远走不到**，`std` 只在运行时内部被用（`infy_rt.c` 自己调 `infy_fs_read_all`）。
+      这也是 **F19(a)**"没有任何 INFY 构造能写 stdout"的上游根因，且它使 `stdlib.rs` 无法被 §12.1 的扫描消费（= **F38** 的另一半）。
+      验收：`import "std/fs" as fs;` + 一次 `fs.read_to_str(…)` 的模块在 `infy check` 里 exit **0**（`std` 是 §5.2 的强制依赖、§5.3 第 2 步的虚拟 module），
+      成对锁点 = 有 native 的项解析成功、`std.net` 的三条仍按 D-50(b) 显式拒绝（**不许**因为接了绑定就把 net 变成假成功）；
+      改动时把 `cli::tests::a_std_package_call_is_refused_and_never_faked` 的期望码集与 D-50(b) **一起**改掉，不许只放宽测试。
+- [ ] F41 **`dyn` 上转（强制转换）在阶段 [4] 缺失 ⇒ `dyn Trait` 唯一的构造入口不通**（F4 轮实测）：
+      `let s: dyn Shape = Sq{ side: 1.0 };` 报 `E-0110 绑定类型不匹配：声明 Shape，实际 Sq`（诊断还把类型打成 `Shape` 而不是 `dyn Shape`），
+      而 §4.1 明写 `dyn Trait` 是胖指针、§4.14 给了对象安全判据（`E-0167`）—— 规范要的是"具体类型 → `dyn T`"的隐式上转，
+      本实现的 `sema::type_compatible` 只有 `(Ty::Dyn(d), Ty::Adt(a)) | (Ty::Dyn(d), Ty::Named(a)) => d == a`（`sema.rs:2290`）这一条**同名**判据，
+      没有任何装箱/上转臂。⇒ 与 D-50(c) 是两件事：**偏移表已定，缺的是"造出一个 dyn 值"的入口**，
+      不许把 F41 当成"vtable 发射未实现"的重复登记。
+      验收：`let s: dyn Shape = Sq{ side: 1.0f32 };` 在 `infy check` exit 0 且 `E-0167` 的对象安全检查照旧生效（负例 = 泛型方法的 trait 仍被拒），
+      随后 `infy build` 仍按 D-50(c) 以条款号拒绝发射（= `codegen::tests::a_dyn_type_is_refused_at_build_by_name` 的形状）。
+- [ ] F42 **`impl` 方法体里 `self.field` 恒 `E-0110` ⇒ 方法在源码里不可写**（F4 轮实测）：
+      `struct Pt { pub x: u32 }` + `impl Pt { fn get(&self) -> u32 { self.x } }` ⇒ `error[E-0110]: 无法解析字段 'x'`，
+      `&self` / `&mut self` / `self` 三种接收者**全中**（`mut self` 另吃 `E-0020 保留字作参数名`）；诊断的 note 还错指到 §4.6"env 字段集合封闭"。
+      根因（读码定位，非猜测）：`check_body` 用 `self.ty_from_ast(&p.ty, …)` 直接声明形参（`sema.rs:960-962`），
+      接收者类型因此是没替换过的 `Ty::Named("self")` / `Ref{Named("self")}`；`Self`→impl 类型的替换只在
+      `register_fn_for_impl` 里做（`sema.rs:796-802`），而 `self.self_ty` 在 `812` 设、`822` 清，`ExprKind::Ident("self")`
+      的回退（`sema.rs:1418`）在体检查时已经是 `None` ⇒ `Ty::Invalid`。
+      ⇒ 这条挡住的是**一切带字段的 impl**（§14 导览没有 impl 方法体，所以从没走到）。验收：上面那段最小复例 `infy check` exit **0**，
+      并补一条 `trait` 版（`impl Shape for Sq { fn area(&self) -> f32 { self.side * self.side } }`，即 §14/§7.7.1 样例里那种写法）成对锁点。
 
 ## 2. 当前指针
+
+> **F4 轮收尾（2026-10-16）：F4 勾 `[x]`，本段取代下一段** —— 走的是验收允许的**记录**路（裁定 = 偏差 **D-50(a)–(c)**，
+> 4 条锁点 + 1 次实测负对照）。**为什么不走实现路**：附录 C-7「仍缺 ④」把 LSP 的增量诊断/§9.4 逐字节一致性定义为空白，
+> §10.4 又要求 TLS 后端内置在 `.inf rt` 段而 §1.3 禁止第三方依赖 ⇒ 这两件在规范/约束改口之前只能记录；
+> vtable 那件本轮**定死了偏移表**（`docs/internals/runtime-abi.md` §1，唯一真值 = `hir::Layouter::vtable_record`，
+> 文档是被读回来比对的那一侧）。
+> **下一轮 = §1 第一个 `[ ]` = F5**（`infy fmt` / `infy expand` 的目录参数与 `infy check` 不一致）。起手现成件（本轮已定位，不必重审）：
+> 失败点 = `cli.rs:1616 fmt_cmd`（`1641` 那句 `error: 无法读取 …` 就是把目录当文件 `read` 的现场）与 `cli.rs:1711 expand_cmd`；
+> `check` 那条走的是 `load_scoped()` 的 module 根发现（`MODULE.infy.toml`），三条命令要一致就得让 fmt/expand 也接同一套发现，
+> 而不是各写一份。验收按 F5 原文：三条命令各带目录参数行为一致 + 进 `src/cli.rs` 的测试。
+> **本轮实测出三条真缺陷，已按顺序登记在 F39 之后：F40 / F41 / F42**（F40 = 任何 `import "std/…"` 都不产生绑定 ⇒
+> 整个 §10 面从源码够不到，`cli.rs:330` 的 `ImportSource::Std => {}` 空臂是正主，也是 F19(a) 的上游；
+> F41 = `dyn` 上转缺失；F42 = `impl` 方法体里 `self.field` 恒 `E-0110`，根因已读到行）。**别跳指针去抓它们**，
+> 但 F40 与 F5 都要动 `load`/阶段 [3]，接 F5 时如果顺手看清了绑定面，就把 F40 的复例贴在 RUNLOG 里，不要半修。
+> **一条口径给下一轮（本轮自伤一次记下的）**：`rt_tests` / 两份 IFBC 二进制**必须在 `target/scratch` 下运行** ——
+> `test_rt.c:1501` 的夹具路径写死 `../../runtime/fixtures/…`，在仓库根跑会 segfault + 一串假 FAIL（看着像回归，其实是 CWD）。
+> **基线（本轮收尾复跑）**：`cargo test --offline --lib` **535 passed / 0 failed**（= 531 + 4）、
+> `cargo check --offline --lib` **0 error / 0 warning**、`cargo build --offline --release` exit 0、
+> tour 四条 + `--verify-reproducible` 全 exit **0**（本机产物仍 **199975** / C11 **12513**）、rt **32335/0**、
+> 两条 IFBC **180/180** + `cmp` 逐字节相同、`infy conformance --report` 仍 exit **1**（83 = 77/0/6 · 92.8%）、`fmt --check` 仍 exit **2**（F6）。
+> 措辞红线不变：「两侧装载期校验等价」仍不许讲（F26 前半 / D-42 (a)–(e)）；覆盖 83/2300 ⇒ 任何文档
+> 不得出现「INFY v2.0 兼容」的肯定式声称（逐物理行判，否定标记必须与声称同一行）。
+> **F4 勾 `[x]` 不声称的三件**：`infy lsp` 能用、`std.net` 能调用、跨 `.infib` 的 `dyn` 链接成立 —— 三条都是
+> **明确未实现**（D-50），本轮只把"拒绝的形态"钉住。
+> **（以下为 F4 轮之前各轮的指针，已被上面一段取代，保留作历史）**
 
 > **cron-26 轮收尾（2026-10-16）：F1 已勾 `[x]`，本段取代下一段（同轮的「F1 回到 `[ ]`」那段）** ——
 > 含 EOL 次序修复的那个 commit（`c7312eb`）触发的 **run `38912466381`（run_number 4）= `success`，步 3-12 逐条 `success`**，

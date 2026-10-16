@@ -3502,4 +3502,47 @@ fn main() { }
         assert!(u.contains("conformance [cases/]"), "usage() 缺 §13.4 的 conformance 那一行");
         assert!(!u.contains("doc / conformance"), "usage() 仍把 conformance 说成未实现");
     }
+
+    /// D-50(a)：`infy lsp` 的**拒绝形态**是 notice + §13.4 的 1 档。规范面只有 §13.1 的
+    /// `infy lsp   Language Server（可选）` 一行，而附录 C-7「仍缺 ④」明写"LSP 的增量诊断与 §9.4
+    /// 的逐字节一致性"没有定义 ⇒ 规范先于实现。这条锁的是两个方向：不许哪天变成退出 0 的空
+    /// server（假成功），也不许 `usage()` 不再把 lsp 列在未实现行。
+    #[test]
+    fn lsp_is_refused_out_loud_and_never_as_a_working_server() {
+        assert!(NOT_IMPLEMENTED.contains(&"lsp"), "lsp 未实现 ⇒ 必须留在拒绝臂里（D-50(a)）");
+        let bare = vec!["infy".to_string(), "lsp".to_string()];
+        assert_eq!(exit::GENERIC, run(&bare), "`infy lsp` 走 §13.4 的 1 档");
+        let with_dir = vec!["infy".to_string(), "lsp".to_string(), "examples/tour".to_string()];
+        assert_eq!(exit::GENERIC, run(&with_dir), "带目录参数也不许假装在服务");
+        assert!(
+            usage().contains("bench / doc / ingest / sumdb / lsp"),
+            "usage() 必须继续把 lsp 列在未实现那一行"
+        );
+    }
+
+    /// D-50(b)：`std.net` 的三条（`http_get`/`http_post`/`websocket_connect`）从 INFY 源码**够不到**，
+    /// 而 `infy check` 因此只能停在诊断档 —— 实测：`import "std/net" as net;` 与全限定
+    /// `std.net.http_get(…)` 都是 `E-0101 未声明的标识符` + `E-0110 类型 <invalid> 没有方法 …`、exit 2。
+    /// **拒绝的理由目前是错的**：真正的根因不是"net 未实现"，而是任何 `import "std/*"` 都不产生绑定，
+    /// 连有 native 的 `std.fs.read_to_str` 也吃同一对码（登记 BACKLOG F40）。所以这里的期望码集写的是
+    /// **现状**：修 F40 的那一轮必须把 D-50(b) 与本条的期望一起改掉，不许只把测试放宽。
+    #[test]
+    fn a_std_package_call_is_refused_and_never_faked() {
+        let dir = scratch_module(
+            "cli-f4-std",
+            "",
+            "#![infy_version = \"2.0\"]\n\npackage embed\n\nimport \"std/net\" as net;\nimport \"std/fs\" as fs;\n\n\
+             fn main() {\n    let a = net.http_get(\"https://example.com\");\n    let b = fs.read_to_str(\"x.txt\");\n}\n",
+        );
+        let v = check_verdict(&dir, &Scope::default()).expect("module loads");
+        let es: Vec<String> = v.codes.iter().filter(|c| c.starts_with("E-")).cloned().collect();
+        assert_eq!(
+            es,
+            vec!["E-0101", "E-0110", "E-0101", "E-0110"],
+            "两条 std 调用各一对码，顺序随源码：{}",
+            v.rendered
+        );
+        assert_eq!(v.exit, exit::DIAGNOSED, "够不到的 std 调用不许被判成通过");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 530 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 535 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ cargo check --offline --lib
 Finished `dev` profile  (0 warnings —— F2 轮把 50 条一次清零：20 条 `unreachable pattern`、6 条 unused import、6 条 unused variable、3 条 `depth` 赋值不读、2 条多余 `mut`、2 条 never-constructed 变体、11 条 never-used fn/method/field；**没有用 `#[allow(...)]` 消数**，其中两处是「没接上」而非「没用」，见下文 F2 一节。口径 = `cargo check --offline --lib --message-format=short` 先 `touch src/lib.rs` 再计数；上一档 50 = F1 轮，51 → 50 = D4(1) 轮删掉 `CodeBuilder.bounds`)
 $ infy check examples/tour
@@ -132,13 +132,13 @@ $ infy conformance --update-golden                 # §12.4 要求显式授权�
 error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权（`--i-know-this-is-breaking`），因为改动黄金文件等于改语义。
 ```
 
-530 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 530；F3 轮实测）：
-`lexer` 79 · `derive` 57 · `fmt` 39 · `cli` **39**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → **F2 轮 39** = §9.6 `[lints]` 的成对断言） ·
+535 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 535；F4 轮实测）：
+`lexer` 79 · `derive` 57 · `fmt` 39 · `cli` **41**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → F2 轮 39 → **F4 轮 41** = D-50(a) 的 `infy lsp` 拒绝形态 + D-50(b) 的 std 调用不可达） ·
 `macro_expand` 35 · `btrack` **31**（D1(1) 前是 0，D1(2) 轮 23 → 30，**F2 轮 +1** = wheel 归档里每个成员按自己的 local header 偏移取数据） ·
-`atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **26**（D3 轮 22 → 26） · `pkg` 24 · `sema` 22 ·
-`ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` 20 · `artifact` 18 ·
-`toml` 15 · `borrow` 15 · `sha256` 12 · `conformance` **18**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫，**F3 轮 +1** = `.gitignore` 的一次性产物名单形状（按"谁产生它"列的六条一条不能少）+ 反向红线（不得宽到吞掉 `*.bin`/`*.md`/`*.rs` 或整个目录）+ 每个 `scripts/*.ps1` 的审计日志必须落在 `logs/`） · `codes` 9 ·
-`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = 530。
+`atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **27**（D3 轮 22 → 26，**F4 轮 +1** = 合法 `dyn` 形参在阶段 [8] 以条款号被拒） · `pkg` 24 · `sema` 22 ·
+`ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` **21**（**F4 轮 +1** = `docs/internals/runtime-abi.md` §1 写出的 vtable 偏移被读回来与布局器比） · `artifact` 18 ·
+`toml` 15 · `borrow` 15 · `sha256` 12 · `conformance` **19**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫，**F3 轮 +1** = `.gitignore` 的一次性产物名单形状（按"谁产生它"列的六条一条不能少）+ 反向红线（不得宽到吞掉 `*.bin`/`*.md`/`*.rs` 或整个目录）+ 每个 `scripts/*.ps1` 的审计日志必须落在 `logs/`，**F1 收尾 +1** = 语料 EOL 例外必须声明在全局规则之后） · `codes` 9 ·
+`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = **535**。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -1516,3 +1516,44 @@ tour 的 `check|build|run|test` + `--verify-reproducible` 全 exit **0**（本�
 `cargo build --offline --release` exit 0、tour 四条 + `--verify-reproducible` 全 exit 0（本机产物 **199975**）、
 C 四链（C 侧零改动）两份 `-c` 各 stderr **0 字节**、rt **32335/0**、两条 IFBC **180/180** + `cmp` 无差异。
 **下一轮 = §1 第一个 `[ ]` = F4**（`infy lsp` / `std.net` TLS / `dyn Trait` vtable；现成件见 BACKLOG §2）。
+
+## F4 轮（2026-10-16）：三件「明确未实现」定成有主、可测的记录（偏差 **D-50(a)–(c)**）
+
+F4 走的是验收允许的第二条路（**记录**，不是实现），因为三件里两件被规范自己挡住：
+附录 C-7「仍缺 ④」= LSP 的增量诊断与 §9.4 的逐字节一致性从未定义；§10.4 要求"TLS 后端由 `.inf rt` 段内置"，
+而 §1.3 的零第三方依赖约束下没有可依赖的密码学实现 ⇒ 本轮不做，改为**把拒绝的形态钉死**。
+
+实测三件的现状（全部是命令输出，不是推断）：
+
+| 项 | 实测 |
+|---|---|
+| `infy lsp` / `infy lsp examples/tour` | `notice: 'infy lsp' is not implemented in this build …`，exit **1** |
+| `import "std/net" as net;` 后调用 | `E-0101 未声明的标识符 'net'` + `E-0110 类型 <invalid> 没有方法 'http_get'`，`infy check` exit **2** |
+| 全限定 `std.net.http_get(…)` | 同样 `E-0101`（`未声明的标识符 'std'`）+ `E-0110`，exit **2** |
+| `fn f(x: dyn Shape) { }`（合法形参） | `infy check` exit **0** ⇒ 阶段 [1]-[5] 过得去；`infy build` = `error: codegen: 'dyn Trait' 的 vtable 发射未实现 …`、exit **6** |
+| `let s: dyn Shape = Sq{…}` | 阶段 [4] `E-0110 绑定类型不匹配：声明 Shape，实际 Sq` ⇒ 缺的是**上转**，不是 vtable（= **F41**） |
+| `import "std/fs" as fs;` 后调用 `fs.read_to_str` | 与 net **同一对码**（`E-0101` + `E-0110`）⇒ 有 native 入口的 std 项同样够不到（= **F40**） |
+
+落地面：`docs/internals/runtime-abi.md` §1 的 vtable 段补出**偏移表**（`drop@0:8 size@8:8 align@16:8`、
+方法 `i` = `24+8i`、`total = 24+8n`、胖指针 16/8）并写明"定了但没发射"；`hir::Layouter::vtable_record`
+（新增，`vtable_layout` 改为委托它）把每槽偏移暴露出来，测试**从文档把这三行读回来**再与布局器比
+（数只有一份真值 = 代码，文档是被测方）。负对照实测：文档里 `1@32:8` 改成 `1@33:8` ⇒
+`the_vtable_offsets_published_in_the_abi_doc_are_the_ones_the_layouter_produces` 红并报"文档里的方法 #1 槽 ≠ 布局器"，改回即绿。
+`stdlib.rs` 的模块头与两条函数注释**从假声称改成实话**（`STD` 表在本文件之外零消费者；
+`cli.rs:330` 的 `ImportSource::Std => {}` 空臂 = F40 的正主）；`codegen.rs` 两处 dyn 拒绝的文案
+原来指 `docs/coverage.md §11`（那一行讲的是 `HostApi`，指错了），改成指 `runtime-abi.md §1` / D-50(c) / F4。
+新增 4 条锁点：`cli` 39→**41**、`codegen` 26→**27**、`hir` 20→**21**。
+
+**基线（F4 轮收尾复跑）**：`cargo test --offline --lib` **535 passed / 0 failed**（= 531 + 4）、
+`cargo test --offline` 全目标 exit 0（535 / bin 0 / doc 0）、`cargo check --offline --lib --message-format=short`
+**0 error / 0 warning**、`cargo build --offline --release` exit 0、tour 四条 + `--verify-reproducible` 全 exit **0**
+（本机产物仍 **199975** 字节、C11 仍 **12513** 字节）、C 侧零改动仍复跑（两份 `-c` 各 stderr **0 字节**、
+rt **32335/0**、两条 IFBC **180/180** + `cmp` 逐字节相同）、`infy conformance --report` 仍 exit **1**
+（83 = 77/0/6 · 92.8% ⇒ 仍**不得**声称兼容）、`infy fmt --check` 仍 exit **2**（F6 未裁决）。
+**本轮踩到的一次自伤记录**：`rt_tests` 在仓库根跑会 segfault + 一串 FAIL —— 夹具路径是
+`../../runtime/fixtures/…`，**必须在 `target/scratch` 下运行**（`test_rt.c:1501` 注释写了这条契约）；
+按配方跑 = **32335/0**，不是回归。
+
+**下一轮 = §1 第一个 `[ ]` = F5**（`infy fmt` / `infy expand` 的目录参数与 `infy check` 不一致）。
+F40/F41/F42 是本轮实测出来的三条真缺陷，按 BACKLOG 顺序排在 F5 之后，不要跳过指针来抓它们。
+
