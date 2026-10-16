@@ -2,7 +2,9 @@
 
 package case
 
-struct Acc { pub n: u32 }
 fn work() { }
-chain A { var a: Acc = Acc { n: 0u32 }; work(); { start(chain = B); } }
-chain B { work(); }
+
+static mut SHARED: u32 = 0u32;
+
+chain A { work(); SHARED = SHARED + 1u32; }
+chain B { work(); SHARED = SHARED + 2u32; }

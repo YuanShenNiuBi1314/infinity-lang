@@ -1,7 +1,7 @@
 id = "4.7-ownership-0006"
 category = "4.7-ownership"
 clause = "§4.3"
-title = "可变状态跨链共享（UB-006）"
+title = "全局可变路径被两条链写（UB-006）"
 kind = "check"
-expect = ["E-0121"]
+expect = ["E-0121", "E-0121"]
 exit = 2

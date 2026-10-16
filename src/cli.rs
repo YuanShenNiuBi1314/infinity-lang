@@ -384,7 +384,7 @@ pub fn analyse(l: &mut Loaded) -> sema::Program {
     let link_units = collect_link_units(&l.files);
     let tuple: Vec<(FileId, String, ParsedFile)> = l.files.iter().map(|(f, pf)| (*f, l.file_pkg.get(f).cloned().unwrap_or_default(), pf.clone())).collect();
     let prog = sema::check_files(&l.sources, &mut l.handler, &l.manifest.module_path, &tuple, a_track, b_tracks, link_units);
-    borrow::check(&l.files, &l.sources, &mut l.handler, &prog);
+    borrow::check(&l.files, &l.file_pkg, &l.sources, &mut l.handler, &prog);
 
     // §7.6.1 pairing, the other direction: `sema` reports "@c 找不到配对的签名块" (it holds the
     // source block's own span), and this reports "#[link] 落空 / ABI 不受支持 / 前缀未注册". Both

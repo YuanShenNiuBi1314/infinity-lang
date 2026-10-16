@@ -226,6 +226,9 @@ pub struct ConstInfo {
     pub value: Option<ConstValue>,
     pub file: FileId,
     pub span: Span,
+    /// `static mut` only (§4.7.5): stage [5] needs it to find the process-global mutable paths
+    /// that UB-006 turns into `E-0121`. Always `false` for `const`.
+    pub is_mut: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -658,15 +661,15 @@ impl<'a> Checker<'a> {
                     self.emit("E-0060", span, "编译期求值遇到禁止构造", name, Some("const 初始值必须是编译期可求值的封闭构造（§2.12）".into()), None);
                 }
                 let idx = self.prog.consts.len();
-                self.prog.consts.push(ConstInfo { name: name.clone(), package: package.to_string(), ty: t, value, file: span.file, span });
+                self.prog.consts.push(ConstInfo { name: name.clone(), package: package.to_string(), ty: t, value, file: span.file, span, is_mut: false });
                 self.prog.by_path.insert((package.to_string(), name.clone()), ResolvedItem::Const(idx));
             }
-            ItemKind::Static { name, ty, init, .. } => {
+            ItemKind::Static { name, ty, init, is_mut, .. } => {
                 let generics = BTreeSet::new();
                 let t = match ty { Some(t) => self.ty_from_ast(t, &generics), None => Ty::Invalid };
                 let value = init.as_ref().and_then(|e| self.const_eval(e));
                 let idx = self.prog.statics.len();
-                self.prog.statics.push(ConstInfo { name: name.clone(), package: package.to_string(), ty: t, value, file: span.file, span });
+                self.prog.statics.push(ConstInfo { name: name.clone(), package: package.to_string(), ty: t, value, file: span.file, span, is_mut: *is_mut });
                 self.prog.by_path.insert((package.to_string(), name.clone()), ResolvedItem::Static(idx));
             }
             ItemKind::TypeAlias { name, ty, .. } => {
