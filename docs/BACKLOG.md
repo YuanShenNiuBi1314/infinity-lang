@@ -786,8 +786,9 @@
 
 ### 阶段 F：工程卫生（每轮顺手做一点，不许它长大）
 
-- [x] F1 `.github/workflows/ci.yml`：`cargo fmt --check`? 不适用（无 rustfmt 约定）→ 只做 `cargo build --offline --release` + `cargo test --offline` + `gcc` 跑 `runtime` 测试。
-      **F1 轮（2026-10-16）落地并勾 `[x]`**：新建 `.github/workflows/ci.yml`（单 job、11 步 = 2 个 `uses` + 9 个 `run`）+
+- [ ] F1 `.github/workflows/ci.yml`：`cargo fmt --check`? 不适用（无 rustfmt 约定）→ 只做 `cargo build --offline --release` + `cargo test --offline` + `gcc` 跑 `runtime` 测试。
+      **F1 轮（2026-10-16）= 实现与文档全部落地，但本条保持 `[ ]`**：验收条件按 §2 的 F1(4) 只认 `gh api …/actions/workflows`（及 runs）的**回查**，而本轮 `git push origin HEAD:toolchain` **三次全败**（3×`Recv failure: Connection was reset`，同一时刻 `gh api` 正常 ⇒ 仍是 `github.com:443` 抖动，不是 token/配置），远端 `toolchain` 仍 = `6fceaa5`、`…/actions/workflows` = **0**、`…/actions/runs` = **0** ⇒ 远端**还没有这条 workflow**，「CI 绿」与「CI 跑过」两句都不许写。**卡在哪**：推送。**下一轮从哪继续**：开头先补推 `ae2c58e` + 做账提交，再 `gh api …/actions/runs?branch=toolchain` 回查 run 是否被创建（首条 workflow 常需一次手动批准）；红了就按「runner 供给」（`gcc` 在 PATH 吗、`setup-python` 的缓存里有 3.14 吗）逐条判定，那两条在 yaml 里都是「缺了就红并打 PATH」而不是「缺了就跳」。**本地已实测的部分不重做**（下列数字均为 `ae2c58e` 所在工作树的复跑，非引用）。
+      **F1 轮（2026-10-16）落地（本条仍 `[ ]`，见上）**：新建 `.github/workflows/ci.yml`（单 job、11 步 = 2 个 `uses` + 9 个 `run`）+
       `.gitattributes` 一条把 workflow 自己钉成 `eol=lf` + README 的目录表与顶部 CI 行 + `docs/coverage.md` **P30**。
       **门禁内容**（逐条与 §1 的证据命令同源，本地按 GitHub 的执行方式 `bash --noprofile --norc -eo pipefail` 重放）：
       `cargo build --offline --release` exit **0**（23.8s）→ `cargo test --offline` exit **0**（**527 passed** + bin 的 0 项 + doc-test 的 0 项）→
@@ -1134,8 +1135,8 @@
 
 ## 2. 当前指针
 
-> **下一轮第一件事：F2 —— 消那 50 条编译告警**（§1 的第一个 `[ ]`；F2 自己写明「`cargo check` 输出为 0 warning 时勾掉」）。
-> **F1 轮（2026-10-16）已勾 `[x]`**：`.github/workflows/ci.yml` 落成 = `cargo build --offline --release` + `cargo test --offline` + `-Wall -Wextra` 的 C 侧编译自检（stderr 非空即红）+ rt/IFBC 两份 harness（IFBC 两条链 + `cmp`）+ tour 端到端 9 个 run 段，全部在本地按 GitHub 的执行方式逐步 exit 0；`conformance` **14 → 17** 把 yaml 的命令覆盖面、四个重写夹具的开关、Windows-only 与两条防假红守卫钉住。基线 **527 passed / 0 failed**、check **0 error / 50 warning**（只报不门禁）、`infy conformance --report` 仍 83 = Pass 77 / Fail 0 / Blocked 6 ⇒ **exit 1**、`fmt --check` 仍 **exit 2**（F6 未裁决）。证据 = `docs/coverage.md` **P30** 与 `docs/status.md` 的 F1 一节；远端 run 的结论只认 RUNLOG `cron-23-push` 行的 `gh api` 回查。
+> **下一轮第一件事：先补推 `toolchain`（现算欠账 2 = `ae2c58e` + 本轮做账提交），再用 `gh api …/actions/runs?branch=toolchain` 回查 F1 那条 workflow 有没有被创建/需不需要手动批准** ⇒ 做到了才把 F1 勾 `[x]`；红了就按「runner 供给」逐条判（`gcc`/CPython 3.14），照实记结论。之后就做 §1 的第一个 `[ ]` = **F2 —— 消那 50 条编译告警**（F2 自己写明「`cargo check` 输出为 0 warning 时勾掉」）。
+> **F1 轮（2026-10-16）= 落地但仍未勾 `[ ]`**（远端回查没做到）：`.github/workflows/ci.yml` 落成 = `cargo build --offline --release` + `cargo test --offline` + `-Wall -Wextra` 的 C 侧编译自检（stderr 非空即红）+ rt/IFBC 两份 harness（IFBC 两条链 + `cmp`）+ tour 端到端 9 个 run 段，全部在本地按 GitHub 的执行方式逐步 exit 0；`conformance` **14 → 17** 把 yaml 的命令覆盖面、四个重写夹具的开关、Windows-only 与两条防假红守卫钉住。基线 **527 passed / 0 failed**、check **0 error / 50 warning**（只报不门禁）、`infy conformance --report` 仍 83 = Pass 77 / Fail 0 / Blocked 6 ⇒ **exit 1**、`fmt --check` 仍 **exit 2**（F6 未裁决）。证据 = `docs/coverage.md` **P30** 与 `docs/status.md` 的 F1 一节；远端 run 的结论只认 RUNLOG `cron-23-push` 行的 `gh api` 回查。
 > **E3 轮（2026-10-16）已勾 `[x]`**：§12 逐分类通过率落进 `docs/coverage.md` **§6**（20 行 × 11 列 + 三档小计 + 合计 + 缺口三分类）与 README 的「距 §12 的 100% 还差哪些类」，副本配了逐格回核 + 红线机检 ⇒ `conformance` **11 → 14**、基线 **524 passed / 0 failed**、`cargo check` **0 error / 50 warning**（HEAD 全量重检的告警**集合**与工作树逐条 `diff` 相同）、`infy conformance --report` 的数字**一字未变**（83 = Pass 77 / Fail 0 / Blocked 6 · 92.8% · 覆盖 83/2300 ⇒ exit 1）。证据提交 `008bd93`。
 > F2 的接手要点（四条都不用重新审计，本轮刚量过）：
 > (1) **50 条里有 20 条是 `unreachable pattern`** ⇒ 这不是工程卫生，是 **F9 那一族**（永不执行的臂）。位置 = `src/borrow.rs:436`（**同一条长行上 11 个臂**）· `src/parser.rs:1675/2179/2256/2540` · `src/ifbc.rs:1166`（两条）· `src/btrack.rs:1406` · `src/fmt.rs:528` · `src/pkg.rs:837`。逐条要么删臂、要么承认**上游判据写错**（parser 那四处按 F9 的结论就是 `ExprKind::Int` 从不产生 ⇒ 死臂该删，但 `Attr::int_arg()` 这类**只匹配它**的判据要先审）。**不许**用 `#[allow(unreachable_patterns)]` 消数：那是把 F2 变成「看起来 0 告警」。
