@@ -814,8 +814,11 @@
       ⇒ 归一化结果 ≠ blob ⇒ 在 `core.autocrlf=true` 的检出里**永久 dirty**。本机 `git clone` 到 `target/scratch/` 当场复现
       （`porcelain` 恰这一条、`check-attr` 给 `text: set / eol: lf`）；**对照组** = `2-lexical-0001` 只有 **1 个裸 CR、0 个 CRLF 对**
       ⇒ clean 无事可做 ⇒ 它不脏（与远端只报一个文件逐字相符）。**字节其实没被 smudge 改写**（工作树仍是 6 个 CR，实测）
-      ⇒ 这是「守卫红而用例语义还活着」那一族；也因此 **run #2 的步 3 对同一条规则没红 = 运气** —— `git status` 命中 racy-clean 时
-      只信 stat 缓存、不比内容 ⇒ **「守卫绿」从来不等价于「树干净」**（要不要让守卫连内容一起查，留给下一轮，本轮不扩大改动面）。
+      ⇒ 这是「守卫红而用例语义还活着」那一族；也因此 **run #2 的步 3 对同一条规则没红** —— **观察到的事实是**：同一棵树、同一份属性表，
+      run #2 步 3 绿而 run #3 步 3 红，且隔离探针里 `git status` 的读数会**随时间翻转**（刚 clone 后 0 行、几分钟后 1 行）
+      ⇒ 守卫的结论不是由树的内容单独决定的。**归因（机制推断，不是本轮直接量到 git 内部）**：`git status` 在 stat 缓存
+      可信时不比内容（racy-clean 那一族）。**可执行的那句结论**：`git status --porcelain` 当行尾/改写守卫不可靠，两个方向都不可靠
+      —— **「守卫绿」从来不等价于「树干净」**（要不要让守卫连内容一起查，留给下一轮，本轮不扩大改动面）。
       **修法已落地并双向验证**：`.gitattributes` 把 `conformance/cases/**`（含 `**.infy` / `**.infy.toml`）的 `-text`
       **重新声明在全局规则之后**；新测试 `the_corpus_eol_exception_is_declared_after_the_global_infy_rule` 两头钉 ——
       ① 次序（`rposition` 比较，反了就红并指名两行行号）② 工作树里那两条正反例仍是它声称的形状（CRLF 对 ≥ 6 / 裸 CR 且 0 个 CRLF 对）。
@@ -1281,8 +1284,9 @@
 > 被 clean 过滤器抹成 LF ⇒ 归一化 ≠ blob ⇒ **在 autocrlf=true 的检出里永久 dirty**。
 > 本机 `git clone` 到 `target/scratch/eolprobe` 复现（`porcelain` 恰这一条）；对照组 `2-lexical-0001` =
 > **1 个裸 CR / 0 个 CRLF 对** ⇒ 不脏（远端也只报一个文件）。**字节没被 smudge 改写**（工作树仍是 6 个 CR）
-> ⇒ 用例语义还活着 ⇒ **run #2 步 3 没红是运气**（`git status` 命中 racy-clean 时只信 stat 缓存不比内容）
-> ⇒ **「守卫绿」≠「树干净」**，这句是给下一轮的判据、不是给 CI 加冕。
+> ⇒ 用例语义还活着 ⇒ **run #2 步 3 没红 = 运气**（**观察**：同一棵树、同一份属性表，run #2 绿而 run #3 红，且隔离探针里
+> `git status` 的读数随时间翻转 ⇒ 守卫的结论不由内容单独决定；**机制归因 = 推断**，stat 缓存可信时 `git status` 不比内容
+> （racy-clean 那一族），本轮没直接量到 git 内部）⇒ **「守卫绿」≠「树干净」**，这句是给下一轮的判据、不是给 CI 加冕。
 > **修法**：语料例外的 `-text` 重新声明在全局规则**之后**（三行：`conformance/cases/**`、`**.infy`、`**.infy.toml`）；
 > 新测试 `the_corpus_eol_exception_is_declared_after_the_global_infy_rule` 两头钉（次序 + 工作树里两条正反例的形状），
 > **两条负对照都实测变红**（翻次序 → 红并报行号；抹 0002 的 CR → 红并报「0 个 CRLF 对」），`cmp` 验证复原。
