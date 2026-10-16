@@ -1,0 +1,19 @@
+2026-10-16 19:30:28  TRY    #1 HEAD=427c851 -> origin/toolchain
+2026-10-16 19:31:32  DRYRUN HEAD=427c851 -> origin/toolchain
+2026-10-16 19:31:34  TRY   #1 HEAD=427c851 -> origin/toolchain
+2026-10-16 19:31:56    out: git.exe : fatal: unable to access 'https://github.com/YuanShenNiuBi1314/infinity-lang.git/': Failed to connect to githu
+2026-10-16 19:31:56    out: b.com:443 after 21093 ms: Could not connect to server
+2026-10-16 19:31:56    out: À˘‘⁄Œª÷√ F:\infinity”Ô—‘\INFY_DELIVERY_v0.1.0\infinity-lang\scripts\push-branch.ps1:37 ◊÷∑˚: 10
+2026-10-16 19:31:56    out: +   $out = & $Exe @Args_ 2>&1 | Out-String
+2026-10-16 19:31:56    out: +          ~~~~~~~~~~~~~~~~~~
+2026-10-16 19:31:56    out:     + CategoryInfo          : NotSpecified: (fatal: unable t...nnect to server:String) [], RemoteException
+2026-10-16 19:31:56    out:     + FullyQualifiedErrorId : NativeCommandError
+2026-10-16 19:32:04  TRY   #2 HEAD=427c851 -> origin/toolchain
+2026-10-16 19:32:25    out: git.exe : fatal: unable to access 'https://github.com/YuanShenNiuBi1314/infinity-lang.git/': Failed to connect to githu
+2026-10-16 19:32:25    out: b.com:443 after 21108 ms: Could not connect to server
+2026-10-16 19:32:25    out: À˘‘⁄Œª÷√ F:\infinity”Ô—‘\INFY_DELIVERY_v0.1.0\infinity-lang\scripts\push-branch.ps1:37 ◊÷∑˚: 10
+2026-10-16 19:32:25    out: +   $out = & $Exe @Args_ 2>&1 | Out-String
+2026-10-16 19:32:25    out: +          ~~~~~~~~~~~~~~~~~~
+2026-10-16 19:32:25    out:     + CategoryInfo          : NotSpecified: (fatal: unable t...nnect to server:String) [], RemoteException
+2026-10-16 19:32:25    out:     + FullyQualifiedErrorId : NativeCommandError
+2026-10-16 19:32:36  VERIFY push_rc=128 ‘∂∂À=1896c2abc0a81c131651005a70a179457fa59e5e ±æµÿ=427c851a5448750dd8781a0e835388c31a4b19c5 «∑’À=2
