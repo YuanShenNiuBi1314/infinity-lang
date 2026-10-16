@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 541 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 548 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out   # **F7 轮 541 → 548**，`borrow` 15 → 22（`E-0121` 判据换形）
 $ cargo check --offline --lib
 Finished `dev` profile  (0 warnings —— F2 轮把 50 条一次清零：20 条 `unreachable pattern`、6 条 unused import、6 条 unused variable、3 条 `depth` 赋值不读、2 条多余 `mut`、2 条 never-constructed 变体、11 条 never-used fn/method/field；**没有用 `#[allow(...)]` 消数**，其中两处是「没接上」而非「没用」，见下文 F2 一节。口径 = `cargo check --offline --lib --message-format=short` 先 `touch src/lib.rs` 再计数；上一档 50 = F1 轮，51 → 50 = D4(1) 轮删掉 `CodeBuilder.bounds`)
 $ infy check examples/tour
@@ -134,13 +134,13 @@ error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权�
 
 > **一行口径（F6 轮，2026-10-17）**：`infy fmt --check examples/tour` 从本轮起 **exit 0**（偏差 **D-17** 已裁 = §9.5 胜、样例侧改写到规范形态）。下文各轮小节里的 `exit 2`（F6 未裁决）、生成 C11 **12513** 字节、`build-id 4d8250b5…55ba`、节点表行号 **8/9/10/11/16/19** 全是**裁决前那棵树**的当时实测值，保留为历史；现值 = **12512** / **`d7c4408e…370015`** / **7/8/9/10/16/20**（产物 199975 与段 blob 738 没动）。这三组数只随 tour 的字节动 —— 谁把规范化回滚掉，CI 步 12 的门禁与 `fmt::tests::the_tour_sources_are_the_9_5_fixpoint` 会同时红，不会静默。
 
-541 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 541；**F6 轮实测**）：
+548 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 548；**F7 轮实测**，上一版 541 = F6 轮实测）：
 `lexer` 79 · `derive` 57 · `fmt` **40**（**F6 轮 +1** = `the_tour_sources_are_the_9_5_fixpoint`，把 `examples/tour` 读回来逐字节比它自己的 §9.5 输出） · `cli` **46**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → F2 轮 39 → F4 轮 41 → **F5 轮 46** = `VALUE_OPTS` 的逐项跳值 + 取值点源码回扫 + 三条命令的目录参数本体 + 空目录/缺 module 的显式失败 + `expand --derive` 的显式拒绝） ·
 `macro_expand` 35 · `btrack` **31**（D1(1) 前是 0，D1(2) 轮 23 → 30，**F2 轮 +1** = wheel 归档里每个成员按自己的 local header 偏移取数据） ·
 `atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **27**（D3 轮 22 → 26，**F4 轮 +1** = 合法 `dyn` 形参在阶段 [8] 以条款号被拒） · `pkg` 24 · `sema` 22 ·
 `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` **21**（**F4 轮 +1** = `docs/internals/runtime-abi.md` §1 写出的 vtable 偏移被读回来与布局器比） · `artifact` 18 ·
-`toml` 15 · `borrow` 15 · `sha256` 12 · `conformance` **19**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫，**F3 轮 +1** = `.gitignore` 的一次性产物名单形状（按"谁产生它"列的六条一条不能少）+ 反向红线（不得宽到吞掉 `*.bin`/`*.md`/`*.rs` 或整个目录）+ 每个 `scripts/*.ps1` 的审计日志必须落在 `logs/`，**F1 收尾 +1** = 语料 EOL 例外必须声明在全局规则之后） · `codes` 9 ·
-`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = **541**。
+`toml` 15 · `borrow` **22**（**F7 轮 15 → 22** = `E-0121` 的判据从「链内存活绑定」换到「全局可变路径」后的 3 条正例 + 7 条反例（含 A4 轮留下的 3 条边界）+ 1 条 span 锁点，见下文 F7 一节） · `sha256` 12 · `conformance` **19**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫，**F3 轮 +1** = `.gitignore` 的一次性产物名单形状（按"谁产生它"列的六条一条不能少）+ 反向红线（不得宽到吞掉 `*.bin`/`*.md`/`*.rs` 或整个目录）+ 每个 `scripts/*.ps1` 的审计日志必须落在 `logs/`，**F1 收尾 +1** = 语料 EOL 例外必须声明在全局规则之后） · `codes` 9 ·
+`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = **548**。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -1670,3 +1670,60 @@ C 侧零改动仍复跑四条链（rt **32335/0**、两条 IFBC **180/180** 且 
 "任何 fmt 实验只做在 `target/scratch/` 副本上"这条口径**不许撤**（tour 现在自己是不动点，别的 module 不是）。
 **本轮新登记 F46**：`logs/*.log` 的中文按 ANSI(GBK) 落盘 ⇒ 审计日志跨工具读是乱码（`file logs/*.log` 三份同结论），
 新脚本已用 `-Encoding utf8`。**F43/F45 未动**。
+
+## F7 轮（2026-10-17）：D-19 从 OPEN 改判 —— `E-0121` 的判据挂到「全局可变路径」，交付提交 `13ab2cf`
+
+**逐条裁决（三条都判"实现错"，不是规范矛盾）**：
+- **(a) 数值不排除**。旧条件 `mutable && !ty.is_numeric() && !matches!(ty, Ty::Rc{..})` 里那两个否决都没有规范依据：
+  数值绑定不比结构体绑定安全，非原子 `Rc` 的引用计数本身就是竞争对象。类型形状今后**只用于豁免**
+  （§4.3 点名的 `Arc<..>`/`Mutex<..>`/`Channel<..>` 载体），不用于入选。
+- **(b) 链内局部 `var` 不报**。§8.2（spec:1297）「每条焦点拥有独立栈与独立所有权作用域，跨焦点共享只能经
+  `Arc`/`Channel`」+ §8.5（spec:1319）的焦点定义 + `codegen.rs:1639` 把链体声明落成**帧槽** ⇒
+  "两条链写同一个链内 `var`"在语言模型里**不可构造**，旧判据报的正是这个不可达形状。
+  反方证据照实登记：§4.3 的字面措辞「直接写同一 `var`」在 §8.2/§8.5 下没有对应形状（规范措辞缺口），
+  本实现按 §13 码表那句「多焦点写同一绑定」（spec:1421）取**可达**读法 = 进程级全局路径。
+- **span**。`b_span_default()` = `Span::empty_at(0,0)` ⇒ §9.2 打不出 `file:line:col`。现主区域 = 写入处、
+  第二区域 = 声明处；`diag::render_one`（`diag.rs:478`）只渲染 `primary` 那一区 ⇒ 声明座标**同时**写进 note，
+  否则第二区域只有 `--diag-json` 出口看得见（护栏只做一半就是没做）。
+
+**新判据（`note_write` + `emit_races`）**：候选 = `static mut`；写入形状 = 赋值目标 / 表达式型赋值 / `&mut G`，
+根标识符沿 `G.f`/`G[i]`/`*G` 下钻；同名语句级绑定**遮蔽**全局（遮蔽的写不入选）。判定时点挪到**走完整个 module 之后**
+（"有没有第二个焦点"要看全部链体）：可调用体写 ⇒ 报；≥2 条不同链写 ⇒ 报；唯一写链被任一 `start(chain = C)` 点名
+（含自启，§8.2 重入安全 = 第二条焦点）⇒ 报；**只有这一条链且模块里没人 start 它** ⇒ 能证明单焦点 ⇒ 沉默
+（§4.7.2 第 6 条要的是"证明不了就报"，不是"看见全局就报"）。
+接口随动两处：`sema::ConstInfo` 补 `is_mut`（`const` 恒 `false`），`borrow::check` 补 `file_pkg` 参数
+⇒ 全局按 `(package, name)` 键，避免跨 package 同名 `static` 被并成一个竞争对（`cli.rs:387` 一处调用随动）。
+
+**外部用例换形**：`conformance/cases/4.7-ownership/4.7-ownership-0006` 的源从"链内 `var a: Acc` + `start(chain=B)`"
+换成"两条链写同一 `static mut SHARED`"，`expect` 相应改成 `["E-0121","E-0121"]`（运行器比的是**排序多重集**，
+两条写点就是两条码 —— 这是换形前先实测出来的，不是猜的），`clause`/`kind`/`exit` 未动 ⇒ 仍 Pass，
+用例集 83 = 77/0/6 与 §6 那张表都没变。
+**换向的证据**（不是自证）：换判据后、改用例前那次 `cargo test --offline --lib` 实测
+`4.7-ownership-0006 … 期望 ["E-0121"] / exit 2，实得 [] / exit 0` ⇒ 旧形状确实不再报，(b) 的方向由命令输出给出。
+
+**锁点（`borrow` 15 → 22，探针实测能红）**：正例 `numeric_global_written_by_two_chains_is_e0121` /
+`restarted_chain_global_write_is_e0121` / `global_written_from_a_callable_body_is_e0121`，
+反例 `chain_local_var_across_start_is_not_e0121` / `single_chain_never_restarted_is_clean` /
+`arc_carrier_global_is_clean` / `shadowed_local_write_is_clean`（+ A4 轮留下的 3 条边界），
+span `e0121_reports_the_write_site_and_the_declaration`（`spans.len() == 2`、两区行号都 > 0、
+写入处行 5 / 声明处行 4、note 含 `p/mod.infy:4:`）。三处变异：`sema` 的 `is_mut: *is_mut` → `false`
+⇒ 4 条正例 + 2 条用例锁点红；`sanctioned_carrier` 的 `Arc` 臂 → `false` ⇒ `arc_carrier_global_is_clean` 红；
+遮蔽守卫改成恒不返回 ⇒ `shadowed_local_write_is_clean` 红。三处探针逐一复原，收尾复跑全量 **548/0**。
+
+**基线（本轮收尾复跑）**：`cargo test --offline --lib` **548 passed / 0 failed**（= 541 + 7）、
+`cargo test --offline` 全目标 = 548 + bin 0 + doc-test 0、`cargo check --offline --lib` **0 error / 0 warning**
+（`touch src/borrow.rs src/sema.rs src/cli.rs` 后计数）、tour 的 `check|build|run|test` 与
+`infy fmt --check examples/tour` 全 exit **0**（tour 的字节与生成 C11 **12512** / build-id **`d7c4408e…370015`**
+**没动** —— 本轮不碰 `fmt`/`hir`/`codegen`，所以 F6 那三组本机常数不随本轮移位）、
+`infy conformance --report` 仍 **83 = 77 Pass / 0 Fail / 6 Blocked ⇒ exit 1**（92.8% ⇒ 仍**不得**声称兼容）。
+**C 侧本轮零改动、也就没复跑**（rt **32335/0** 与 IFBC **180/180** 那两条链的数字仍是 F6 轮口径）：改动只在 Rust 侧，
+下轮 F8 是纯 C 的活，必须把那四条链跑回来。
+端到端实样（`target/scratch/f7/mod`，3 个写点）：`infy check` 打 3 条 `E-0121`、exit **2**，每条都带
+`app/main.infy:行:列` 与 note 里的 `声明于 app/main.infy:5:1`。
+
+**本轮实测揪出并新登记 F47**：§4.7.5 的六项 `unsafe` 门禁里 **`E-1031`/`E-1032`/`E-1033`/`E-1034` 四项 0 发射点**
+（`E-1030` 3 处、`E-0721` 2 处在发），实测"链体内写 `static mut`"的 module `infy check` 给 **0 error / exit 0**；
+而 `src/borrow.rs` 的模块文档把 `E-1031` 与 `E-1001…E-0121` 并列成"已实现判据集"= **假声称**，本轮已改成
+"Not implemented" 并指名 F47。`check_statics` 的空臂注释也写明"这里刻意沉默，不是这里已经做了"。
+**F43/F44/F45/F46 未动**。**勾掉 F7 之后仍不许说的**：INFY 有数据竞争检测器 —— 本轮做的是 §4.3 的**可达**形状
+（`static mut` 的并发写），读侧竞争、闭包捕获跨焦点、跨链裸 `&mut T` 三面**没有发射点**（D-19 剩余面 ①②③）。

@@ -171,15 +171,48 @@ A3 轮实测：`(cd examples/tour && infy fmt --check)` → `2 file(s) are not c
 §2.8 承诺，由 `E-0053` 承担；`sema` 的 `E-0043` 分支只对词法器承认的后缀形态生效（溢出判定仍走 `E-0043`，已测）。
 回归测试 = `sema::tests::unknown_literal_suffix_is_rejected`（断言"必须被拒绝"，不锁死具体码）。
 
-## D-19 `E-0121` 目前低估：数值可变绑定不报 —— **未收敛（OPEN，BACKLOG F7）**
-§4.3/UB-006 要求"跨链裸共享可变状态"一律编译期报错。`src/borrow.rs` 的实现是保守近似：在链 `A` 内出现
-`start(chain = B)`（B ≠ A）时，检查当前作用域的存活绑定，条件为 `mutable && !ty.is_numeric() && !matches!(ty, Ty::Rc{..})`。
-后果：`var a: Acc = …` 会报 `E-0121`（已测），而 `var n: u32 = 0` 同样跨链可达却**静默通过**——数值绑定并不比
-结构体绑定更安全，排除它没有规范依据。同时该判定把"链的局部 `var`"当成跨链共享，方向上偏严（局部绑定按 §8.2
-属于各焦点私有栈，真正危险的是捕获/全局路径）。
-**本轮不改动**：判据本身需要与 §8.5 焦点模型对齐后才谈收窄或放宽，属规范解释问题；A4 只补了它现在**确实**报告的
-那一条（`borrow::tests::mutable_state_shared_across_chains_is_e0121`）与三条不该误报的边界（`Arc`/同链重入/`let`）。
-F7 验收 = 逐条判定数值绑定是否必须报、以及局部 `var` 是否应豁免，并把结论写回本条。
+## D-19 `E-0121` 的判据挂到「全局可变路径」：数值也报、链内局部 `var` 不报、span 指向写入处 —— **已裁决（F7，交付提交 `13ab2cf`）**
+**规范给的是三处，不是一处**：§4.3（spec:563）「跨链裸 `&mut T` / 直接写同一 `var` → `E-0121`」、
+UB-006（spec:675）「跨链无锁可变共享 ⇒ 必须 `E-0121` 编译错误，不是运行时竞争检测」、
+§13 码表（spec:1421）触发场景写死「**多焦点写同一绑定**」。而 §8.2（spec:1297）与 §8.5（spec:1319）规定
+每条焦点拥有**独立栈与独立所有权作用域**、跨焦点共享只能经 `Arc`/`Channel`；`src/codegen.rs:1639` 把链体内的
+`let`/`var` 落成**帧槽**（frame slot）。于是 F7 之前那条判据（`src/borrow.rs:460`：`start(chain=B)` 时扫存活绑定，
+条件 `mutable && !ty.is_numeric() && !matches!(ty, Ty::Rc{..})`）两头都错：
+
+- **(a) 数值不排除**（判「实现错」）。数值绑定不比结构体绑定安全，排除它没有任何规范依据。
+  新判据里类型形状只用于**豁免**，不用于入选。
+- **(b) 链内局部 `var` 不报**（判「实现错」，方向偏严）。§8.2 的独立栈使「两条链写同一个链内 `var`」
+  在语言模型里**不可构造**；旧判据报的正是这个不可达形状。反方证据照实登记：§4.3 的字面措辞
+  「直接写同一 `var`」在 §8.2/§8.5 下没有对应形状，属规范措辞缺口 —— 本实现按 §13 那句
+  「多焦点写同一绑定」取**可达**读法：能同时属于两个焦点的绑定只有进程级全局路径。
+- **span 判「实现错」**。`b_span_default()` = `Span::empty_at(0,0)` ⇒ §9.2 打不出 `file:line:col`。
+  现主区域 = 写入处，第二区域 = 声明处；因 `diag::render_one` 只渲染 `primary` 那一区（`src/diag.rs:478`），
+  声明座标同时写进 note，否则第二区域只有 JSON 出口看得见。
+
+**新判据（`src/borrow.rs` 的 `note_write` + `emit_races`）**：把 `static mut` 当作候选全局可变路径，
+按 `(package, name)` 键（`sema::ConstInfo` 为此新增 `is_mut`；`borrow::check` 为此新增 `file_pkg` 参数），
+收集"写入形状"= 赋值目标 / 表达式型赋值 / `&mut G` 的根标识符（`G`、`G.f`、`G[i]`、`*G` 都算穿过去写），
+同名的语句级绑定会**遮蔽**全局（§4.3 把两者分开），被遮蔽的写不入选。走完整个 module 后才判定，因为
+"有没有第二个焦点"要看全部链体：可调用体（`fn`/`event`/`impl` 方法）写 ⇒ 报；≥2 条不同链写 ⇒ 报；
+唯一写链被任一 `start(chain = C)` 点名（含自启，§8.2 重入安全=第二条焦点）⇒ 报；
+**只有这一条链、且模块里没人 start 它** ⇒ 这是分析能**证明**单焦点的形状，保持沉默（§4.7.2 第 6 条要求的是
+"证明不了就报"，不是"看见全局就报"）。豁免只给 §4.3 点名的载体：`Arc<..>`（sema 里 `Ty::Rc{atomic:true}`）
+与 `Mutex`/`RwLock`/`Channel`/`Guard`；非原子 `Rc` **不豁免**（引用计数本身就是竞争对象）。
+
+**明确未做、不许当成已做**（登记为 BACKLOG F47 与本段的剩余面）：
+① 读侧与写侧的竞争（§13 只写「写同一绑定」，实现只做写）；② 经 `Mutex`/`Channel` 句柄的**方法调用**
+跨链访问不做语义分析（只按类型豁免）；③ 闭包捕获跨焦点、跨链裸 `&mut T` 这两条 §4.3 危险面在当前前端
+**不可表达**（`start(chain=…)` 不带实参，闭包没有跨焦点通道），因此对应判据不存在发射点 —— 这不是
+"已实现并通过"，是"没有通往它的路径"；④ `E-1031`（§4.7.5 的 `static mut` 必须 `unsafe`）全链路无发射点，
+`src/borrow.rs` 的模块文档此前把它列为已实现，是假声称，现已改为显式"未实现"并注明 F47。
+**锁定点**：`borrow::tests` 的 `numeric_global_written_by_two_chains_is_e0121`、
+`restarted_chain_global_write_is_e0121`、`global_written_from_a_callable_body_is_e0121`、
+`chain_local_var_across_start_is_not_e0121`、`single_chain_never_restarted_is_clean`、
+`arc_carrier_global_is_clean`、`shadowed_local_write_is_clean`、`e0121_reports_the_write_site_and_the_declaration`
+（+ 原有 3 条不误报的边界）；外部用例 `conformance/cases/4.7-ownership/4.7-ownership-0006` 的源已换成
+两条链写同一 `static mut` 的形状（`expect = ["E-0121","E-0121"]`，仍 Pass）。
+**若审签否决 (b)**（即认为链内 `var` 也该报），要改的是 `emit_races` 的入选集与 0006 用例的源，
+而不是回滚 (a) 与 span 两条。
 
 ## D-20 `{:.N}` 对 `str` 数的是**字节**（回退到码点边界），`{:#X}` 前缀取小写 `0x`
 §10.11 只写了格式选项全集 `{:>10} {:<10} {:^10} {:0>10} {:.3} {:e} {:?} {:#?}`，既没说 `{:.N}` 的 `N`

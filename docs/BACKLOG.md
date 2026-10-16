@@ -992,7 +992,7 @@
       把 `pub\nenum Phase` 拼回一行即 FAILED）+ `ci.yml` 步 12 请进 `fmt --check examples/tour` 门禁
       （yaml 覆盖面测试的必需清单同批加该条，删掉 yaml 那行即 FAILED）。**F6 勾上后仍不许说**的是：规范 §14 围栏代码块
       自身是规范写法 —— 反方证据（全规范 0 处 `pub` 单独成行、5 处同行）如实写在 D-17 里供审签否决。
-- [ ] F7 **`E-0121` 的判据与 §4.3/UB-006 不一致**（A4 轮补测时确认，已写 `docs/spec-deviations.md` D-19，未改实现）：
+- [x] F7 **`E-0121` 的判据与 §4.3/UB-006 不一致**（A4 轮补测时确认，已写 `docs/spec-deviations.md` D-19，未改实现）：
       `src/borrow.rs:460` 的条件是 `mutable && !ty.is_numeric() && !matches!(ty, Ty::Rc{..})`。
       于是 (a) `var n: u32 = 0` 跨链可达时**静默通过**（数值绑定并不比结构体绑定安全，排除它没有规范依据）；
       (b) 反过来把链内局部 `var` 当成跨链共享（§8.2 说各焦点私有栈，真正危险的是捕获与全局路径），方向偏严。
@@ -1000,6 +1000,27 @@
       验收：逐条裁决 (a)(b) 与 span，改实现或改判据，并把 `borrow::tests` 里 `E-0121` 的用例补成"数值绑定也报 / 局部 var 不报"的成对断言；结论写回 D-19。
         现状测试：`mutable_state_shared_across_chains_is_e0121`（报）+ `arc_shared_state_across_chains_is_clean` /
         `same_chain_second_focus_is_not_e0121` / `immutable_state_across_chains_is_not_e0121`（不误报）。
+      **F7 轮（2026-10-17）勾 `[x]`，交付提交 = `13ab2cf`**，三条各自裁"实现错"，结论写回 **D-19（已裁决）**：
+      (a) 数值不排除（`!ty.is_numeric()` 删除，非原子 `Rc` 也不再豁免 —— 引用计数本身就是竞争对象）；
+      (b) 链内局部 `var` **不报**（§8.2:1297 / §8.5:1319 每条焦点独立栈与独立所有权作用域，`codegen.rs:1639`
+      把链体声明落成帧槽 ⇒ "两条链写同一个链内 `var`"在语言模型里不可构造）；span 改为**写入处主区域 +
+      声明处第二区域**，且因 `diag::render_one`（`diag.rs:478`）只渲染 primary 一区，声明座标另写进 note，
+      否则第二区域只有 JSON 出口看得见。判据改挂可达形状 = **`static mut` 全局可变路径**：可调用体写 /
+      ≥2 条不同链写 / 唯一写链被任一 `start(chain = C)` 点名 ⇒ 报；"只有这一条链且没人 start 它"是分析能
+      **证明**单焦点的形状 ⇒ 沉默（§4.7.2 第 6 条要求"证明不了就报"，不是"看见全局就报"）。
+      为此动的两处接口：`sema::ConstInfo` 补 `is_mut`、`borrow::check` 补 `file_pkg`（全局按 `(package, name)` 键，
+      避免跨 package 同名 `static` 合并成一个竞争对）。外部用例 **4.7-ownership-0006** 的源换成真实竞争形状
+      （两条链写同一 `static mut`，`expect = ["E-0121","E-0121"]`）⇒ 仍 Pass，用例集 83 = 77/0/6 不变。
+      实测数字：`borrow` 15 → **22**、基线 **541 → 548 passed / 0 failed**、`cargo check --offline --lib`
+      **0 error / 0 warning**、tour 的 `check|build|run|test` 与 `fmt --check` 全 exit **0**、
+      `infy conformance --report` 仍 exit **1**（92.8%）。四处变异/负对照都实测能红：`is_mut: *is_mut`→`false`
+      ⇒ 4 条 E-0121 正例 + 2 条用例锁点红；`sanctioned_carrier` 的 `Arc` 臂改 `false` ⇒ `arc_carrier_global_is_clean` 红；
+      遮蔽守卫去掉 ⇒ `shadowed_local_write_is_clean` 红；换判据前那次跑还实测旧形状 `[]` / exit 0 ⇒ (b) 的方向有据。
+      **勾掉之后仍不许声称的**：① 读侧竞争未做（§13 只写"写同一绑定"）；② 经 `Mutex`/`Channel` 句柄的方法调用
+      不做语义分析（只按类型豁免）；③ §4.3 的另外两条危险面 —— 闭包捕获跨焦点、跨链裸 `&mut T` —— 在当前前端
+      **不可表达**（`start` 不带实参、闭包没有跨焦点通道），因此**没有对应发射点**，不是"已实现并通过"；
+      ④ `E-1031`（`static mut` 读写缺 `unsafe`）仍无发射点，实测 `infy check` 对一个链体内写 `static mut` 的
+      module 给 **0 error / exit 0** ⇒ 新登记 **F47**（含 `src/borrow.rs` 模块文档此前的假声称，本轮已改为"未实现"）。
 
 - [ ] F8 **host 调用的嵌套计数在 panic 跨越边界时不回滚**（B1 轮补 `runtime/test_rt.c` 时确认，未改实现）：
       `runtime/infy_rt.c:2654` 的 `static int32_t g_host_nesting` 是普通全局，`infy_host_call_event` 在
@@ -1361,8 +1382,52 @@
       验收：三份既有脚本的 `Log` 都加 `-Encoding utf8`，并在 `scripts/README.md` 的 5.1 坑清单里补第三条
       （与"必须带 BOM"同族）；成对锁点 = `conformance::tests` 里那条"每个 `.ps1` 的 log 必须在 `logs/`"的测试
       扩成**同时**要求 `Add-Content` 带 `-Encoding utf8`（负对照：去掉一个就红）。
+- [ ] F47 **§4.7.5 的六项 `unsafe` 门禁全无发射点，`E-1031` 却被 `src/borrow.rs` 的模块文档列为已实现**（F7 轮实测）：
+      §4.7.5 给了一张**封闭列表**（裸指针解引用 `E-1030` / 调 A 轨 `E-0721` / 读写 `static mut` `E-1031` /
+      `unsafe trait`·`unsafe fn` `E-1032` / `union` 非活跃变体 `E-1033` / `transmute` `E-1034`）。
+      实测：`infy check` 对一个 `static mut COUNTER: u32` 在链体里自增的 module 打 **0 error / 0 warning / exit 0**
+      （夹具 = `target/scratch/f7/mod`，单链、无人 start ⇒ F7 的 `E-0121` 正确地沉默，`E-1031` 也正确地缺席 = 谁都没管）。
+      取证：`grep -rn "E-1031" src/` 只有 `codes.rs` 的表项与 `borrow.rs` 的注释，`check_statics` 是空臂
+      （`let _ = name;`）—— 而 `borrow.rs` 的模块文档第 17 行把 `E-1031` 与 `E-1001…E-0121` 并列写成"已实现的判据集"，
+      这是**假声称**（F7 轮已把该行改成"Not implemented"并指名本条）。同族取证（`grep -rn '"E-xxxx"' src/*.rs`
+      去掉 `codes.rs` 的表项后计数）：六项里 `E-1030` 3 处、`E-0721` 2 处**在发**，
+      **`E-1031`/`E-1032`/`E-1033`/`E-1034` 四项 0 处** ⇒ 缺的是四格，不是全表。
+      验收：(1) 六项逐条定"实现 / 显式未实现并登记"，不许留空臂注释；(2) 至少落 `E-1031` 一条（读写 `static mut`
+      不在 `unsafe` 块内 ⇒ 报，`unsafe` 块内的写要能穿过 `StmtKind::Unsafe` 的 `in_unsafe` 状态）；
+      (3) 成对断言 + 一条 §12 外部用例；(4) 与 §9.6 的 `[lints]`、`diagnostic_level` 关系一并核。
+      注意别把它并进 `E-0121`：`E-0121` 管"多焦点写同一绑定"（竞争），`E-1031` 管"未经 `unsafe` 触碰全局可变"
+      （责任声明），规范给的是两个格子。
 
 ## 2. 当前指针
+
+> **F7 轮收尾（2026-10-17）：F7 勾 `[x]`，本段取代下一段** —— 交付提交 **`13ab2cf`**（`src/borrow.rs` 的新判据 +
+> `src/sema.rs` 的 `ConstInfo.is_mut` + `src/cli.rs`/测试的 `file_pkg` 随动 + 用例 4.7-ownership-0006 换形）。
+> **三条各自裁"实现错"**：(a) 数值不排除、非原子 `Rc` 不豁免；(b) 链内局部 `var` 不报（§8.2:1297 各焦点独立栈与
+> 独立所有权作用域 + `codegen.rs:1639` 帧槽 ⇒ "两条链写同一个链内 `var`"不可构造，旧判据报的就是这个不可达形状）；
+> span = 写入处主区域 + 声明处第二区域，且 `render_one`（`diag.rs:478`）只渲染 primary ⇒ 声明座标**同时**进 note。
+> 判据的可达形状 = **`static mut` 全局可变路径**：可调用体写 / ≥2 条不同链写 / 唯一写链被任一 `start(chain=C)` 点名 ⇒ 报；
+> "单链且没人 start 它"是能证明的单焦点 ⇒ 沉默。**D-19 由 OPEN 改为已裁决**（含"若审签否决 (b) 该改哪两处"）。
+> **新基线**：`cargo test --offline --lib` **548 passed / 0 failed**（= 541 + 7，`borrow` 15 → **22**）、
+> `cargo test --offline` 全目标 = 548 + bin 0 + doc-test 0、`cargo check --offline --lib` **0 error / 0 warning**、
+> tour 的 `check|build|run|test` + `infy fmt --check examples/tour` 全 exit **0**、`infy conformance --report`
+> 仍 **83 = 77 Pass / 0 Fail / 6 Blocked ⇒ exit 1**（92.8%，用例只换了源、没换期望）。C 侧零改动（本轮没跑 rt/IFBC 链，
+> 下轮按 F8 的性质**必须**跑）。
+> **本轮实测另揪出一条真缺陷，登记在 F46 之后：F47**（§4.7.5 六项里 `E-1031`/`E-1032`/`E-1033`/`E-1034`
+> **四项 0 发射点**，实测 `infy check` 对"链体内写 `static mut`"给 0 error / exit 0；`src/borrow.rs` 的模块文档
+> 此前把 `E-1031` 列为已实现 = 假声称，本轮已改为"Not implemented"）。`E-1030`(3) 与 `E-0721`(2) 在发，别写成"全表都缺"。
+> **下一轮 = §1 第一个 `[ ]` = F8**（host 调用的嵌套计数在 panic 跨边界时不回滚）：正主
+> `runtime/infy_rt.c:2654` 的 `static int32_t g_host_nesting` —— `infy_host_call_event` 先 `>= 8` 判 panic 再 `++`、
+> 返回前 `--`，被 §4.16 的 `focus`/`chain` 半径 longjmp 打断时 `--` 被跳过 ⇒ 该焦点之后**所有** host 调用假报 `R-0902`。
+> 验收要求：深度存进 `InfyTry`（`infy_rt_internal.h`）并在两条 catch 路径（`infy_rt_catch`、`dispatch_node` 的 `setjmp`）
+> 上恢复；`test_rt.c` 加**成对**断言（深度 8 的 panic 被捕获后，下一次正常 `infy_host_call_event` 必须成功而不是 `R-0902`）；
+> 顺带核同类风险 `infy_tls_unwinding`（`drain_scope`/`scope_end_common` 里 1→0 被 panic 打断同样悬挂）。
+> **C 侧改动的纪律**：这是纯 C 的活，Rust 侧不动；`gcc -c` 三份的 stderr 0 字节、rt **32335/0**、两条 IFBC **180/180** +
+> `cmp` 无差异这些既有链要复跑，harness 里 `infy_test_set_host_nesting(0)` 那个兜底（`test_rt.c` 的 `e_call_deep`
+> 注明"尾部复位是死代码"）修好之后**必须撤掉**，否则新断言测的是替身。
+> 措辞红线不变：覆盖 83/2300 ⇒ 任何文档不得出现「INFY v2.0 兼容」的肯定式声称（逐物理行判，否定标记须与声称同行）；
+> 「两侧装载期校验等价」仍不许讲（F26 前半 / D-42 (a)–(e)）；**F7 新加一条**：不许说"INFY 有数据竞争检测器"，
+> 本轮做的是"§4.3 可达形状 static 写"，读侧竞争与闭包捕获/跨链 `&mut` 两条面**没有发射点**（D-19 剩余面 ①②③）。
+> **（以下为 F7 轮之前各轮的指针，已被上面一段取代，保留作历史）**
 
 > **F6 轮收尾（2026-10-17）：F6 勾 `[x]`，本段取代下一段** —— 交付提交 **`8d9c8e7`**（`examples/tour` 两个 `.infy` 的
 > 规范形态 + `scripts/canonicalize-tour.ps1` + `fmt`/`hir`/`codegen`/`conformance` 四处随动 + `ci.yml` 步 12 的新门禁）。
