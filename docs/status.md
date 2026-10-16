@@ -1394,7 +1394,7 @@ git 的 ignore 解析器吃 CRLF ⇒ 不需要给 `.gitignore` 补 `text eol=lf`
 **C 侧零改动**仍复跑四条链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警**（stderr 0 字节）、
 rt **32335 assertions / 0 failures**、替身链与生产链 IFBC 各 **180/180** 且两份 stdout `cmp` **无差异**。
 
-## cron-26 轮（2026-10-16）：run #2 十二步逐条 success ⇒ F1 勾 `[x]`；一条基线口径纠正（产物字节不是跨机常数）
+## cron-26 轮（2026-10-16）：run #2 十二步逐条 success，而同轮的 run #3 红 ⇒ F1 回到 `[ ]`；两条口径纠正（产物字节不是跨机常数、守卫绿≠树干净）
 
 **做了什么**：**零代码改动**的一轮 —— F1 缺的从来不是实现，是「那一次真 run 的 conclusion」。
 ① 开头 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/push-branch.ps1 -Branch toolchain`
@@ -1438,7 +1438,47 @@ rt **32335 assertions / 0 failures**、替身链与生产链 IFBC 各 **180/180*
 C 侧四条链（**C 侧零改动**仍复跑）：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 stderr **0 字节**、rt **32335/0**、
 替身链与生产链 IFBC 各 **180/180** 且 `cmp` **无差异**。
 
-**F1 勾 `[x]` 声称的和不声称的**：只声称「那一次真 run 的 conclusion = success + 12 步的远端数字已知」。
+**F1 声称的和不声称的**：远端那一次绿只声称「run #2 的 conclusion = success + 12 步的远端数字已知」。
 不声称 §12 兼容（用例覆盖仍 **83/2300**，`infy conformance --report` 仍 exit **1** = D-48(a)）、
 不声称 §14 导览是规范写法（`fmt --check` 仍 exit **2** = F6 未裁决）、
 不声称两侧装载期校验等价（F26 前半，清单 = D-42 (a)–(e)）。
+
+## cron-26 轮后半（2026-10-16）：做账提交自己触发的 run #3 红 ⇒ F1 回到 `[ ]`；「守卫绿 ≠ 树干净」是本轮真正的收获
+
+**现象**：上一段勾了 `[x]` 之后推的那笔做账提交（`b7f4d2d`，只改 5 份 `.md`）触发
+**run `38910330820`（run_number 3）= `failure`**，红在**步 3「检出没改写工作树」**，`git status --porcelain`
+报的文件**恰好一个**：` M conformance/cases/2-lexical/2-lexical-0002/main.infy`。步 4-12 全 `skipped`。
+
+**根因 = F1 的修法自身有缺陷**（不是 runner、不是运气）：`.gitattributes` 是**后匹配优先**，
+而上文为修 run #1 假红加的那两行全局 `*.infy text eol=lf` / `*.infy.toml text eol=lf` 写在了
+`conformance/cases/** -text` **之后** ⇒ 全局规则**盖掉**了语料例外 ⇒ 对那条**故意带 CRLF 的正反例**，
+`text eol=lf` 的 **clean 过滤器**（工作树 → 仓库方向）把 CR 抹掉 ⇒ 归一化结果 ≠ blob ⇒ **该文件在任何
+`core.autocrlf=true` 的检出里永久 dirty**。全仓库只有两个 `.infy` 的 blob 含 CR，实测：
+`2-lexical-0002` = **6 个 CRLF 对**（脏）、`2-lexical-0001` = **1 个裸 CR、0 个 CRLF 对**（clean 无事可做 ⇒ 不脏）
+—— 与远端只报一个文件**逐字相符**，判据不是猜的。
+
+**本机当场复现**（不靠推理）：`git clone --no-local . target/scratch/eolprobe` + `core.autocrlf=true` ⇒
+`git status --porcelain` 恰这一条、`git check-attr text eol -- <该文件>` 给 `text: set / eol: lf`。
+
+**更要紧的一条**：**工作树字节其实没被改写**（`eol=lf` 的 smudge 不往工作树写 CR，实测仍是 6 个 CR）
+⇒ 用例语义还活着 ⇒ 这解释了两件原本矛盾的事：**run #2 的步 7 全绿 530 项**（用例是对的）而
+**run #2 的步 3 也没红** —— 后者是**运气**：`git status` 命中 racy-clean 时只信 stat 缓存、不比内容。
+⇒ **「守卫绿」从来不等价于「树干净」**，这条判据本身仍然偏弱（要不要换成内容级判据，已写进 BACKLOG §2 留给下一轮判断，
+本轮不扩大改动面）。它与经验库 `checkout-eol-is-an-executed-surface` 的「porcelain 空 ≠ 字节没改写」是同一件事的两面：
+那一面是"改写了我看不见"，这一面是"该脏的我没看见"。
+
+**修法 + 回归锁**（两头都钉，且**现场验过能变红**）：`.gitattributes` 把语料例外的 `-text` 重新声明在全局规则
+**之后**（三行：`conformance/cases/**`、`conformance/cases/**/*.infy`、`conformance/cases/**/*.infy.toml`）；
+新测试 `conformance::tests::the_corpus_eol_exception_is_declared_after_the_global_infy_rule` ① 比次序
+（`rposition`，反了就红并把两个行号打出来）② 查工作树里那两条正反例仍是它声称的形状（CRLF 对 ≥ 6 / 裸 CR 且 0 个 CRLF 对）。
+**负对照两条**：把三行搬回全局规则**前面** → 测试 `FAILED` 并报「第 7 行 … 必须排在第 9 行 … 之后」；
+把 `2-lexical-0002` 的 CR 抹掉 → `FAILED` 并报「只剩 0 个 CRLF 对」；两次都用 `cmp` 验证文件字节复原，
+复原后 `git status` 里语料文件不再出现（只剩 `.gitattributes`、`README.md`、`src/conformance.rs` 三处本轮 intended 改动）。
+
+**新基线**：`cargo test --offline --lib` **531 passed / 0 failed**（+1 全在 `conformance`：**18 → 19**）、
+`cargo check --offline --lib` **0 error / 0 warning**、`cargo build --offline --release` exit 0、
+tour 的 `check|build|run|test` + `--verify-reproducible` 全 exit **0**（本机产物仍 **199975** 字节）、
+**C 侧零改动**仍复跑四条链（两份 `-c` 各 stderr **0 字节**、rt **32335/0**、两条 IFBC **180/180** + `cmp` 无差异）、
+`infy conformance --report` 仍 exit **1**（83 = 77/0/6 · 92.8%）、`fmt --check` 仍 exit **2**（F6）。
+**F1 回到 `[ ]`**：勾它的条件仍是「那一轮真 run 绿」，而 HEAD 上最新的 run 是红的 ⇒ 下一轮开头回查**修复后的 run #4**，
+绿了才勾，红了照实记；**不许**为了让守卫变绿而放宽步 3，也不许把 199975 那类本机常数写成远端断言。

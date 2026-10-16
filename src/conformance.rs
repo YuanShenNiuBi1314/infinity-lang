@@ -1322,6 +1322,57 @@ mod tests {
         );
     }
 
+    /// cron-26：`.gitattributes` 是**后匹配优先**，而 F1 为修 run #1 的假红加的那条全局
+    /// `*.infy text eol=lf` 恰好盖掉了写在它前面的 `conformance/cases/** -text` ⇒
+    /// 故意带 CRLF 的那条用例（`2-lexical-0002`，blob 里 6 个 CRLF 对）在 `core.autocrlf=true` 的
+    /// 检出里**永久 dirty**（clean 过滤器把 6 个 CR 抹掉 ⇒ 归一化结果 ≠ blob），run #3 就红在 CI
+    /// 步 3 的工作树守卫上。**字节其实没被改写**（`eol=lf` 的 smudge 不往工作树写 CR）⇒ 这是
+    /// 「守卫红而用例语义还活着」那一族；反过来 run #2 对同一条规则**没红**，因为 `git status`
+    /// 命中 racy-clean 时只信 stat 缓存不比内容 ⇒ **「守卫绿」从来不等价于「树干净」**。
+    /// 两头都钉：① 语料例外必须排在任何 `text eol=lf` 之后；② 那两条行尾正反例在工作树上还是
+    /// 它声称的形状（把语料「顺手规范化」掉 = 用例失效，而且守卫从此空转）。
+    #[test]
+    fn the_corpus_eol_exception_is_declared_after_the_global_infy_rule() {
+        let attrs_text = doc_text(".gitattributes");
+        let attrs: Vec<&str> = attrs_text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        let global_eol = attrs
+            .iter()
+            .rposition(|l| l.split_whitespace().nth(1) == Some("text") && l.contains("eol=lf"))
+            .expect("没有把 INFY 源码钉成 LF 的全局规则了 —— 那是 run #1 的修法，不能删");
+        let corpus = attrs
+            .iter()
+            .rposition(|l| l.starts_with("conformance/cases") && l.split_whitespace().last() == Some("-text"))
+            .expect("语料例外 `-text` 没了 ⇒ 故意带 CRLF 的用例会被 clean 过滤器改坏");
+        assert!(
+            corpus > global_eol,
+            "第 {corpus} 行的 `conformance/cases` `-text` 必须排在第 {global_eol} 行的 `text eol=lf` \
+             **之后**：`.gitattributes` 后匹配优先，反过来的次序会让全局规则盖掉语料例外 ⇒ \
+             `2-lexical-0002/main.infy` 在 autocrlf=true 的检出里永久 dirty（run #3 红在 CI 步 3）"
+        );
+
+        let (Some(crlf), Some(lone)) = (
+            std::fs::read(repo_root().join("conformance/cases/2-lexical/2-lexical-0002/main.infy")).ok(),
+            std::fs::read(repo_root().join("conformance/cases/2-lexical/2-lexical-0001/main.infy")).ok(),
+        ) else {
+            panic!("读不到那两条行尾正反例");
+        };
+        let pairs = crlf.windows(2).filter(|w| *w == b"\r\n").count();
+        assert!(
+            pairs >= 6,
+            "2-lexical-0002 的工作树副本只剩 {pairs} 个 CRLF 对（blob 有 6 个）⇒ 检出改写了语料的行尾，\
+             这条用例（CRLF 应报 W-0001）测的已经不是它声称的那件事"
+        );
+        assert!(
+            lone.contains(&b'\r') && !lone.windows(2).any(|w| w == b"\r\n"),
+            "2-lexical-0001 必须是**裸 CR**（0 个 CRLF 对）—— 它是「clean 过滤器对它无事可做、所以它不脏」\
+             的对照组；它一变脏或一变干净，说明上面那条次序断言的判据本身漂了"
+        );
+    }
+
     /// F3：仓库里只留 `docs/RUNLOG.md` 这一份审计线。
     ///
     /// 一次性产物（手工 `gcc` 的落点、`push*.log` 那一族碎片）从 `725042a` 起一路被跟踪，因为

@@ -19,3 +19,18 @@ conformance/cases/**         -text
 # 在远端红成 exit 2（本地是 LF，永远看不见）。显式钉成 LF，并在 CI 里直接查输入面的 CR 字节。
 *.infy                   text eol=lf
 *.infy.toml              text eol=lf
+
+# cron-26（run #3 红 + 本机 `git clone` 当场复现）：**`.gitattributes` 是后匹配优先**，所以上面那条
+# 全局 `*.infy text eol=lf` 把文件前面第 8 行的 `conformance/cases/** -text` **覆盖掉了**。
+# 实测数据：全仓库只有两个 `.infy` 的 blob 里有 CR ——
+#   `2-lexical-0001/main.infy` = 1 个**裸 CR**、**0 个 CRLF 对** ⇒ clean 过滤器对它无事可做 ⇒ 不脏；
+#   `2-lexical-0002/main.infy` = **6 个 CRLF 对**（它就是"行尾是 W-0001 而不是 E-0003"那条正反例，故意写 CRLF）
+#     ⇒ `text eol=lf` 让 clean 把 6 个 CR 抹掉 ⇒ 归一化结果 ≠ blob ⇒ **该文件在 autocrlf=true 的检出里永久 dirty**
+#     ⇒ CI 步 3 的工作树守卫红。
+# 两点要紧的：**字节其实没被改写**（`eol=lf` 的 smudge 不往工作树写 CR，实测工作树仍是 6 个 CR），所以红只发生在
+# 守卫这一层、用例语义还活着（这就是 run #2 步 7 的 530 项仍全绿、而 run #3 步 3 红的原因）；
+# 而 **run #2 的步 3 也没红 = 运气** —— 守卫读 `git status --porcelain`，命中 racy-clean 时它信 stat 缓存、
+# 不比内容 ⇒ **"守卫绿"从来不等价于"树干净"**。修法 = 把语料例外重新声明在全局规则**之后**，让它赢。
+conformance/cases/**                -text
+conformance/cases/**/*.infy         -text
+conformance/cases/**/*.infy.toml    -text

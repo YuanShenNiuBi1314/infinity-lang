@@ -795,8 +795,26 @@
 
 ### 阶段 F：工程卫生（每轮顺手做一点，不许它长大）
 
-- [x] F1 `.github/workflows/ci.yml`：`cargo fmt --check`? 不适用（无 rustfmt 约定）→ 只做 `cargo build --offline --release` + `cargo test --offline` + `gcc` 跑 `runtime` 测试。
-      **cron-26 轮（2026-10-16）勾 `[x]` = 验收条件终于有了一次真 run 的 `success`**：本轮开头 `scripts/push-branch.ps1`
+- [ ] F1 `.github/workflows/ci.yml`：`cargo fmt --check`? 不适用（无 rustfmt 约定）→ 只做 `cargo build --offline --release` + `cargo test --offline` + `gcc` 跑 `runtime` 测试。
+      **cron-26 轮后半（2026-10-16）：本条从 `[x]` 回到 `[ ]`** —— 勾上之后**那笔做账提交自己触发了 run `38910330820`（run_number 3）= `failure`**，
+      红在**步 3「检出没改写工作树」**，红的正好一个文件：`conformance/cases/2-lexical/2-lexical-0002/main.infy`。
+      **根因是 F1 自己的修法有缺陷**：`.gitattributes` **后匹配优先**，为修 run #1 假红而加的全局 `*.infy text eol=lf` 写在
+      `conformance/cases/** -text` **之后** ⇒ 全局规则盖掉语料例外 ⇒ 那条**故意带 6 个 CRLF 对**的正反例被 clean 过滤器抹成 LF
+      ⇒ 归一化结果 ≠ blob ⇒ 在 `core.autocrlf=true` 的检出里**永久 dirty**。本机 `git clone` 到 `target/scratch/` 当场复现
+      （`porcelain` 恰这一条、`check-attr` 给 `text: set / eol: lf`）；**对照组** = `2-lexical-0001` 只有 **1 个裸 CR、0 个 CRLF 对**
+      ⇒ clean 无事可做 ⇒ 它不脏（与远端只报一个文件逐字相符）。**字节其实没被 smudge 改写**（工作树仍是 6 个 CR，实测）
+      ⇒ 这是「守卫红而用例语义还活着」那一族；也因此 **run #2 的步 3 对同一条规则没红 = 运气** —— `git status` 命中 racy-clean 时
+      只信 stat 缓存、不比内容 ⇒ **「守卫绿」从来不等价于「树干净」**（要不要让守卫连内容一起查，留给下一轮，本轮不扩大改动面）。
+      **修法已落地并双向验证**：`.gitattributes` 把 `conformance/cases/**`（含 `**.infy` / `**.infy.toml`）的 `-text`
+      **重新声明在全局规则之后**；新测试 `the_corpus_eol_exception_is_declared_after_the_global_infy_rule` 两头钉 ——
+      ① 次序（`rposition` 比较，反了就红并指名两行行号）② 工作树里那两条正反例仍是它声称的形状（CRLF 对 ≥ 6 / 裸 CR 且 0 个 CRLF 对）。
+      **两条负对照都实测变红**：次序翻回去 → 红；把 0002 的 CR 抹掉 → 红并报「只剩 0 个 CRLF 对」；随后 `cmp` 验证两文件字节复原、
+      `git status` 里语料文件不再出现。基线换为 `cargo test --offline --lib` **531 passed / 0 failed**（+1 = `conformance` 18 → **19**）、
+      `cargo check --offline --lib` **0 error / 0 warning**。
+      **勾 `[x]` 的条件仍是「那一轮真 run 绿」**：run #2 绿（步 7-12 的远端实数已拿到，见下一段），run #3 红（本条缺陷），
+      修复后的 **run #4** 才是本条的最终凭据 ⇒ **下一轮开头回查 `gh api …/actions/runs?branch=toolchain` 里 run #4 的逐步结论**，
+      绿了就勾 `[x]`、红了照实记，**不许**为了让它绿而放宽步 3 的守卫。
+      **cron-26 轮前半（2026-10-16）= run #2 十二步逐条 `success`**（当时据此勾了 `[x]`，随后 run #3 暴露出上面那条缺陷 ⇒ 已回退）：本轮开头 `scripts/push-branch.ps1`
       第 **1** 次即 exit 0（`1896c2a..6efb926`，`gh api …/git/refs/heads/toolchain` 回查 = 本地 HEAD ⇒ 现算欠账 0，
       cron-24/25 欠的 **7** 个提交全部清掉），推送当场触发的 **run `38908208089`（run_number 2, event push, head_sha `6efb926`）
       conclusion = `success`**，且 **12 步逐条 `success`**（`gh api …/actions/runs/38908208089/jobs` + `gh run view --log` 两份都取了，
@@ -1230,6 +1248,38 @@
 
 ## 2. 当前指针
 
+> **cron-26 轮后半（2026-10-16）：F1 回到 `[ ]`，本段取代下一段（同轮前半那段「F1 勾 `[x]`」）** ——
+> 因为**做账提交自己触发的 run #3（`38910330820`）= `failure`**，红在 CI 步 3「检出没改写工作树」，
+> 而根因是 **F1 的修法本身有缺陷**：`.gitattributes` 后匹配优先，全局 `*.infy text eol=lf` 写在
+> `conformance/cases/** -text` 之后 ⇒ 盖掉语料例外 ⇒ 故意带 **6 个 CRLF 对**的 `2-lexical-0002/main.infy`
+> 被 clean 过滤器抹成 LF ⇒ 归一化 ≠ blob ⇒ **在 autocrlf=true 的检出里永久 dirty**。
+> 本机 `git clone` 到 `target/scratch/eolprobe` 复现（`porcelain` 恰这一条）；对照组 `2-lexical-0001` =
+> **1 个裸 CR / 0 个 CRLF 对** ⇒ 不脏（远端也只报一个文件）。**字节没被 smudge 改写**（工作树仍是 6 个 CR）
+> ⇒ 用例语义还活着 ⇒ **run #2 步 3 没红是运气**（`git status` 命中 racy-clean 时只信 stat 缓存不比内容）
+> ⇒ **「守卫绿」≠「树干净」**，这句是给下一轮的判据、不是给 CI 加冕。
+> **修法**：语料例外的 `-text` 重新声明在全局规则**之后**（三行：`conformance/cases/**`、`**.infy`、`**.infy.toml`）；
+> 新测试 `the_corpus_eol_exception_is_declared_after_the_global_infy_rule` 两头钉（次序 + 工作树里两条正反例的形状），
+> **两条负对照都实测变红**（翻次序 → 红并报行号；抹 0002 的 CR → 红并报「0 个 CRLF 对」），`cmp` 验证复原。
+> **新基线**：`cargo test --offline --lib` **531 passed / 0 failed**（+1 = `conformance` 18 → **19**）、
+> `cargo check --offline --lib` **0 error / 0 warning**、`cargo build --offline --release` exit 0、
+> tour 四条 + `--verify-reproducible` 全 exit 0（本机产物 **199975**）、C 四链复跑（两份 `-c` 各 stderr **0 字节**、
+> rt **32335/0**、两条 IFBC **180/180** + `cmp` 无差异）、`conformance --report` 仍 exit **1**（83 = 77/0/6 · 92.8%）、
+> `fmt --check` 仍 exit **2**（F6）。
+> **下一轮第一件事 = 回查 run #4**（本轮修复推上去之后由推送触发；`gh api …/actions/runs?branch=toolchain`，
+> 逐步结论用 `…/runs/<id>/jobs`，日志用 `gh run view <id> --job <jobId> --log`）：**绿了才把 F1 勾 `[x]`**，
+> 红了按逐条根因处置、**不许**为了让守卫变绿而放宽步 3（也不许把 199975 那种本机常数写成远端断言，见下一段那条口径纠正）。
+> F1 之后 §1 第一个 `[ ]` = **F4**（`infy lsp`、`std.net` TLS、`dyn Trait` vtable 偏移表：要么实现，要么在
+> `docs/spec-deviations.md` 保持"明确未实现"记录）。起手现成件（本轮 grep 过，不必重审）：`infy lsp` 已在
+> `cli::NOT_IMPLEMENTED` 名单里（显式拒绝，不是假成功）；`stdlib.rs:64-66` 的 `std.net.*` 三条 `native: None`；
+> `hir::vtable_layout` **已实现且有测试**（`drop`/`size`/`align` + 方法指针 = `24 + 8n`，`hir.rs:656`），
+> 缺的是 `codegen.rs:670` 与 `:2395` 的发射（两处都已是显式 `CgError`，不是静默）⇒ vtable 是三件里唯一有真实落点的。
+> 一条待办留给下一轮**判断**（本轮不扩大改动面）：步 3 的守卫要不要从 `git status --porcelain` 换成
+> 「按 `git diff --no-textconv --binary` 或直接查字节」这种**内容级**判据 —— 本轮实测已经证明 porcelain 会漏报
+> （racy-clean），这与经验库 [[checkout-eol-is-an-executed-surface]] 的「porcelain 空≠字节没改写」是同一件事的两面。
+> 措辞红线不变：「两侧装载期校验等价」仍不许讲（F26 前半 / D-42 (a)–(e)）；覆盖 83/2300 ⇒ 任何文档
+> 不得出现「INFY v2.0 兼容」的肯定式声称（这条是 `no_markdown_doc_claims_the_compatibility_name` 的判据：
+> **逐物理行**看，所以否定标记必须和那句声称**同一行**，换行就红）。
+> **（以下为 cron-26 轮前半与 cron-25 轮的指针，已被上面一段取代，保留作历史）**
 > **cron-26 轮（2026-10-16）= F1 勾 `[x]`，本段取代下一段的「下一轮第一件事：还是先补推 `toolchain`」**：
 > 开头 `scripts/push-branch.ps1` 第 **1** 次即 exit 0 ⇒ 远端 `toolchain` = `6efb926` = 本地 HEAD、现算欠账 **0**
 > （cron-24/25 两批全败欠的 **7** 个提交全清；**没**动 git 配置、**没**换凭据，`github.com:443` 这轮不抖）。
