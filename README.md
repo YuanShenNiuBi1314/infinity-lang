@@ -14,7 +14,9 @@
   `cargo check` 告警 **0**、两份 `.c` 各 0 告警、rt **32335/0**、IFBC 两条链各 **180/180** + `cmp` 过、
   tour 端到端 exit 0 且节点表 = §8.4 金样（8/9/10/11/16/19）。**但同轮做账提交触发的 run #3 红在步 3 的工作树守卫**
   （`.gitattributes` 后匹配优先 ⇒ 全局 `*.infy text eol=lf` 盖掉了语料例外 `-text` ⇒ 故意带 CRLF 的那条用例永久 dirty），
-  已修并配回归测试 ⇒ BACKLOG **F1 仍是 `[ ]`**，勾它的条件是修复后那一轮真 run 绿。**读远端日志时记住一条口径**：产物字节与 `build-id`
+  已修并配回归测试；**修复提交 `c7312eb` 触发的 run `38912466381`（run_number 4）= 步 3-12 逐条 `success`**
+  （该步在远端打印 `core.autocrlf = true` ⇒ 守卫是真条件下过的；步 7 远端 `cargo test --offline` = **531 passed / 0 failed**）
+  ⇒ BACKLOG **F1 已勾 `[x]`**，读法是「**认包含交付的那个 commit 触发的 run**」，任何一次 run 变红就重新打开。**读远端日志时记住一条口径**：产物字节与 `build-id`
   是宿主 `cc` 的函数（runner 的 `gcc 15.2.0` 产 221666 字节，本机 MSYS2 `gcc 16.2.0` 产 199975 字节；段 blob 738 +
   段尾 64 与生成的 C11 12513 字节两侧相同），所以 CI 只打印这些数、不门禁它们
 - License: MIT

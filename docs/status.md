@@ -1394,7 +1394,7 @@ git 的 ignore 解析器吃 CRLF ⇒ 不需要给 `.gitignore` 补 `text eol=lf`
 **C 侧零改动**仍复跑四条链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 **0 告警**（stderr 0 字节）、
 rt **32335 assertions / 0 failures**、替身链与生产链 IFBC 各 **180/180** 且两份 stdout `cmp` **无差异**。
 
-## cron-26 轮（2026-10-16）：run #2 十二步逐条 success，而同轮的 run #3 红 ⇒ F1 回到 `[ ]`；两条口径纠正（产物字节不是跨机常数、守卫绿≠树干净）
+## cron-26 轮（2026-10-16）：run #2 十二步逐条 success（本段当时据此勾 `[x]`，随后 run #3 红、已撤回，见下面两段）
 
 **做了什么**：**零代码改动**的一轮 —— F1 缺的从来不是实现，是「那一次真 run 的 conclusion」。
 ① 开头 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/push-branch.ps1 -Branch toolchain`
@@ -1482,3 +1482,35 @@ tour 的 `check|build|run|test` + `--verify-reproducible` 全 exit **0**（本�
 `infy conformance --report` 仍 exit **1**（83 = 77/0/6 · 92.8%）、`fmt --check` 仍 exit **2**（F6）。
 **F1 回到 `[ ]`**：勾它的条件仍是「那一轮真 run 绿」，而 HEAD 上最新的 run 是红的 ⇒ 下一轮开头回查**修复后的 run #4**，
 绿了才勾，红了照实记；**不许**为了让守卫变绿而放宽步 3，也不许把 199975 那类本机常数写成远端断言。
+
+## cron-26 轮收尾（2026-10-16）：修复提交触发的 run #4 = 步 3-12 全 success ⇒ F1 勾 `[x]`
+
+**修复生效的远端凭据**：`c7312eb`（那笔 EOL 次序修复）触发 **run `38912466381`（run_number 4）= conclusion `success`**，
+**步 3-12 逐条 `success`** —— 步 3 正是 run #3 红的那一步，且该步在远端打印 `core.autocrlf = true`
+⇒ 守卫是在真条件下通过的，不是被环境绕开。逐步实数取自 `gh run view 38912466381 --job 117011451458 --log`
+（取回本机 957 行，`FAILED`/`panicked` 命中 **0**；job 时长 14:01:49Z→14:04:17Z = 2m28s）：
+
+| 步 | 远端实数 |
+|---|---|
+| 7 `cargo test --offline` | **531 passed / 0 failed**（= 本机同口径，含本轮新增的那条 EOL 次序测试） |
+| 8 `cargo check --offline --lib` | 告警数 = **0** |
+| 9 C 侧 `-Wall -Wextra -c` | `runtime/infy_rt.c：0 告警` + `runtime/infy_ifbc.c：0 告警` |
+| 10 rt harness | **32335 assertions, 0 failures** |
+| 11 IFBC 两条链 + `cmp` | 各 **180 asserts / 180 pass / 0 FAIL**，`cmp` 过 |
+| 12 tour 端到端 | 四条 + `--verify-reproducible`（两个独立目录产物字节相同 = **221666**）+ `artifact info --nodes` 全 exit 0 |
+
+**本机对修复的直接验证（不等 runner）**：`git clone --no-local . target/scratch/eolprobe2` + `core.autocrlf=true`
++ `git checkout --force -- .` ⇒ `git status --porcelain` = **0 行**、`2-lexical-0002/main.infy` 仍是 **6** 个 CR、
+`examples/tour/cmd/runner/main.infy` 是 **0** 个 CR ⇒ 语料例外与"钉 INFY 源码为 LF"**两件事同时成立**，
+这正是次序修复要同时保住的两半。
+
+**验收读法（写死，防止下一轮自指）**：勾 `[x]` 认的是**包含该轮交付的那个 commit 所触发的 run**（这里 = run #4）；
+此后的**纯做账提交**触发的 run 只是确认，不构成新的前置条件 —— 否则"为了勾上而推的提交"又要一轮绿、那一轮又要一笔提交，
+判据会无限自指。但**任何一次 run 变红就把本条重新打开**并按逐条根因处置，这一半不变。
+
+**F1 勾 `[x]` 不声称的三件**（措辞红线，逐条仍有据）：§12 兼容（覆盖 **83/2300**，`infy conformance --report` 仍 exit **1** = D-48(a)）、
+§14 导览已是规范写法（`fmt --check` 仍 exit **2** = F6 未裁决）、两侧装载期校验等价（F26 前半，清单 = D-42 (a)–(e)）。
+**基线**：`cargo test --offline --lib` **531 passed / 0 failed**、`cargo check --offline --lib` **0 error / 0 warning**、
+`cargo build --offline --release` exit 0、tour 四条 + `--verify-reproducible` 全 exit 0（本机产物 **199975**）、
+C 四链（C 侧零改动）两份 `-c` 各 stderr **0 字节**、rt **32335/0**、两条 IFBC **180/180** + `cmp` 无差异。
+**下一轮 = §1 第一个 `[ ]` = F4**（`infy lsp` / `std.net` TLS / `dyn Trait` vtable；现成件见 BACKLOG §2）。

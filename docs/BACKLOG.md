@@ -795,8 +795,19 @@
 
 ### 阶段 F：工程卫生（每轮顺手做一点，不许它长大）
 
-- [ ] F1 `.github/workflows/ci.yml`：`cargo fmt --check`? 不适用（无 rustfmt 约定）→ 只做 `cargo build --offline --release` + `cargo test --offline` + `gcc` 跑 `runtime` 测试。
-      **cron-26 轮后半（2026-10-16）：本条从 `[x]` 回到 `[ ]`** —— 勾上之后**那笔做账提交自己触发了 run `38910330820`（run_number 3）= `failure`**，
+- [x] F1 `.github/workflows/ci.yml`：`cargo fmt --check`? 不适用（无 rustfmt 约定）→ 只做 `cargo build --offline --release` + `cargo test --offline` + `gcc` 跑 `runtime` 测试。
+      **cron-26 轮收尾（2026-10-16）= 本条勾 `[x]`，凭据是含修复的那一轮**：**run `38912466381`（run_number 4 / head_sha `c7312eb`
+      = 上面那条 EOL 次序修复的提交）= conclusion `success`，步 3-12 逐条 `success`**（步 3 正是 run #3 红的那一步，
+      远端打印 `core.autocrlf = true` ⇒ 守卫是在真条件下跑的，不是被绕开）。远端实数取自 `gh run view …--log`
+      （957 行，`FAILED`/`panicked` 命中 **0**）：步 7 `cargo test --offline` = **531 passed / 0 failed**、步 8 `cargo check --offline --lib`
+      告警数 = **0**、步 9 `runtime/infy_rt.c：0 告警` + `runtime/infy_ifbc.c：0 告警`、步 10 rt **32335 assertions / 0 failures**、
+      步 11 两条 IFBC 链各 **180/180** 且 `cmp` 过、步 12 tour 四条 + `--verify-reproducible`（两目录产物字节相同 = **221666**）+
+      `artifact info --nodes` 全 exit 0。**验收条件的读法在这里定死，免得下一轮拿"做账提交也须绿"无限自指**：
+      勾 `[x]` 认的是**包含该轮交付的那个 commit 触发的 run**（= run #4）；此后的纯文档提交触发的 run 只是确认，
+      不是新增的前置条件 —— 但**任何一次 run 变红就把本条重新打开**并按逐条根因处置，这条不变。
+      本条**不声称**：§12 兼容（覆盖 83/2300，`conformance --report` 仍 exit **1** = D-48(a)）、§14 导览已是规范写法
+      （`fmt --check` 仍 exit **2** = F6）、两侧装载期校验等价（F26 前半 / D-42 (a)–(e)）。
+      **cron-26 轮后半（2026-10-16）：本条一度从 `[x]` 回到 `[ ]`** —— 勾上之后**那笔做账提交自己触发了 run `38910330820`（run_number 3）= `failure`**，
       红在**步 3「检出没改写工作树」**，红的正好一个文件：`conformance/cases/2-lexical/2-lexical-0002/main.infy`。
       **根因是 F1 自己的修法有缺陷**：`.gitattributes` **后匹配优先**，为修 run #1 假红而加的全局 `*.infy text eol=lf` 写在
       `conformance/cases/** -text` **之后** ⇒ 全局规则盖掉语料例外 ⇒ 那条**故意带 6 个 CRLF 对**的正反例被 clean 过滤器抹成 LF
@@ -1248,6 +1259,21 @@
 
 ## 2. 当前指针
 
+> **cron-26 轮收尾（2026-10-16）：F1 已勾 `[x]`，本段取代下一段（同轮的「F1 回到 `[ ]`」那段）** ——
+> 含 EOL 次序修复的那个 commit（`c7312eb`）触发的 **run `38912466381`（run_number 4）= `success`，步 3-12 逐条 `success`**，
+> 远端打印 `core.autocrlf = true`（守卫在真条件下跑）；远端实数：步 7 **531 passed / 0 failed**、步 8 告警 **0**、
+> 步 9 两份 `.c` 各 **0 告警**、步 10 rt **32335/0**、步 11 两条 IFBC **180/180** + `cmp`、步 12 tour 四条 +
+> `--verify-reproducible`（**221666** 两目录相同）+ `artifact info --nodes` 全 exit 0；日志 957 行、`FAILED`/`panicked` **0** 处。
+> **验收读法定死（防下一轮拿"做账提交也要绿"无限自指）**：勾 `[x]` 认的是**包含该轮交付的那个 commit 触发的 run**；
+> 之后的纯文档 run 只是确认。**任何一次 run 变红就重新打开本条。**
+> **下一轮 = §1 第一个 `[ ]` = F4**（`infy lsp` / `std.net` TLS / `dyn Trait` vtable 偏移表：要么实现，要么在
+> `docs/spec-deviations.md` 保持"明确未实现"记录）。起手现成件见下一段末尾（本轮 grep 过，不必重审）。
+> 一条**已量过、留给下一轮判断**的待办：CI 步 3 的判据现在是 `git status --porcelain`，本轮实测它在两个方向上都不可靠
+> （run #1 型：改写了字节却"干净"；本轮 run #2 型：该报的会因 racy-clean 漏报）。要不要换成内容级判据由下一轮定，
+> 但**别**为了让它绿而放宽（经验库 [[checkout-eol-is-an-executed-surface]] 第 5 形态）。
+> 措辞红线不变：「两侧装载期校验等价」仍不许讲（F26 前半 / D-42 (a)–(e)）；覆盖 83/2300 ⇒ 任何文档
+> 不得出现「INFY v2.0 兼容」的肯定式声称（该测试**逐物理行**判，否定标记必须与声称同一行）。
+> **（以下为 cron-26 轮前半/中段与 cron-25 轮的指针，已被上面一段取代，保留作历史）**
 > **cron-26 轮后半（2026-10-16）：F1 回到 `[ ]`，本段取代下一段（同轮前半那段「F1 勾 `[x]`」）** ——
 > 因为**做账提交自己触发的 run #3（`38910330820`）= `failure`**，红在 CI 步 3「检出没改写工作树」，
 > 而根因是 **F1 的修法本身有缺陷**：`.gitattributes` 后匹配优先，全局 `*.infy text eol=lf` 写在
