@@ -1328,3 +1328,30 @@ cargo 也不会编译它）删除 —— 这是 BACKLOG F3 早已点名的一项
 `cargo build --offline --release` 与 bin 目标的告警本轮未逐条清理（release 构建 exit 0、无新告警来源改动）。
 "两侧装载期校验等价"仍不许讲（F26 前半，清单 = D-42 (a)–(e)）；`[lints]` 的接线只证明**配置进入了诊断**，
 不证明 §9.6 的其余表面（`.infyfmt`、`--diag-json` 的 lint 字段）已实现。
+
+
+## F1 的 run #1 结论（本轮推送后回查，与 F2 同批落地）
+
+推送第 **1** 次即成功（`6fceaa5..1896c2a`）⇒ `…/actions/workflows` 由 **0 → 1**、`…/actions/runs?branch=toolchain`
+出现 **run 38892797672（run_number 1, event push）** ⇒ **分支上首条 workflow 不需要人工批准**。
+该 run **conclusion = failure**，逐步：步 **1-6 success**（`Provision CPython 3.14` 与「工具链自检」都过 ⇒
+`windows-latest` 上 `gcc` 在 PATH、`setup-python@v7` 有 CPython 3.14 ⇒ 过去两轮悬着的「runner 供给」两条疑问**都不成立**）；
+步 **7 `cargo test --offline` failed** = `526 passed; 3 failed`；步 **8-12 skipped**（`set -e` 之后没跑到，
+这 5 步在远端从未执行过一次 ⇒ 「IFBC 交叉验证在 CI 里过了」这类话今天仍然不许讲）。
+
+**3 条红项是同一个根因，且是本仓库第三次踩行尾**：`cli::tests::a_module_without_embeds_produces_no_images`、
+`run_executes_the_tour_and_exits_zero`、`test_refuses_cov_and_runs_zero_tests_where_there_are_none`，
+远端日志打的是 `warning[W-0001]: CRLF 行结束符：应为 LF（共 28 处）`（`cmd/runner/main.infy`）与
+`（共 38 处）`（`core/build/mod.infy`），断言形态是 `left: 2, right: 0`。根因 = runner 的 `core.autocrlf=true`
+把**没有 EOL 属性**的 `examples/**.infy` 检出成 CRLF，而 §2.1 把行尾本身当被测面；本地是 LF ⇒ 529 项全绿也看不见。
+
+**另有一条更贵的发现**：那条「检出没改写工作树」的守卫**判据本身是错的** —— `git status --porcelain` 为空
+证明不了字节没被改写（clean 过滤器把 CRLF 换回 LF 再比较），所以 run #1 里这一步是 `success` 而工作树其实是 CRLF。
+**修法（同批，不放宽任何断言）**：① `.gitattributes` 加 `*.infy text eol=lf` 与 `*.infy.toml text eol=lf`；
+② CI 守卫步加一条直接查输入面字节：`LC_ALL=C grep -rlU CR --include=*.infy --include=*.infy.toml examples`
+命中即红并打名单（`conformance/cases` **不查** —— 那里故意有写 CRLF 字节的正反例）；
+③ 两条新断言钉进 `conformance::tests::the_ci_workflow_is_windows_only_and_keeps_the_three_anti_false_red_guards`
+（`grep -rlU` 必须在 + `.gitattributes` 里 `*.infy` 必须在）。**本地负对照实测**：LF 树命中 **0** 条；
+把 `examples/tour` 的两个 `.infy` 换成 CRLF 后命中 **2** 条且指名这两个文件，`infy check` 对同一份 CRLF 副本
+exit **2** 并打 **2** 条 `W-0001` ⇒ 与远端逐字相符。**F1 仍 `[ ]`**：勾它的条件是那一次 run 的 conclusion = success，
+run #1 是红的；修复已推送 ⇒ 下一轮取 run #2 的逐步结论（步 8-12 从没在远端跑过，仍可能另有红）。

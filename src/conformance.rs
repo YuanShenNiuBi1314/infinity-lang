@@ -1299,10 +1299,19 @@ mod tests {
             assert!(
                 line.contains("windows"),
                 "runner 是 `{line}`：阶段 [9] 产 PE + 追加 INFYART2 段、std.fs 走 CreateFileW，\
-                 别的平台上跑的不是这 524 项测过的形状"
+                 别的平台上跑的不是这 529 项测过的形状"
             );
         }
         assert!(y.contains("git status --porcelain"), "行尾/改写守卫没了");
+        assert!(
+            y.contains("grep -rlU"),
+            "CR 字节守卫没了 —— porcelain 为空证明不了字节形状：第一次真 run 就是 `.infy` 被检出成 CRLF，\
+             三个 cli 测试红在 exit 2（W-0001），而 git status 全程干净"
+        );
+        assert!(
+            doc_text(".gitattributes").contains("*.infy"),
+            "INFY 源码的行尾没钉成 LF ⇒ Windows runner 上 autocrlf 会把输入面改成 CRLF"
+        );
         assert!(
             y.contains("cd target/scratch"),
             "rt harness 的 CWD 守卫没了 —— 它按 ../../runtime/fixtures 取夹具，换目录是两条假失败 + exit 139"

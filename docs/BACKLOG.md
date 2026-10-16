@@ -10,6 +10,15 @@
 
 ## 0. 每一轮的固定协议（定时任务必须遵守）
 
+> **§0.0 风险操作一律走脚本**（项目所有者的明确要求：直接敲命令会频繁弹人工确认，脚本不会）。
+> 凡涉及删除/移动文件、清理缓存、`git` 历史相关操作、改本机状态、批量改文件，**不得逐条直接执行命令**，
+> 必须先在 `scripts/` 下写成一个脚本再运行，脚本四条硬规矩：
+> ① **默认干跑**（不带 `--apply` 只打印将做什么）；② 幂等，可重复运行；③ 把动作与结果追加到
+> `logs/<name>.log`，失败时退出码非 0；④ 改本机状态的是临时的——必须 `trap`/`finally` 恢复并核验
+> （见经验库 restore-system-changes）。
+> **脚本只是免掉确认弹窗，不是扩大权限范围**：仍然禁止强推、禁止动 `main`、禁止删除仓库外的用户文件、
+> 禁止 `rm -rf` 仓库与 `target/` 以外的路径。用脚本做这些事属于违规，不做比做错好。
+
 1. **读**：`docs/BACKLOG.md`（本文件）、`docs/RUNLOG.md` 末尾 20 行、经验库
    `C:\Users\zhang\.qoder-cn\projects\F--infinity---INFY-DELIVERY-v0-1-0\memory\MEMORY.md` 及其索引到的条目。
 2. **取活**：执行 §1 里**第一个未打勾**（`[ ]`）的任务，即"最近的地方"。不跳号、不挑肥拣瘦；
@@ -787,6 +796,24 @@
 ### 阶段 F：工程卫生（每轮顺手做一点，不许它长大）
 
 - [ ] F1 `.github/workflows/ci.yml`：`cargo fmt --check`? 不适用（无 rustfmt 约定）→ 只做 `cargo build --offline --release` + `cargo test --offline` + `gcc` 跑 `runtime` 测试。
+      **F2 轮（2026-10-16）把下面那段「远端还没有 workflow」的旧声称作废并给出真结论**：推送第 1 次即成（`6fceaa5..1896c2a`），
+      `gh api …/actions/workflows` 由 **0 → 1**、`…/actions/runs?branch=toolchain` 出现 **run 38892797672（run_number 1, event push）**
+      ⇒ **分支上首条 workflow 不需要人工批准**（过去两轮悬着的那个问题就此有答案）。该 run **conclusion = failure**，逐步结论：
+      步 1-6 全 `success`（含 **Provision CPython 3.14** 与 **工具链自检** ⇒ `windows-latest` 上 `gcc` 在 PATH、`setup-python@v7` 有 CPython 3.14，
+      「runner 供给」那两条疑问**都不成立**、不需要改 yaml 的供给面）；步 7 `cargo test --offline` **failed**（`526 passed; 3 failed`），步 8-12 因 `set -e` 之后全部 `skipped`。
+      **3 条红的都是同一根因，而且是本仓库第三次踩行尾**：`cli::tests::a_module_without_embeds_produces_no_images` /
+      `run_executes_the_tour_and_exits_zero` / `test_refuses_cov_and_runs_zero_tests_where_there_are_none`，日志里是
+      `warning[W-0001]: CRLF 行结束符（共 28 处 / 共 38 处）` 打在 `cmd/runner/main.infy` 与 `core/build/mod.infy` 上 ⇒ 断言 `left: 2, right: 0`。
+      根因 = runner 的 `core.autocrlf=true` 把**没有 EOL 属性**的 `examples/**.infy` 检出成 CRLF，而 §2.1 的 `W-0001` 把行尾本身当被测面；
+      本地永远是 LF ⇒ 本地 529 项全绿看不见它。**更要紧的是那条守卫本身是错的判据**：`git status --porcelain` 为空**证明不了**字节没被改写
+      （clean 过滤器把 CRLF 换回 LF 再比较），所以「检出没改写工作树」这一步在 run #1 里是 `success` 而工作树其实是 CRLF。
+      **修法两条同批**（不是放宽断言）：`.gitattributes` 加 `*.infy text eol=lf` + `*.infy.toml text eol=lf`；
+      CI 的守卫步加一条直接查输入面字节 —— `LC_ALL=C grep -rlU CR --include=*.infy --include=*.infy.toml examples` 命中即红并打名单
+      （`conformance/cases` **不查**，那里故意有写 CRLF 字节的正反例）。本地负对照实测：LF 树命中 **0** 条，把 `examples/tour` 的两个 `.infy`
+      改成 CRLF 后命中 **2** 条并指名这两个文件；`infy check` 对同一份 CRLF 副本 exit **2** 并打 2 条 `W-0001`（与远端逐字相符）。
+      新断言也钉进测试（`the_ci_workflow_is_windows_only_and_keeps_the_three_anti_false_red_guards` 多两条：`grep -rlU` 必须在、
+      `.gitattributes` 里 `*.infy` 必须在）。**本条仍 `[ ]`**：勾它的条件是那**一次真 run** 的 conclusion = success，而 run #1 是红的；
+      修复已推送 ⇒ **下一轮 = `gh api …/actions/runs?branch=toolchain` 取 run #2 的逐步结论**（还可能在步 8-12 红，那 5 步在 run #1 里是 skipped，从没在远端跑过一次）。
       **F1 轮（2026-10-16）= 实现与文档全部落地，但本条保持 `[ ]`**：验收条件按 §2 的 F1(4) 只认 `gh api …/actions/workflows`（及 runs）的**回查**，而本轮 `git push origin HEAD:toolchain` **三次全败**（3×`Recv failure: Connection was reset`，同一时刻 `gh api` 正常 ⇒ 仍是 `github.com:443` 抖动，不是 token/配置），远端 `toolchain` 仍 = `6fceaa5`、`…/actions/workflows` = **0**、`…/actions/runs` = **0** ⇒ 远端**还没有这条 workflow**，「CI 绿」与「CI 跑过」两句都不许写。**卡在哪**：推送。**下一轮从哪继续**：开头先补推 `ae2c58e` + 做账提交，再 `gh api …/actions/runs?branch=toolchain` 回查 run 是否被创建（首条 workflow 常需一次手动批准）；红了就按「runner 供给」（`gcc` 在 PATH 吗、`setup-python` 的缓存里有 3.14 吗）逐条判定，那两条在 yaml 里都是「缺了就红并打 PATH」而不是「缺了就跳」。**本地已实测的部分不重做**（下列数字均为 `ae2c58e` 所在工作树的复跑，非引用）。
       **F1 轮（2026-10-16）落地（本条仍 `[ ]`，见上）**：新建 `.github/workflows/ci.yml`（单 job、11 步 = 2 个 `uses` + 9 个 `run`）+
       `.gitattributes` 一条把 workflow 自己钉成 `eol=lf` + README 的目录表与顶部 CI 行 + `docs/coverage.md` **P30**。

@@ -12,3 +12,10 @@ conformance/cases/**         -text
 # CRLF，而 `do\r`/`fi\r` 会让每个多行 run 步骤变成 bash 语法错误。用 CRLF 副本解析过：PyYAML 会把
 # 行尾归一化成 LF（run 里 \r 数 = 0），但 GitHub 用的是另一个解析器 ⇒ 不赌，显式钉成 LF。
 .github/workflows/*.yml  text eol=lf
+
+# F1 第一次真 run 实测出来的洞（RUNLOG cron-24）：runner 的 core.autocrlf=true 会把**没有 EOL 属性**
+# 的 examples/**.infy 检出成 CRLF，而 `git status --porcelain` 仍然为空（clean 过滤器把 CRLF 换回 LF 再比），
+# 于是"检出没改写工作树"那条守卫证明不了字节形状。§2.1 的 W-0001 把行尾本身当被测面 ⇒ 三个 cli 测试
+# 在远端红成 exit 2（本地是 LF，永远看不见）。显式钉成 LF，并在 CI 里直接查输入面的 CR 字节。
+*.infy                   text eol=lf
+*.infy.toml              text eol=lf

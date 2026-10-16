@@ -60,6 +60,14 @@ jobs:
             git status --porcelain
             exit 1
           fi
+          # porcelain 为空**证明不了**字节没被改写：clean 过滤器会把 CRLF 换回 LF 再比较。
+          # 第一次真 run 就是这么红的：examples/tour 的两个 .infy 检出成 CRLF ⇒ 三个 cli 测试红在 exit 2。
+          # 所以这里直接查输入面的 CR 字节。conformance/cases 不查 —— 那里故意有写 CRLF 字节的正反例。
+          if LC_ALL=C grep -rlU "$(printf '\r')" --include='*.infy' --include='*.infy.toml' examples >/dev/null 2>&1; then
+            echo "::error::检出的 INFY 源码含 CR ⇒ §2.1 的 W-0001 会给每个文件多一条诊断（行尾锁失效）"
+            LC_ALL=C grep -rlU "$(printf '\r')" --include='*.infy' --include='*.infy.toml' examples
+            exit 1
+          fi
 
       - name: Provision CPython 3.14
         # `btrack::tests::py_unit_fixture_bytes()` 从探针重新摄取 §7.7.1 的 `normalize` 单元，声明的
