@@ -25,6 +25,49 @@ use crate::span::Position;
 use crate::span::{FileId, Sources};
 use crate::{artifact, atrack, borrow, codegen, conformance, derive, hir, ifbc, lexer, macro_expand, parser, pkg, sema};
 
+/// §13.4: the options that take the next token as their value. A value belongs to its option, never
+/// to the positional list — `infy check --target <triple> <mod>` used to read `<triple>` as the
+/// module path and answer 「找不到 MODULE.infy.toml」 (§5.1) for a module that exists. Because one
+/// parser feeds every command, the mistake was shared by `check`/`build`/`run`/`fmt`/`expand`
+/// (BACKLOG F5). `cli::tests` pins this list from both ends: the exact contents, and that every
+/// `flag_value`/`opt_value` site in this file names an option it declares here.
+///
+/// `--arg`/`--feature` are §13.4's `infy run` options with no consumer yet (F19); they are listed
+/// because they *do* take a value, which is a parsing fact independent of whether one is honoured.
+const VALUE_OPTS: &[&str] = &[
+    "--arg",
+    "--cc",
+    "--derive",
+    "--diag-json",
+    "--feature",
+    "--macro",
+    "--max-width",
+    "--out",
+    "--runtime",
+    "--stage",
+    "--target",
+];
+
+/// `rest` minus the flags and the values they consume: the positional arguments (§13.4's `[mod]`,
+/// `[src.infy]`, `<artifact>`). Only the exact token counts as an option that consumes a value —
+/// `--target=x` is not recognised anywhere in this CLI, so it must not eat the token after it.
+fn split_positional(rest: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let a = &rest[i];
+        if a.starts_with('-') {
+            if VALUE_OPTS.contains(&a.as_str()) {
+                i += 1;
+            }
+        } else {
+            out.push(a.clone());
+        }
+        i += 1;
+    }
+    out
+}
+
 /// §13.4's commands this build refuses **by name** instead of pretending (hard constraint (d): a
 /// feature that is not implemented must say so). `conformance` left this list in E2; re-adding a
 /// command whose stage actually exists is what `cli::tests::conformance_is_no_longer_a_refused_command`
@@ -57,7 +100,7 @@ pub fn run(args: &[String]) -> i32 {
     let opt_value = |name: &str| -> Option<String> {
         rest.iter().position(|a| a == name).and_then(|i| rest.get(i + 1)).cloned()
     };
-    let positional: Vec<String> = rest.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+    let positional: Vec<String> = split_positional(&rest);
     match cmd {
         "-V" | "--version" | "version" => {
             println!("{}", crate::VERSION.banner());
@@ -67,7 +110,7 @@ pub fn run(args: &[String]) -> i32 {
         "check" => check(&positional, &rest, false),
         "build" => check(&positional, &rest, true),
         "fmt" => fmt_cmd(&positional, flag("-w"), flag("--check"), opt_value("--max-width")),
-        "expand" => expand_cmd(&positional, opt_value("--macro"), opt_value("--stage")),
+        "expand" => expand_cmd(&positional, opt_value("--macro"), opt_value("--stage"), opt_value("--derive")),
         "mod" => mod_cmd(&positional),
         "toolchain" => toolchain_cmd(&positional),
         "target" => target_cmd(&positional),
@@ -112,7 +155,7 @@ fn usage() -> String {
         ("build [--target T] [--cc P] [--reproducible] [--verify-reproducible]", "stages [1]-[9]: codegen, link, §7.4 container"),
         ("run [mod] [--target T] [--cc P]", "stages [1]-[9] into a temporary directory, then executes the artifact (§13.4)"),
         ("test [mod] [--bench] [--target T] [--cc P]", "§5.9 test build (`*_test.infy` + `tests/…` in scope) + run the `#[test]` harness (§13.4)"),
-        ("fmt [-w] [--check]", "official formatting, byte-unique (§9.5)"),
+        ("fmt [-w] [--check] [mod|src.infy…]", "official formatting, byte-unique (§9.5)"),
         ("expand [--macro name] [--stage all|macro|derive]", "auditable macro/derive output (§6.8)"),
         ("mod tidy|why|verify|upgrade|vendor", "dependency resolution, MVS (§5.7)"),
         ("toolchain probe|list|add|remove", "A-track compilers + B-track bytecode toolchains (§7.6.2)"),
@@ -581,9 +624,9 @@ fn frontend(positional: &[String], rest: &[String], scope: &Scope) -> Result<(Lo
     }
     let rendered = l.handler.render(&l.sources);
     eprint!("{rendered}");
-    if let Some(out) = rest.iter().position(|a| a == "--diag-json").and_then(|i| rest.get(i + 1)) {
+    if let Some(out) = flag_value(rest, "--diag-json") {
         let json = l.handler.render_json(&l.sources, &crate::VERSION);
-        if let Err(e) = std::fs::write(out, json) {
+        if let Err(e) = std::fs::write(&out, json) {
             eprintln!("error: 无法写 {out}: {e}");
             return Err(exit::PERMISSION);
         }
@@ -1078,8 +1121,8 @@ fn test_cmd(positional: &[String], rest: &[String]) -> i32 {
 /// silent skip. `--verify-reproducible` re-runs stage [9] in two independent build directories and
 /// compares bytes (§7.3 item 3, mismatch → `E-0603`/exit 7).
 fn build_c(l: &Loaded, prog: &sema::Program, rest: &[String], cmd: &str) -> i32 {
-    let triple = match rest.iter().position(|a| a == "--target").and_then(|i| rest.get(i + 1)) {
-        Some(t) => t.clone(),
+    let triple = match flag_value(rest, "--target") {
+        Some(t) => t,
         None => host_triple(),
     };
     let (triple, target) = match codegen::target_from_triple(&triple) {
@@ -1136,7 +1179,7 @@ fn build_c(l: &Loaded, prog: &sema::Program, rest: &[String], cmd: &str) -> i32 
             return exit::TOOLCHAIN;
         }
     };
-    let out = match rest.iter().position(|a| a == "--out").and_then(|i| rest.get(i + 1)) {
+    let out = match flag_value(rest, "--out") {
         Some(p) => PathBuf::from(p),
         None => {
             let stem = l.manifest.module_path.rsplit('/').next().unwrap_or("crate").to_string();
@@ -1628,10 +1671,21 @@ fn fmt_cmd(positional: &[String], in_place: bool, check_only: bool, max_width: O
     opts.max_width = width;
     opts.in_place = in_place;
     opts.check = check_only;
-    let targets: Vec<PathBuf> = match positional.first() {
-        Some(p) => vec![PathBuf::from(p)],
-        None => default_infy_files(),
+    let targets: Vec<PathBuf> = if positional.is_empty() {
+        match find_module_root(None) {
+            Some(root) => fmt_targets(&[root.to_string_lossy().into_owned()]),
+            None => {
+                eprintln!("error: 找不到 {}——先 infy init <module-path>，或在 module 目录内运行（§5.1）", pkg::MANIFEST_NAME);
+                return exit::GENERIC;
+            }
+        }
+    } else {
+        fmt_targets(positional)
     };
+    if targets.is_empty() {
+        eprintln!("error: `{}` 下没有 .infy 文件（§9.5 第 11 条只处理 `.infy`）", positional.join("`, `"));
+        return exit::GENERIC;
+    }
     let mut changed = 0;
     let mut failures = 0;
     for t in targets {
@@ -1683,10 +1737,19 @@ fn fmt_cmd(positional: &[String], in_place: bool, check_only: bool, max_width: O
     exit::OK
 }
 
-fn default_infy_files() -> Vec<PathBuf> {
+/// What `infy fmt` formats for each path it was given (§13.4/§9.5): a directory contributes every
+/// `.infy` under it — the same walk `pkg::discover` starts from for `infy check` (§5.1) — and a file
+/// contributes itself. Reading a directory as if it were a source file is what made
+/// `infy fmt examples/tour` die on `os error 5` while `infy check examples/tour` passed (F5).
+fn fmt_targets(positional: &[String]) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(root) = find_module_root(None) {
-        collect_infy(&root, &mut out);
+    for p in positional {
+        let path = PathBuf::from(p);
+        if path.is_dir() {
+            collect_infy(&path, &mut out);
+        } else {
+            out.push(path);
+        }
     }
     out
 }
@@ -1708,7 +1771,16 @@ fn collect_infy(dir: &Path, out: &mut Vec<PathBuf>) {
     out.sort();
 }
 
-fn expand_cmd(positional: &[String], only_macro: Option<String>, stage: Option<String>) -> i32 {
+fn expand_cmd(positional: &[String], only_macro: Option<String>, stage: Option<String>, only_derive: Option<String>) -> i32 {
+    // §6.8 lists `--derive Type`, but `macro_expand` has no per-type filter, so accepting the flag
+    // and printing the whole module's expansion would claim a selection that never happened.
+    if let Some(t) = only_derive {
+        eprintln!(
+            "error: `infy expand --derive {t}` 未实现：§6.8 列了这个开关，`macro_expand` 里却没有按类型筛选的入口；\
+             拒绝而不是把它当成 module 路径或静默忽略（--stage derive 会展开全部 derive）。"
+        );
+        return exit::GENERIC;
+    }
     let root = match pkg_root(positional) {
         Some(r) => r,
         None => {
@@ -3543,6 +3615,145 @@ fn main() { }
             v.rendered
         );
         assert_eq!(v.exit, exit::DIAGNOSED, "够不到的 std 调用不许被判成通过");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --------------------------------------------------------------- §13.4 F5：目录参数与选项值
+
+    /// `run()`'s `rest` (the argv without the program name) — what [`split_positional`] reads.
+    fn opts(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// F5 的根因单独钉住：§13.4 里取值型选项吃掉的那个 token 属于选项，永远不是 `[mod]` 路径。
+    #[test]
+    fn an_option_value_is_never_read_as_the_module_path() {
+        for &opt in VALUE_OPTS {
+            assert_eq!(
+                split_positional(&opts(&[opt, "VAL", "examples/tour"])),
+                vec!["examples/tour".to_string()],
+                "`{opt}` 的取值被当成了 positional —— check/fmt/expand 全从这一份列表里取 module 路径"
+            );
+        }
+        // 反向半边：布尔开关不许吃掉下一个 token，否则 `infy fmt --check <dir>` 会把 <dir> 当成它。
+        assert_eq!(split_positional(&opts(&["--check", "--deadlock", "dir"])), vec!["dir".to_string()]);
+        // `--target=x` 这一族本 CLI 不认（`flag_value` 只比全等 token），所以它也不许吃掉下一个 token。
+        assert_eq!(split_positional(&opts(&["--target=x", "dir"])), vec!["dir".to_string()]);
+        // 选项出现在末尾、没有值：不能 panic，也不能凭空多出一个 positional。
+        assert_eq!(split_positional(&opts(&["dir", "--target"])), vec!["dir".to_string()]);
+        // 名单两头钉死，加一项就必须同时回答「它真的从命令行取一个值吗」。
+        let mut sorted: Vec<&str> = VALUE_OPTS.to_vec();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            vec![
+                "--arg", "--cc", "--derive", "--diag-json", "--feature", "--macro", "--max-width",
+                "--out", "--runtime", "--stage", "--target"
+            ]
+        );
+    }
+
+    /// 上面那份名单只有在覆盖**全部**取值点时才成立。不靠人记得住：把本文件读回来，取每个
+    /// `flag_value`/`opt_value` 调用点的第一个字面量，逐条要求它在 `VALUE_OPTS` 里。
+    #[test]
+    fn every_option_whose_value_the_cli_reads_is_declared_in_value_opts() {
+        // 模式自己拼出来：写成字面量会让本行成为自己的匹配点（扫出 `", "` 这种假名）。
+        let readers: Vec<String> = ["flag_value", "opt_value"].iter().map(|n| format!("{n}(")).collect();
+        let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("cli.rs"))
+            .expect("读得到自己的源码：这条锁的判据就建立在它上面");
+        let mut read: Vec<String> = Vec::new();
+        for line in text.lines() {
+            if line.trim_start().starts_with("fn ") {
+                continue; // `fn flag_value(...)` 的定义行不取值
+            }
+            for pat in readers.iter() {
+                let mut from = 0;
+                while let Some(i) = line[from..].find(pat.as_str()) {
+                    let after = &line[from + i + pat.len()..];
+                    let open = after.find('"');
+                    let close = open.and_then(|o| after[o + 1..].find('"'));
+                    let (Some(o), Some(c)) = (open, close) else { break };
+                    read.push(after[o + 1..o + 1 + c].to_string());
+                    from += i + pat.len();
+                }
+            }
+        }
+        let mut found = read.clone();
+        found.sort();
+        found.dedup();
+        // 逐条相等 = 两头：多一个取值点 ⇒ 红；某个取值点改成不读字面量（锁变弱）⇒ 也红。
+        assert_eq!(
+            found,
+            vec![
+                "--cc", "--derive", "--diag-json", "--macro", "--max-width", "--out", "--runtime",
+                "--stage", "--target"
+            ],
+            "取值点和 VALUE_OPTS 的关系变了；扫描实得 {:?}",
+            read
+        );
+        for name in &read {
+            assert!(VALUE_OPTS.contains(&name.as_str()), "`{name}` 从命令行取一个值却没声明在 VALUE_OPTS（F5 就是这么复发的）");
+        }
+    }
+
+    /// F5 的验收本体：三条命令各带**目录**参数，指向同一个 module 时必须给出同一个结论。
+    /// 修前实测（docs/RUNLOG.md F5 行）：`fmt --check <dir>` → `无法读取 … 拒绝访问 (os error 5)`
+    /// exit 2、`expand --stage macro <dir>` → `找不到 module 根` exit 1、`check --target <T> <dir>`
+    /// → `找不到 MODULE.infy.toml` exit 1；下面每一条都跑的是当时那几条命令行。
+    ///
+    /// 夹具先用 `fmt -w` 让格式化器把它写成自己的不动点，再谈一致 —— 这样这条测试不依赖 §14 导览
+    /// 的规范状态（那是 F6，仍未勾）。
+    #[test]
+    fn a_directory_argument_reaches_check_fmt_and_expand_the_same_way() {
+        let dir = scratch_module("cli-f5-dir", "", "#![infy_version = \"2.0\"]\n\npackage embed\n\nfn main() { }\n");
+        let p = dir.to_string_lossy().to_string();
+        assert_eq!(run(&argv(&["fmt", "-w", &p])), exit::OK, "infy fmt -w <目录>");
+        for (label, args) in [
+            ("check <dir>", argv(&["check", &p])),
+            ("fmt --check <dir>", argv(&["fmt", "--check", &p])),
+            ("expand <dir>", argv(&["expand", &p])),
+            ("expand --stage macro <dir>", argv(&["expand", "--stage", "macro", &p])),
+            ("check --target <T> <dir>", argv(&["check", "--target", &host_triple(), &p])),
+            ("fmt --check --max-width 100 <dir>", argv(&["fmt", "--check", "--max-width", "100", &p])),
+            (
+                "expand --macro any --stage all <dir>",
+                argv(&["expand", "--macro", "any", "--stage", "all", &p]),
+            ),
+        ] {
+            assert_eq!(run(&args), exit::OK, "{label}");
+        }
+        // 指向整个目录与指向目录里那一个文件，fmt 的结论必须相同（§9.5 是逐文件的规则）。
+        let file = dir.join("core").join("embed").join("mod.infy");
+        assert_eq!(run(&argv(&["fmt", "--check", &file.to_string_lossy()])), exit::OK, "fmt --check <file>");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 目录参数不能是「静默的 0 个文件」：写错的目录、空的目录、不在 module 里的当前目录，都要
+    /// 显式失败（硬约束 (d)）。修前三条里后两条报的是 `0 file(s) formatted` + exit 0。
+    #[test]
+    fn fmt_refuses_an_empty_directory_and_a_missing_module() {
+        let empty = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("scratch").join("cli-f5-empty");
+        std::fs::create_dir_all(&empty).expect("空目录夹具");
+        assert_eq!(
+            run(&argv(&["fmt", "--check", &empty.to_string_lossy()])),
+            exit::GENERIC,
+            "目录里没有 .infy 也要报出来，不能 `0 file(s) formatted` + exit 0"
+        );
+        // 仓库根不是 INFY module（往上走到盘根都没有 MODULE.infy.toml），所以无参数必须报 §5.1。
+        assert_eq!(run(&argv(&["fmt", "--check"])), exit::GENERIC, "不在 module 内时 fmt 要和 check 说同一句话");
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// §6.8 列了 `infy expand --derive Type`，但 `macro_expand` 没有按类型筛选的入口。它取值，
+    /// 所以既不能吃掉 module 路径（F5 的同一个根因），也不能被静默忽略（= 假装按类型筛过）。
+    #[test]
+    fn expand_refuses_the_derive_filter_it_does_not_implement() {
+        let dir = scratch_module("cli-f5-derive", "", "#![infy_version = \"2.0\"]\n\npackage embed\n\nfn main() { }\n");
+        let p = dir.to_string_lossy().to_string();
+        assert_eq!(run(&argv(&["expand", "--derive", "Shape", &p])), exit::GENERIC, "`--derive` 必须显式拒绝");
+        // 拒绝发生在取 module 根之前还是之后都不影响结论，但 `--derive` 的值绝不能当路径：
+        // 同一条命令不带 `--derive` 时是 exit 0。
+        assert_eq!(run(&argv(&["expand", &p])), exit::OK, "去掉 `--derive` 后同一个目录要能用");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
