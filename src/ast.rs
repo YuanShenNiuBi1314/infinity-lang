@@ -7,7 +7,7 @@
 //! expandable source. Desugaring therefore happens in `sema`/`codegen`, never in the parser.
 
 use crate::span::Span;
-use crate::token::{IntLit, Lit, Punct, Tree};
+use crate::token::{Lit, Punct, Tree};
 
 #[derive(Clone, Debug, Default)]
 pub struct Docs {
@@ -109,16 +109,6 @@ impl Attr {
             }
         }
         None
-    }
-    pub fn int_arg(&self, name: &str) -> Option<u128> {
-        self.args.iter().find(|a| a.name.as_deref() == Some(name)).and_then(|a| match &a.value {
-            Some(AttrValue::Int(i)) => Some(*i),
-            Some(AttrValue::Expr(e)) => match &e.kind {
-                ExprKind::Int(i) => i.value,
-                _ => None,
-            },
-            _ => None,
-        })
     }
     /// `#[repr(C)]`, `#[derive(Clone)]` style positional names.
     pub fn has_ident(&self, name: &str) -> bool {
@@ -447,9 +437,11 @@ pub struct CallArg {
 
 #[derive(Clone, Debug)]
 pub enum ExprKind {
+    /// Integer literals carry `digits`/`suffix`/`value` (§2.8 range checks happen in stage [4]),
+    /// and **both** producers — `parser::primary` and `derive`'s generated bodies — build this one
+    /// shape. A second int shape is what BACKLOG F9 removed: predicates that matched only the other
+    /// one silently dropped literals, and the two lowerings of the same literal had already drifted.
     Lit(Lit),
-    /// Integer literal that still needs range checks against its resolved type (§2.8).
-    Int(IntLit),
     /// `auto`, legal only in named-argument position (§2.6, `E-0030`).
     Auto,
     Ident(String),

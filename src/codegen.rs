@@ -2216,15 +2216,6 @@ impl<'a> Cg<'a> {
     fn expr(&mut self, e: &Expr, want: Option<&Ty>) -> Result<Val, CgError> {
         match &e.kind {
             ExprKind::Lit(l) => self.literal(l, want, e),
-            ExprKind::Int(i) => {
-                // F9: `sema::check_expr` handles this shape but `parser::primary` never produces
-                // it, so this arm is dead code kept only so the shape cannot be mis-lowered.
-                let ty = want.cloned().or_else(|| self.prog.ty(e.span).cloned()).unwrap_or(Ty::Prim(Prim::I32));
-                match i.value {
-                    Some(v) => Ok(Val::of(ty.clone(), self.numeric_text(v as u128, &ty)?)),
-                    None => Err(CgError::new("§2.8", "codegen: 整型字面量超出 i128")),
-                }
-            }
             ExprKind::Ident(n) => self.ident(n, e),
             ExprKind::Path(segs) => self.path_expr(segs, e, want),
             ExprKind::Unary { op, expr } => self.unary(*op, expr, want),
@@ -4023,7 +4014,6 @@ fn punct_text(p: Punct) -> &'static str {
 fn expr_kind_name(e: &ExprKind) -> &'static str {
     match e {
         ExprKind::Lit(_) => "字面量",
-        ExprKind::Int(_) => "整型字面量",
         ExprKind::Ident(_) => "标识符",
         ExprKind::Path(_) => "路径",
         ExprKind::Call { .. } => "调用",

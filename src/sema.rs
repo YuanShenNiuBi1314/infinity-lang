@@ -469,10 +469,6 @@ impl<'a> Checker<'a> {
 
     pub fn const_eval(&mut self, e: &Expr) -> Option<ConstValue> {
         match &e.kind {
-            ExprKind::Int(i) => {
-                let v = i.value?;
-                Some(if i.suffix.as_deref().map(|s| s.starts_with('i')).unwrap_or(false) { ConstValue::Int(v as i128) } else { ConstValue::UInt(v) })
-            }
             ExprKind::Lit(Lit::Int(i)) => {
                 let v = i.value?;
                 Some(if i.suffix.as_deref().map(|s| s.starts_with('i')).unwrap_or(false) { ConstValue::Int(v as i128) } else { ConstValue::UInt(v) })
@@ -1409,7 +1405,6 @@ impl<'a> Checker<'a> {
                 Lit::Char(_) => Ty::Prim(Prim::Char),
                 Lit::Bool(_) => Ty::Bool,
             },
-            ExprKind::Int(i) => self.int_lit_ty(i, e.span),
             ExprKind::Auto => {
                 self.emit("E-0030", e.span, "auto 出现在非法位置", "auto 只能用于具名实参", Some("§2.6：它不是任何类型，不能参与运算、绑定或返回".into()), None);
                 Ty::Invalid
@@ -2547,6 +2542,73 @@ mod tests {
     #[test]
     fn unsuffixed_literal_adapts_to_the_parameter_type() {
         clean(&format!("{FNS}fn f() {{ take_u8(200); take_i32(1); }}"));
+    }
+
+    /// F9: a `derive`-generated body *is* checked here (expansion is stage [2], before [4]), so the
+    /// two `ExprKind::Int` arms this round deleted were reachable in principle. Reading them closer
+    /// showed they could never be trusted: every node `derive` builds carries the **host item's**
+    /// span, while `Program::ty_of` is keyed by `(file, start, end)` — the generated `return 2;` and
+    /// the generated `"a"` therefore share one key, and only the node stage [4] visited last owns
+    /// the entry that stage [8] reads back through `prog.ty(e.span)`. That collision is BACKLOG F49.
+    /// What this locks is the half F9 owns: the generated literal arrives as the single shape, and
+    /// the two nodes really do land on one key.
+    #[test]
+    fn a_derived_body_reaches_stage_4_on_one_shared_span() {
+        let mut sources = Sources::default();
+        let f = sources.add(
+            "p/mod.infy".to_string(),
+            "package p\n\n#[derive(HasField)]\nstruct S { a: u32, b: bool }\n".to_string(),
+        );
+        let mut h = Handler::default();
+        let lexed = lexer::lex_file(&sources, f, &mut h);
+        let pf = parser::parse(&sources, f, &lexed, &mut h);
+        let host_span = pf
+            .items
+            .iter()
+            .find(|i| matches!(i.kind, ItemKind::Struct { .. }))
+            .expect("struct S")
+            .span;
+        let mut files: BTreeMap<FileId, ParsedFile> = BTreeMap::new();
+        files.insert(f, pf);
+        assert_eq!(crate::derive::expand_derives(&mut files, &mut h), 1);
+        let owned: Vec<(FileId, String, ParsedFile)> =
+            files.into_iter().map(|(id, p)| (id, "t/p".to_string(), p)).collect();
+        let prog = check_files(&sources, &mut h, "t/p", &owned, false, vec![], vec![]);
+
+        let mut int_expr: Option<&Expr> = None;
+        let mut str_expr: Option<&Expr> = None;
+        for (_, _, p) in &owned {
+            for it in &p.items {
+                let ItemKind::Impl { items, .. } = &it.kind else { continue };
+                for m in items {
+                    let ItemKind::Fn { sig, body, .. } = &m.kind else { continue };
+                    let Body::Block(b) = body else { continue };
+                    let StmtKind::Return { value: Some(e) } = &b.stmts[0].kind else { continue };
+                    if sig.name == "__hasfield_field_count" {
+                        int_expr = Some(e);
+                    } else if sig.name == "__hasfield_field_name" {
+                        let ExprKind::Match { arms, .. } = &e.kind else { panic!("the name table is a match") };
+                        let ArmBody::Expr(inner) = &arms[0].body else { panic!("arm expression") };
+                        str_expr = Some(inner);
+                    }
+                }
+            }
+        }
+        let int_e = int_expr.expect("the generated field count must reach stage [4]");
+        let str_e = str_expr.expect("the generated name table must reach stage [4]");
+        match &int_e.kind {
+            ExprKind::Lit(Lit::Int(i)) => assert_eq!(i.value, Some(2), "two fields"),
+            other => panic!("a derived literal must use the parser's shape, got {other:?}"),
+        }
+        assert!(matches!(&str_e.kind, ExprKind::Lit(Lit::Str(s)) if s == "a"));
+        assert_eq!(int_e.span, host_span, "derive stamps the host item's span on every node (F49)");
+        assert_eq!(str_e.span, host_span, "…so two different literals collide in `ty_of` (F49)");
+        let got_int = prog.ty(int_e.span).map(|t| t.text().to_string());
+        let got_str = prog.ty(str_e.span).map(|t| t.text().to_string());
+        assert_eq!(
+            got_int, got_str,
+            "one key cannot carry two types, so whichever node came last owns the entry (F49)"
+        );
     }
 
     /// §2.8: the literal suffix set is closed. An unknown suffix must never be silently accepted;

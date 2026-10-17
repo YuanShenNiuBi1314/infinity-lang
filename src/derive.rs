@@ -232,7 +232,7 @@ fn lit_str(s: &str, span: Span) -> Expr {
 
 fn lit_u(v: u128, span: Span) -> Expr {
     Expr::new(
-        ExprKind::Int(IntLit { digits: v.to_string(), radix: Radix::Dec, suffix: None, value: Some(v) }),
+        ExprKind::Lit(Lit::Int(IntLit { digits: v.to_string(), radix: Radix::Dec, suffix: None, value: Some(v) })),
         span,
     )
 }
@@ -405,7 +405,6 @@ pub(crate) fn p_expr(e: &Expr) -> String {
             Lit::ByteStr(_) => "b\"…\"".to_string(),
             Lit::Cord(_) => "cord…".to_string(),
         },
-        ExprKind::Int(i) => format!("{}{}", i.digits, i.suffix.clone().unwrap_or_default()),
         ExprKind::Ident(s) => s.clone(),
         ExprKind::Path(p) => p.join("::"),
         ExprKind::Unary { op, expr } => format!("{}{}", crate::macro_expand::punct_text(*op), p_expr(expr)),
@@ -1939,11 +1938,10 @@ fn check_attr(
         }
         "align" => {
             let n = a.positional.first().and_then(|v| match v {
+                // `parser::attr_value` routes an integer token to `AttrValue::Int`, so an
+                // `AttrValue::Expr` here is always a non-literal spelling (`SIZE`, `-1`) and is
+                // reported, not guessed.
                 crate::ast::AttrValue::Int(i) => Some(*i),
-                crate::ast::AttrValue::Expr(e) => match &e.kind {
-                    ExprKind::Int(i) => i.value,
-                    _ => None,
-                },
                 _ => None,
             });
             match n {
@@ -2715,6 +2713,46 @@ mod tests {
         let t = one(&files, "impl HasField for S");
         assert!(t.contains("__hasfield_field_offset"), "{t}");
         assert!(t.contains("std::mem::offset_of(\"a\")"), "{t}");
+    }
+
+    /// F9: `derive` was the only producer of a second integer shape, so what it generates has to be
+    /// the shape `parser::primary` produces — otherwise stages [4]/[7]/[8] match one form while
+    /// `derive` builds another. The text test above cannot tell those two apart (both reprint the
+    /// same digits), so this one reads the AST node itself.
+    #[test]
+    fn generated_integer_literals_use_the_single_source_literal_shape() {
+        let (_src, mut files, mut h) = harness(&[(
+            "m/main.infy",
+            "\n#[derive(HasField)]\nstruct S { a: u32, b: bool }\n",
+        )]);
+        expand_derives(&mut files, &mut h);
+        assert!(codes(&h).is_empty(), "{:?}", codes(&h));
+        let mut found: Option<&Expr> = None;
+        for pf in files.values() {
+            for it in &pf.items {
+                let ItemKind::Impl { items, .. } = &it.kind else { continue };
+                for m in items {
+                    let ItemKind::Fn { sig, body, .. } = &m.kind else { continue };
+                    if sig.name != "__hasfield_field_count" {
+                        continue;
+                    }
+                    let crate::ast::Body::Block(b) = body else { panic!("block body expected") };
+                    let StmtKind::Return { value: Some(e) } = &b.stmts[0].kind else {
+                        panic!("generated field count must be a `return <literal>`")
+                    };
+                    found = Some(e);
+                }
+            }
+        }
+        let e = found.expect("`__hasfield_field_count` must exist in the generated impl");
+        match &e.kind {
+            ExprKind::Lit(Lit::Int(i)) => assert_eq!(
+                (i.digits.as_str(), i.radix, i.suffix.as_deref(), i.value),
+                ("2", Radix::Dec, None, Some(2)),
+                "the derived literal must carry the parser's fields"
+            ),
+            other => panic!("derived literals must use the parser's shape, got {other:?}"),
+        }
     }
 
     // ---------------------------------------------------------------- derive ordering / E-0426

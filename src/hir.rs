@@ -1195,7 +1195,6 @@ pub fn hir_ty_from_ast(t: &Type) -> Option<Ty> {
 /// `sema`'s job and would have been an error there).
 fn literal_len(e: &crate::ast::Expr) -> Option<u64> {
     match &e.kind {
-        crate::ast::ExprKind::Int(i) => i.value.map(|v| v as u64),
         crate::ast::ExprKind::Lit(crate::token::Lit::Int(i)) => i.value.map(|v| v as u64),
         _ => None,
     }

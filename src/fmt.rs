@@ -2375,7 +2375,7 @@ impl<'a> Printer<'a> {
     fn expr_inner(&mut self, e: &Expr) -> Doc {
         match &e.kind {
             ExprKind::Invalid => Doc::Text(self.verbatim(e.span, "!")),
-            ExprKind::Lit(_) | ExprKind::Int(_) => Doc::Text(self.verbatim(e.span, "?")),
+            ExprKind::Lit(_) => Doc::Text(self.verbatim(e.span, "?")),
             ExprKind::Auto => Doc::Text("auto".to_string()),
             ExprKind::Ident(name) => {
                 // The AST cannot express every spelling (`x::<T>` collapses to a path, and a failed
@@ -2672,7 +2672,6 @@ impl<'a> Printer<'a> {
     fn expr_doc_no_source(&mut self, e: &Expr) -> Doc {
         match &e.kind {
             ExprKind::Lit(l) => Doc::Text(lit_text(l)),
-            ExprKind::Int(i) => Doc::Text(lit_text(&crate::token::Lit::Int(i.clone()))),
             _ => self.expr_doc(e, 2),
         }
     }
@@ -3452,7 +3451,6 @@ fn fp_expr(e: &Expr, s: &mut String) {
             s.push_str("lit");
             fp_lit(l, s);
         }
-        ExprKind::Int(i) => s.push_str(&format!("int{}/{}/{:?}", i.digits, i.suffix.clone().unwrap_or_default(), i.value)),
         ExprKind::Auto => s.push_str("auto"),
         // `Ident("x")` and `Path(["x"])` are the same expression: the parser rewrites one into the
         // other for turbofish calls, so the digest must not treat them as different shapes.

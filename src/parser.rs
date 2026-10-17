@@ -972,13 +972,14 @@ impl<'a> P<'a> {
         if self.eat_p(Punct::Eq) {
             let t = self.peek().clone();
             let e = self.expr();
-            // §4.1 explicit discriminant. `primary` builds `ExprKind::Lit(Lit::Int(..))`; the
-            // `ExprKind::Int` shape it also names is unreachable there, so matching only that one
-            // silently turned every `A = 3` into `A` with no diagnostic at all.
+            // §4.1 explicit discriminant. `primary`'s first `Kind::Lit` arm matches every literal,
+            // so an integer discriminant is always `ExprKind::Lit(Lit::Int(..))` — the second int
+            // shape an earlier revision of this arm also named was never produced here, and
+            // matching only that one silently turned every `A = 3` into a bare `A`.
             match &e.kind {
                 // `value: None` means the literal is wider than `u128` — §2.8 makes that sema's
                 // range error, so the token is not reported twice here.
-                ExprKind::Int(i) | ExprKind::Lit(Lit::Int(i)) => disc = i.value,
+                ExprKind::Lit(Lit::Int(i)) => disc = i.value,
                 _ => self.syntax_err(&t, "枚举判别式的整数字面量（§4.1）"),
             }
         }
@@ -2528,7 +2529,8 @@ impl<'a> P<'a> {
     fn primary(&mut self, start: u32) -> Option<Expr> {
         let t = self.peek().clone();
         match &t.kind {
-            // Ints also come out as `ExprKind::Lit`; `ExprKind::Int` is only ever built by `derive` (F9).
+            // Every literal token, integers included, comes out as `ExprKind::Lit` (F9 keeps the
+            // AST to one integer shape, the one `derive`'s generated bodies also build).
             Kind::Lit(l) => {
                 let l = l.clone();
                 self.bump();
@@ -2893,8 +2895,8 @@ mod tests {
     }
 
     /// §4.1: an explicit discriminant has to reach the AST. `primary`'s first `Kind::Lit` arm
-    /// matches every literal, so the `ExprKind::Int` shape `variant()` used to look for is never
-    /// built there — `A = 3` parsed as a bare `A` and printed no diagnostic at all.
+    /// matches every literal, so `variant()` once looked for a second integer shape that no parser
+    /// path ever built — `A = 3` parsed as a bare `A` and printed no diagnostic at all.
     #[test]
     fn enum_discriminants_reach_the_ast_and_bogus_ones_are_e0053() {
         let (ast, codes) = parse_str("package main
@@ -2916,6 +2918,66 @@ enum E { A = yes }
             codes.iter().any(|c| c == "E-0053"),
             "a non-literal discriminant must not pass silently: {codes:?}"
         );
+    }
+
+    /// §2.8 + BACKLOG F9: `primary()`'s first arm matches **every** literal token, so the AST has
+    /// exactly one integer shape. F2 deleted the unreachable second arm but left no lock behind —
+    /// this is it: every spelling must arrive as `ExprKind::Lit(Lit::Int(..))` with digits, radix,
+    /// suffix and value intact (`value: None` = wider than `u128`, which §2.8 makes stage [4]'s
+    /// range error, not a lexer error).
+    #[test]
+    fn every_integer_spelling_reaches_the_ast_as_the_single_literal_shape() {
+        use crate::token::Radix;
+        let cases: [(&str, &str, Option<&str>, Option<u128>, Radix); 7] = [
+            ("42", "42", None, Some(42), Radix::Dec),
+            ("1_000", "1000", None, Some(1000), Radix::Dec),
+            ("0u32", "0", Some("u32"), Some(0), Radix::Dec),
+            ("0x1F", "1F", None, Some(31), Radix::Hex),
+            ("0o17", "17", None, Some(15), Radix::Oct),
+            ("0b1010", "1010", None, Some(10), Radix::Bin),
+            (
+                "340282366920938463463374607431768211456",
+                "340282366920938463463374607431768211456",
+                None,
+                None,
+                Radix::Dec,
+            ),
+        ];
+        for (spell, digits, suffix, value, radix) in cases {
+            let (ast, codes) = parse_str(&format!("package main\n\nfn f() {{ let x = {spell}; }}\n"));
+            assert!(codes.is_empty(), "{spell}: {codes:?}");
+            let init = match &ast.items[0].kind {
+                ItemKind::Fn { body: Body::Block(b), .. } => match &b.stmts[0].kind {
+                    StmtKind::Let { init: Some(e), .. } => e,
+                    other => panic!("{spell}: {other:?}"),
+                },
+                other => panic!("{spell}: {other:?}"),
+            };
+            match &init.kind {
+                ExprKind::Lit(Lit::Int(i)) => {
+                    assert_eq!((i.digits.as_str(), i.radix, i.suffix.as_deref(), i.value), (digits, radix, suffix, value), "{spell}");
+                }
+                other => panic!("{spell} must be ExprKind::Lit(Lit::Int(..)), got {other:?}"),
+            }
+        }
+
+        // The three positions that later stages read a discriminant, an array length and an
+        // attribute argument — each one is why the second shape was ever looked for.
+        let (ast, codes) = parse_str("package main\n\n#[align(16)]\nenum E { A = 0x1F }\nfn g(a: [u32; 4]) { }\n");
+        assert!(codes.is_empty(), "{codes:?}");
+        let ItemKind::Enum { variants, .. } = &ast.items[0].kind else { panic!("enum expected") };
+        assert_eq!(variants[0].disc, Some(31), "hex discriminant reaches Variant::disc");
+        assert!(
+            matches!(&ast.items[0].attrs[0].positional[0], AttrValue::Int(16)),
+            "{:?}",
+            ast.items[0].attrs[0].positional
+        );
+        let ItemKind::Fn { sig, .. } = &ast.items[1].kind else { panic!("fn expected") };
+        let TypeKind::Array { len, .. } = &sig.params[0].ty.kind else { panic!("array expected") };
+        match &len.kind {
+            ExprKind::Lit(Lit::Int(i)) => assert_eq!((i.digits.as_str(), i.value), ("4", Some(4))),
+            other => panic!("array length must be ExprKind::Lit(Lit::Int(..)), got {other:?}"),
+        }
     }
 
     #[test]
