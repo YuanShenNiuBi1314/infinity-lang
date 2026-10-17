@@ -2545,9 +2545,9 @@ mod tests {
     }
 
     /// F9: a `derive`-generated body *is* checked here (expansion is stage [2], before [4]), so the
-    /// two `ExprKind::Int` arms this round deleted were reachable in principle. Reading them closer
-    /// showed they could never be trusted: every node `derive` builds carries the **host item's**
-    /// span, while `Program::ty_of` is keyed by `(file, start, end)` — the generated `return 2;` and
+    /// two dedicated integer-literal arms this round deleted were reachable in principle. Reading
+    /// them closer showed they could never be trusted: every node `derive` builds carries the
+    /// **host item's** span, while `Program::ty_of` is keyed by `(file, start, end)` — the generated `return 2;` and
     /// the generated `"a"` therefore share one key, and only the node stage [4] visited last owns
     /// the entry that stage [8] reads back through `prog.ty(e.span)`. That collision is BACKLOG F49.
     /// What this locks is the half F9 owns: the generated literal arrives as the single shape, and
