@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 548 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out   # **F7 轮 541 → 548**，`borrow` 15 → 22（`E-0121` 判据换形）
+test result: ok. 551 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out   # **F9 轮 548 → 551**，`derive` 57→58 · `parser` 9→10 · `sema` 22→23（整数字面量收成单一形状，见下文 F9 一节）
 $ cargo check --offline --lib
 Finished `dev` profile  (0 warnings —— F2 轮把 50 条一次清零：20 条 `unreachable pattern`、6 条 unused import、6 条 unused variable、3 条 `depth` 赋值不读、2 条多余 `mut`、2 条 never-constructed 变体、11 条 never-used fn/method/field；**没有用 `#[allow(...)]` 消数**，其中两处是「没接上」而非「没用」，见下文 F2 一节。口径 = `cargo check --offline --lib --message-format=short` 先 `touch src/lib.rs` 再计数；上一档 50 = F1 轮，51 → 50 = D4(1) 轮删掉 `CodeBuilder.bounds`)
 $ infy check examples/tour
@@ -134,13 +134,13 @@ error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权�
 
 > **一行口径（F6 轮，2026-10-17）**：`infy fmt --check examples/tour` 从本轮起 **exit 0**（偏差 **D-17** 已裁 = §9.5 胜、样例侧改写到规范形态）。下文各轮小节里的 `exit 2`（F6 未裁决）、生成 C11 **12513** 字节、`build-id 4d8250b5…55ba`、节点表行号 **8/9/10/11/16/19** 全是**裁决前那棵树**的当时实测值，保留为历史；现值 = **12512** / **`d7c4408e…370015`** / **7/8/9/10/16/20**（产物 199975 与段 blob 738 没动）。这三组数只随 tour 的字节动。**F8 轮再加一句口径**：产物字节是**宿主镜像**的函数，`infy_rt.c` 一动它就动 ⇒ 本机现值 **200644**（宿主镜像 199842），而 build-id / C11 / 节点表行号三组没动（它们的输入里没有宿主镜像） —— 谁把规范化回滚掉，CI 步 12 的门禁与 `fmt::tests::the_tour_sources_are_the_9_5_fixpoint` 会同时红，不会静默。
 
-548 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 548；**F7 轮实测**，上一版 541 = F6 轮实测）：
-`lexer` 79 · `derive` 57 · `fmt` **40**（**F6 轮 +1** = `the_tour_sources_are_the_9_5_fixpoint`，把 `examples/tour` 读回来逐字节比它自己的 §9.5 输出） · `cli` **46**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → F2 轮 39 → F4 轮 41 → **F5 轮 46** = `VALUE_OPTS` 的逐项跳值 + 取值点源码回扫 + 三条命令的目录参数本体 + 空目录/缺 module 的显式失败 + `expand --derive` 的显式拒绝） ·
+551 项按模块（`cargo test --offline --lib -j 1` 逐条分组计数，合计 551；**F9 轮实测**，上一版 548 = F7 轮实测，再上一版 541 = F6 轮实测）：
+`lexer` 79 · `derive` **58**（**F9 轮 +1** = `generated_integer_literals_use_the_single_source_literal_shape`，把派生体的整数字面量钉在 parser 那一支形状上） · `fmt` **40**（**F6 轮 +1** = `the_tour_sources_are_the_9_5_fixpoint`，把 `examples/tour` 读回来逐字节比它自己的 §9.5 输出） · `cli` **46**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → F2 轮 39 → F4 轮 41 → **F5 轮 46** = `VALUE_OPTS` 的逐项跳值 + 取值点源码回扫 + 三条命令的目录参数本体 + 空目录/缺 module 的显式失败 + `expand --derive` 的显式拒绝） ·
 `macro_expand` 35 · `btrack` **31**（D1(1) 前是 0，D1(2) 轮 23 → 30，**F2 轮 +1** = wheel 归档里每个成员按自己的 local header 偏移取数据） ·
-`atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **27**（D3 轮 22 → 26，**F4 轮 +1** = 合法 `dyn` 形参在阶段 [8] 以条款号被拒） · `pkg` 24 · `sema` 22 ·
+`atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **27**（D3 轮 22 → 26，**F4 轮 +1** = 合法 `dyn` 形参在阶段 [8] 以条款号被拒） · `pkg` 24 · `sema` **23**（**F9 轮 +1** = `a_derived_body_reaches_stage_4_on_one_shared_span`，同时把 F49 那条 span 碰撞量成锁点） ·
 `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` **21**（**F4 轮 +1** = `docs/internals/runtime-abi.md` §1 写出的 vtable 偏移被读回来与布局器比） · `artifact` 18 ·
 `toml` 15 · `borrow` **22**（**F7 轮 15 → 22** = `E-0121` 的判据从「链内存活绑定」换到「全局可变路径」后的 3 条正例 + 7 条反例（含 A4 轮留下的 3 条边界）+ 1 条 span 锁点，见下文 F7 一节） · `sha256` 12 · `conformance` **19**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫，**F3 轮 +1** = `.gitignore` 的一次性产物名单形状（按"谁产生它"列的六条一条不能少）+ 反向红线（不得宽到吞掉 `*.bin`/`*.md`/`*.rs` 或整个目录）+ 每个 `scripts/*.ps1` 的审计日志必须落在 `logs/`，**F1 收尾 +1** = 语料 EOL 例外必须声明在全局规则之后） · `codes` 9 ·
-`parser` **9**（D3 轮 +1 = §3.6 的 `@c` 语句形态） · `base64` 7 · `stdlib` 4 · `diag` 2 = **548**。
+`parser` **10**（D3 轮 +1 = §3.6 的 `@c` 语句形态；**F9 轮 +1** = `every_integer_spelling_reaches_the_ast_as_the_single_literal_shape`，即 F2 轮欠的那条 `primary` 臂顺序锁） · `base64` 7 · `stdlib` 4 · `diag` 2 = **551**。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -1774,3 +1774,70 @@ universal newlines 把 `docs/status.md` 里**作为内容存在**的 3 个裸 `C
 行数看不出来，因为 autocrlf 把行尾归一化了）。修法 = **字节读写**（`rb`/`wb`）+ 每条规则校验"期望命中数"+ 写前
 断言 CR/LF 计数不变 + 写后断言旧锚点已消失，全部 staged 在任何写盘之前。第二次跑还暴露了 `re.sub` 的替换串会被
 当成转义模板（锚点里有 `%TEMP%\infy-run-…` 的反斜杠）⇒ 替换串用 lambda 承载。
+
+## F9 轮（2026-10-17）：整数字面量收成单一形状 —— 删 `ExprKind::Int` 变体连同它的 14 处判据（交付提交 `83e7dec`）
+
+**任务原文要的是"逐处证明可达或删"，本轮改成一次收口**，理由是在审计中量到了漂移已经发生：同一个整数构造有
+两支判据，而这两支**行为不同** —— `codegen::expr()` 的 `ExprKind::Int` 臂是 `want.or(prog.ty).unwrap_or(i32)`，
+而 `literal()` 的 `Lit::Int` 臂多一步 `Ty::IntLit → Prim::I32` 的归一（`codegen.rs` 的 `literal()`）。
+两支各自都能过自己的测试，正是"同一构造两套规则早晚漂"的形状。于是把形状收成一个：
+
+- **唯一产地改掉**：`derive::lit_u`（`derive.rs:233`，全仓 `grep -rn "ExprKind::Int(IntLit" src/*.rs` 当时只有它一处）
+  改产 `ExprKind::Lit(Lit::Int(IntLit{ digits, radix: Dec, suffix: None, value: Some(v) }))` —— payload 就是
+  同一个 `IntLit`，信息零损失；
+- **变体删除**：`ast::ExprKind::Int(IntLit)`，连带 `ast.rs` 的 `IntLit` import 退掉（`cargo check` 口径必须 0 告警）；
+- **14 处判据收拢**：`ast.rs`（连 `Attr::int_arg` 整条删 —— 见下）、`derive.rs` 的 `p_expr` 臂与 `#[align]` 校验里的
+  `AttrValue::Expr`+Int 分支、`parser::variant()`、`sema` 的 `const_eval` 与 `check_expr_inner`、`hir::literal_len`、
+  `fmt` 的 `expr_inner`/`expr_doc_no_source`/`fp_expr`、`codegen` 的 `expr()` 与 `expr_kind_name`。
+  收拢后 `grep -rn "ExprKind::Int" src/*.rs` = **0 行**。
+
+**两个被推翻的条目原文前提**（都属于"文档给的理由没人在用"，`docs/BACKLOG.md` 的 F9 条目已按实测改写）：
+① `Attr::int_arg` 除定义行外**全仓 0 调用点**；② `ordinal` 在规范与本仓源码里各 **0** 次命中 ⇒
+"`#[link(name = "…", ordinal = 3)]` 那类属性参数走 `Attr::int_arg`"这条假设的前提不存在，
+`parser::attr_value` 对整数字面量只会产 `AttrValue::Int`（`parser.rs` 的 `Kind::Lit(Lit::Int)` 臂），
+`AttrValue::Expr` 那一支永远装不下裸整数字面量。
+
+**F2 轮欠的那条锁补上了** = `parser::tests::every_integer_spelling_reaches_the_ast_as_the_single_literal_shape`：
+7 种拼写（`42` / `1_000` / `0u32` / `0x1F` / `0o17` / `0b1010` / 宽于 `u128` 的那条 ⇒ `value: None` 而 digits 保留）
+逐一对回 `digits`/`radix`/`suffix`/`value`，再加三个**读取位**：`enum E { A = 0x1F }` 的 `Variant::disc`、
+`fn g(a: [u32; 4])` 的数组长度、`#[align(16)]` 的 `AttrValue::Int`。另两条 =
+`derive::tests::generated_integer_literals_use_the_single_source_literal_shape`（读生成 AST 的那个字面量节点，
+而不是读它重印出来的文本）与 `sema::tests::a_derived_body_reaches_stage_4_on_one_shared_span`。
+
+**负对照实测（两条都红）**：M1 把 `lit_u` 改成产 `ExprKind::Ident` ⇒ 两条新 **AST** 锁红，而两条既有 **文本** 锁
+（`hasfield_table_has_names_and_type_tags`、`hasfield_offsets_only_under_repr_c`）**全绿** —— 生成码重印出来是
+`return 2;`，形状错了也打不出差别。这就是本轮把锁钉在 AST 而不是钉在 `infy expand` 输出上的理由。
+M2 把 `attr_value` 的整数字面量改投 `AttrValue::Idents` ⇒ 新 parser 锁与 `derive::tests::align_requires_power_of_two`
+同时红。两处变异均已复原并复跑全量。
+
+**顺手量出三条缺陷，只登记不修**（`docs/BACKLOG.md` §1 末尾）：**F49** `derive` 给每个生成节点盖宿主 item 的
+`span`（`agg.span = item.span`），而 `sema::ty_of` 的键是 `(file, start, end)` ⇒ 生成的 `return 2;` 与生成的 `"a"`
+共用一键、只可能有一个类型活下来（M1 现场实测 `prog.ty(整数字面量的 span)` 返回 `Some(Str)`）。读回方在阶段 [8]，
+今天被 **F35**（derive 的体调 std 表里没有的符号 ⇒ `E-0101` ⇒ §7.1 中止后续阶段）挡着，所以还没有真程序受害。
+**F50** `infy init <path>` 只取 basename，模块建在**当前目录**而它自己打印的 module path 指向不存在的位置
+（本轮在仓库根长出 `disc2/`、`disc3/`，由新脚本 `scripts/remove-dir-strays.ps1` 先干跑再 `-Apply` 清掉；
+`-Name src` 实测 `REFUSED` + exit 1，重复跑 `-Apply` 幂等 exit 0）。**F51** 宽于 `u128` 的显式判别式被 parser
+静默降级成"无显式判别式"（`enum Wide { A = 2^128, B, C }` 的 `infy check` 与 `infy build` 都 **0 诊断 / exit 0**），
+同语料的 `enum Fits { A = 2^64, B }` 也 exit 0 = **F10** 那条 `u128 as u64` 回绕的实测半边，已写进 F10 条目并把
+锚点从 `sema.rs:616` 校正到 **625**。`docs/spec-deviations.md` 的 D-24 第 3 点"超宽交给 §2.8 判范围"因此加注：
+那句在 F51 修掉之前**不是已实现**。
+
+**新基线（本机实测，`-j 1` 连跑两次同数）**：`cargo test --offline --lib` **551 passed / 0 failed**（= 548 + 3）、
+全目标 = 551 + bin 0 + doc-test 0、`cargo check --offline --lib` **0 error / 0 warning**、
+`cargo build --offline --release` exit 0、tour 的 `check|build|run|test` + `--verify-reproducible` 全 exit **0**、
+**C11 12512 / 产物 200644 / build-id `d7c4408e…370015` / 节点表 7-8-9-10-16-20 四组一字未动**（既没改 tour 字节
+也没改 `infy_rt.c` ⇒ 这两组本就不该动）、`infy conformance --report` **rc=1**（83 = 77/0/6 · 92.8% · 缺口 2217）、
+`infy fmt --check examples/tour` **rc=0**；**C 侧零改动**仍复跑四条链：`-c infy_rt.c` 与 `-c infy_ifbc.c` 各
+stderr **0 字节**、rt **32340 assertions / 0 failures**、两条 IFBC 链各 **180/180** 且 stdout `cmp` 无差异。
+
+**远端回查关闭 F8 遗留那一条**：run #13（`38991050867`，head `2852b00`，树含 F8 的 `9c56b45`）= **success**，
+步 3-12 逐条 success，日志实录 = 步 7 **548 passed / 0 failed**、步 10 **32340 assertions, 0 failures**、
+步 11 **180 asserts, 180 pass, 0 FAIL**、步 12 tour 产物 **221823**（宿主镜像 221021 + blob 738 + 段尾 64）。
+与本机 200644 的差仍是宿主 `cc` 的函数（runner gcc 15.2.0 vs 本机 16.2.0）⇒ 本机常数不写成远端断言。
+同一条 run 的步 7 里有一句 `warning: infy (lib test) generated 1 warning` = `btrack.rs:4739` 的 `fn dump_of`
+从没被调用过（`cargo check --lib` 的口径不含 `cfg(test)`，所以 F2 那次清零没覆盖它）⇒ **早于本轮**，
+登记成卫生欠账（`docs/BACKLOG.md` §2 指针末尾），本轮没顺手改。
+
+**措辞红线加一条**：不许说"派生代码的类型标注可信"。F49 的一键两类型今天真实存在，只是读回方在阶段 [8]、
+被 F35 挡在门外。
+

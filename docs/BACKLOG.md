@@ -1042,19 +1042,40 @@
       ⇒ 解卷期间再 panic 直接 R-0011 + `exit(3)`，进程本来就要终止，残留无意义；harness 在 `test_rt.c:357`
       显式复位并写明这个理由，已是要的形状。**真正的同类风险另有其条 ⇒ 新登记 F48**。
 
-- [ ] F9 **`ExprKind::Int(IntLit)` 这一形状从不由 parser 产生**（C1 轮定位；**死臂本身已由 F2 轮删除**）：
-      `parser::primary()` 原先在 `Kind::Lit(l)`（匹配所有字面量）之后还挂着一条 `Kind::Lit(Lit::Int(i))` 臂，永不可达
-      ⇒ 整数永远以 `ExprKind::Lit(Lit::Int(..))` 进 AST。F2 轮删掉了那条死臂并在原地留一行注释
-      （`ExprKind::Int` 的唯一产地是 `derive`：`derive.rs:235`/`1595` 现造整数节点），同族的
-      `parser.rs:1675/2179/2256` 三处重复臂一并清掉。**仍未做**：凡**只**匹配 `ExprKind::Int` 的判据现在只靠
-      `derive` 才可达，而 `derive` 不产的场景（例如 `#[link(name = "…", ordinal = 3)]` 那类属性参数走的是
-      `Attr::int_arg`）是否可达仍需逐条审 —— `ast::Attr::int_arg()`、`cli.rs` 与 `sema.rs` 里的 `ExprKind::Int`
-      判据在名单内。验收：`grep -n "ExprKind::Int" src/*.rs` 的每一处都有测试证明它可达（或已删除），
-      且 `primary` 的臂顺序有回归测试（F2 轮**没有**新增"整数字面量 = `ExprKind::Lit`"这条锁，仍欠）。
+- [x] F9 **`ExprKind::Int(IntLit)` 这一形状从不由 parser 产生**（C1 轮定位；死臂由 F2 轮删；
+      **F9 轮（2026-10-17）把形状本身收掉，交付提交 `83e7dec`**）：
+      `parser::primary()` 的首个 `Kind::Lit(l)` 臂吃掉所有字面量 ⇒ 整数永远以 `ExprKind::Lit(Lit::Int(..))`
+      进 AST，而 `ExprKind::Int` 只有 `derive` 的 `lit_u`（`derive.rs:233`）会造。**审计结论 = 逐处删或收，
+      不再逐处证**：两个形状表示同一构造，判据就会漂 —— 实测 `codegen` 的两支已经漂了（`literal()` 的
+      `Lit::Int` 有 `Ty::IntLit → i32` 归一，而 `expr()` 的 Int 臂没有）。改法 = `lit_u` 改产
+      `ExprKind::Lit(Lit::Int(IntLit{..}))`，删 `ExprKind::Int` 变体，14 处判据全部收拢：
+      `ast.rs`（连 `Attr::int_arg` 一起删 —— `grep -rn "int_arg" src/*.rs` 实测**除定义外 0 调用点**，
+      而 `ordinal` 在 spec 与 src 各 **0** 次命中 ⇒ 本条目原文"属性参数走 `Attr::int_arg`"是**编的前提**）、
+      `derive.rs`（`p_expr` 的 Int 臂 + `#[align]` 的 `AttrValue::Expr`+Int 分支：`attr_value` 对整数字面量
+      只会产 `AttrValue::Int`）、`parser.rs:variant()`、`sema.rs` 的 `const_eval` 与 `check_expr_inner`、
+      `hir.rs:literal_len`、`fmt.rs` 三处、`codegen.rs` 两处。**验收两条都补齐**：`grep -n "ExprKind::Int" src/*.rs`
+      现为 **0** 行；F2 轮欠的那条锁 = `parser::tests::every_integer_spelling_reaches_the_ast_as_the_single_literal_shape`
+      （7 种拼写的 digits/radix/suffix/value + 判别式、数组长度、属性参数三个读取位）。
+      **负对照实测**：`lit_u` 改产 `ExprKind::Ident` ⇒ 两条新 AST 锁红、两条既有**文本**锁
+      （`hasfield_table_has_names_and_type_tags`、`hasfield_offsets_only_under_repr_c`）**仍绿** ⇒ 重印分不出形状，
+      这正是本轮要把锁钉在 AST 上的理由；`attr_value` 的整数字面量改投 `AttrValue::Idents` ⇒ 新 parser 锁与
+      `derive::tests::align_requires_power_of_two` 同时红。
+      实测：`cargo test --offline --lib -j 1` **551 passed / 0 failed**（基线 548，+3 = `derive` 57→58 ·
+      `parser` 9→10 · `sema` 22→23）、`cargo check --offline --lib` **0 error / 0 warning**、tour 的
+      `check|build|run|test` + `--verify-reproducible` 全 exit 0、C11 **12512** / 产物 **200644** /
+      build-id **`d7c4408e…370015`** / 节点表 **7-8-9-10-16-20** 四组未移位、`conformance --report` 仍
+      **83 = 77/0/6 ⇒ exit 1**、`fmt --check examples/tour` exit 0、C 侧零改动复跑四条链（两份 `-c` 各
+      stderr **0 字节**、rt **32340/0**、两条 IFBC 各 **180/180** + `cmp` 无差异）。
+      **本轮量出三条未修缺陷，只登记**：**F49**（派生节点共用宿主 span ⇒ `ty_of` 键碰撞）、**F50**
+      （`infy init <path>` 忽略目录部分）、**F51**（宽于 `u128` 的显式判别式被静默降级）。
 
 - [ ] F10 **`sema` 收集枚举判别式时 `u128 as u64` 截断**（C1 轮定位，未改）：
-      `Variant.disc` 是 `Option<u128>`，`sema.rs:616` 直接 `as u64`，所以宽于 `u64` 的字面量**先回绕**才交给 HIR，
+      `Variant.disc` 是 `Option<u128>`，`sema.rs:625` 直接 `as u64`（F9 轮把锚点从条目原文的 `616`
+      校正到现值 —— 那一带被 F9 删了两条臂），所以宽于 `u64` 的字面量**先回绕**才交给 HIR，
       D-25 的 `u32` 容纳检查拦不住已回绕的值。
+      **F9 轮实测（不是推理）**：`enum Fits { A = 18446744073709551616, B }`（`2^64`，装得进 `u128`）
+      在 `target/scratch/f9/disc5` 上 `infy check` 与 `infy build` 都 **0 诊断 / exit 0** ⇒ 回绕确实发生
+      且无人报告；同文件的 `A = 2^128` 是另一条根因（parser 就丢了，见 **F51**）。
       验收：宽于 `u64` 的判别式报 `E-0042`（而不是回绕）；成对断言 `A = 4294967296` → `E-0042`（HIR，C1 已有）
       与 `A = 2^64` → `E-0042`（sema，待补）。
 
@@ -1425,8 +1446,90 @@
       `PTHREAD_MUTEX_RECURSIVE` 在 Windows 这条路不存在，别照抄。成对断言 = 第 2 层嵌套调用返回成功、
       第 9 层报 `R-0902`，两条都要在**真嵌套**的 host 回调里跑，不许再用 setter 伪造深度。
 
+- [ ] F49 **`derive` 给每个生成节点盖宿主 item 的 span ⇒ `Program::ty_of` 的键碰撞 ⇒ 阶段 [8] 读回的 `prog.ty(e.span)` 对派生代码不可信**（F9 轮实测）：
+      `derive` 的每个构造助手都收同一个 `span`（`check_and_generate`/`gen_*` 里 `let span = agg.span`，
+      而 `Agg::from_item` 存的是 `item.span`，`derive.rs:691`），于是生成的 `return 2;` 与生成的 `"a"`
+      **共用一个 `(file, start, end)`**；`sema` 的 `ty_of` 正是按这个三元组存（`sema.rs:309`），
+      `codegen` 的字面量取型又回头读它（`codegen.rs` 的 `literal()`：`self.prog.ty(e.span)`）⇒
+      两条不同字面量只有一个能占住那个键，谁后访问谁赢。
+      **实测证据（不是推理）**：F9 轮把 `lit_u` 改成产 `ExprKind::Ident` 做负对照时，
+      `prog.ty(派生整数字面量的 span)` 返回的是 `Some(Str)` —— 那个键被同 span 的**字符串**表项占了。
+      现有锁点 `sema::tests::a_derived_body_reaches_stage_4_on_one_shared_span` 钉住了"两节点一键"这一事实。
+      后果面：F35（derive 的体调不存在的 std 符号）解决之后，派生体的**取型**会先撞上这一条；
+      阶段 [4] 今天确实在派生体上跑（`E-0101` 就是从那儿来的），但读回方 `codegen::literal()` 在阶段 [8]，
+      而 F35 让任何带 derive 的 module 在 [4] 就有阻断项、§7.1 因此中止后续阶段 ⇒ 还没有真程序受害，
+      保持登记不修（F35 解决之后这条立刻变成活缺陷，顺序上排在它前面）。
+      验收：生成节点带**可区分**的 span（方案要么合成源区间 + 显式"生成"标记，要么给派生体单独一张
+      类型表），成对断言 = 同一 `#[derive(HasField)]` 里 `field_count` 的整型字面量与 `field_name` 的
+      字符串字面量各自能从 `ty_of` 读回**自己**的类型。
+
+- [ ] F50 **`infy init <path>` 只取 basename，模块建在**当前目录**而它报的 module path 指向一个不存在的位置**（F9 轮实测）：
+      `./target/release/infy.exe init target/scratch/f9/disc3` 打出 `created disc3 (module path target/scratch/f9/disc3)`，
+      而 `find target/scratch/f9/disc3` 报 `No such file or directory`，实际落在**仓库根**的 `disc3/`
+      （`disc3/MODULE.infy.toml` + `disc3/cmd/disc3/main.infy`）；清单里 `path = "target/scratch/f9/disc3"`
+      记的是调用者给的字符串，与磁盘位置不符。
+      后果 = 在共享工作树里跑一次 init 就往仓库根长一个未跟踪目录（本轮由
+      `scripts/remove-dir-strays.ps1` 先干跑再 `-Apply` 清掉，`logs/remove-dir-strays.log` 有文件清单）。
+      验收：`infy init <path>` 的创建位置必须与它自己打印的 module path 一致；
+      成对断言 = 在临时父目录下 init 一个子目录 ⇒ 仓库根零新增、`<父>/<子>/MODULE.infy.toml` 存在，
+      且清单里的 `path` 与真实位置逐字相同。§13.4 未给 `init` 的路径语义 ⇒ 裁定写进 `docs/spec-deviations.md`。
+
+- [ ] F51 **宽于 `u128` 的显式枚举判别式被 parser 静默降级成"无显式判别式"，`check` 与 `build` 全程 0 诊断**（F9 轮实测）：
+      `parser::variant()` 只把 `i.value: Option<u128>` 存进 `Variant::disc`（字面量本体被丢），
+      而 `value: None` 正是词法器"放不下 `u128`"的表示（`token.rs:160`）⇒ `A = 2^128` 与"没写 `= …`"
+      在 AST 里**同一个形状**。代码注释说"`value: None` 交给 sema 判范围"，但表达式已经从结构体里丢了，
+      sema 拿不到任何字面量 ⇒ 那条移交落空。
+      **实测**：`target/scratch/f9/disc5` 的 `enum Wide { A = 340282366920938463463374607431768211456, B, C }`
+      ⇒ `infy check` **0 error / exit 0**，`infy build` 也 **exit 0**（阶段 [7] 只见 `disc = None`，
+      于是 `A = 0, B = 1, C = 2` 静默成立）。同文件里 `enum Fits { A = 2^64, B }` 也 **exit 0** —— 那条是
+      **F10** 的 `u128 as u64` 回绕（`2^64 as u64 == 0`），两条同族但根因不同层。
+      验收：`A = 2^128` 报 `E-0042`（§2.8 的字面量范围），成对断言 = `A = 2^64` 也报 `E-0042` 而不是回绕成 0
+      （后半正是 F10 的验收，动手时两条一起做、按层分配提交）。
+
+
 ## 2. 当前指针
 
+> **F9 轮收尾（2026-10-17）：F9 勾 `[x]`，本段取代下一段** —— 交付提交 **`83e7dec`**（`src/ast.rs` 删变体 +
+> `derive.rs` 的 `lit_u` 换形状 + `parser`/`sema`/`hir`/`fmt`/`codegen` 五处的判据收拢 + 三条新锁 +
+> `scripts/remove-dir-strays.ps1`）。
+> **裁定的形状**：没有逐处"证明可达或删"，而是**把第二个形状整个删掉** —— 两个形状表示同一构造时判据必然漂，
+> 而本轮实测就是漂过：`codegen::expr()` 的 Int 臂缺 `Ty::IntLit → i32` 归一，`literal()` 的 `Lit::Int` 臂有。
+> `derive::lit_u` 从此产 `ExprKind::Lit(Lit::Int(IntLit{..}))`（payload 就是同一个 `IntLit`，信息零损失）
+> ⇒ `grep -rn "ExprKind::Int" src/*.rs` = **0 行**，F2 轮欠的那条 `primary` 臂顺序锁一并补齐。
+> **审计推翻的条目原文前提**：`Attr::int_arg` **除定义行外 0 调用点**（已删），`ordinal` 在 spec 与 src 各
+> **0** 次命中 ⇒ "`#[link(name = "…", ordinal = 3)]` 走 `Attr::int_arg`"那句是编的前提，别再去接它。
+> **三条新缺陷只登记不修**：**F49** 派生节点共用宿主 item 的 span ⇒ `sema::ty_of` 一键两类型（负对照里实测
+> `prog.ty(整数字面量的 span)` 返回 `Some(Str)`）；**F50** `infy init <path>` 只取 basename 就往 CWD 建模块
+> （本轮在仓库根长出 `disc2/`、`disc3/`，新脚本先干跑后 `-Apply` 清掉、`-Name src` 实测拒绝且 exit 1）；
+> **F51** 宽于 `u128` 的显式判别式被 parser 静默降级成"无显式判别式"，`check`/`build` 全 **0 诊断 / exit 0**。
+> F10 条目补了同语料的实测半边（`A = 2^64` 也 exit 0 ⇒ 回绕确证）并把锚点从 `sema.rs:616` 校正到 **625**。
+> **新基线（本机实测，`-j 1` 连跑两次同数）**：`cargo test --offline --lib` **551 passed / 0 failed**
+> （548 + 3：`derive` 57→**58**、`parser` 9→**10**、`sema` 22→**23**）、全目标 = 551 + bin 0 + doc 0、
+> `cargo check --offline --lib` **0 error / 0 warning**、tour 的 `check|build|run|test` +
+> `--verify-reproducible` 全 exit **0**、**C11 12512 / 产物 200644 / build-id `d7c4408e…370015` /
+> 节点表 7-8-9-10-16-20 四组一字未动**（既没碰 tour 字节也没碰 `infy_rt.c` ⇒ 这两组口径本来就不该动，
+> 动了就是改错了地方）、`infy conformance --report` 仍 **83 = 77/0/6 ⇒ exit 1**（92.8%）、
+> `infy fmt --check examples/tour` exit **0**；**C 侧零改动**仍复跑四条链（两份 `-c` 各 stderr **0 字节**、
+> rt **32340/0**、两条 IFBC 各 **180/180** + `cmp` 无差异）。
+> **远端回查（F8 遗留那条已关闭）**：**run #13** = run `38991050867`，head `2852b00`，树含 F8 的 `9c56b45`
+> ⇒ **success**，步 **3-12 逐条 success**；日志实录：步 7 = **548 passed / 0 failed**、步 10 =
+> **32340 assertions, 0 failures**、步 11 = **180 asserts, 180 pass, 0 FAIL**、步 12 tour 产物 **221823**
+> （宿主镜像 221021 + blob 738 + 段尾 64）。它与本机 **200644** 的差仍是宿主 `cc` 的函数（runner gcc 15.2.0
+> vs 本机 16.2.0）⇒ **别把本机常数写成远端断言**。步 8 那句 `generated 1 warning` 出自 **`cargo test`** 那一档
+> 而不是 `cargo check --lib`：`btrack.rs:4739` 的 `fn dump_of` 从没被调用过，**run #13 里就在** ⇒ 早于本轮，
+> 属 F2 口径之外的卫生欠账（见下面那条），本轮没动它。
+> **推送/CI 现状**：本轮**开头**补推成功（脚本 exit 0，远端 = `2852b00`，现算欠账 **0** ⇒ cron-31 欠的
+> 4 笔全清）；收尾把 `83e7dec` + 本笔做账**一起推一次**，成功与否只认 `gh api …/git/refs/heads/toolchain`
+> 现算，覆盖本轮交付树的那条 run 留给下一轮回查（步 7 现在应打 **551 passed**）。
+> **下一轮 = §1 第一个 `[ ]` = F10**（`sema.rs:625` 的 `u128 as u64` 判别式回绕 ⇒ 报 `E-0042` 而不是回绕；
+> **F51 是它同族的 parser 那一半**，F10 条目已写明两条一起做、按层分配提交）；F11（`sema.rs:448` 的
+> `unwrap_or(0)` 把非字面量数组长度静默当 0 ⇒ 显式 `E-0131`）排其后。**卫生欠账**（顺手收，别单开一轮）：
+> ① `btrack.rs:4739` 的 `dump_of` 死测试助手（test target 唯一告警，远端 run #13 已有实录）；
+> ② `codegen::emit_driver` 在 `chains.is_empty()` 时先 `return 1` 的入口顺序（D3 与 F1 两处指针都提过）。
+> **措辞红线不变**：覆盖 83/2300 ⇒ 任何文档不得出现「INFY v2.0 兼容」的肯定式声称；「两侧装载期校验等价」
+> 仍不许讲（F26 前半 / D-42 (a)–(e)）；不许说"`R-0902` 的嵌套上限已端到端验证"（F48）；**F9 再加一条**：
+> 不许说"派生代码的类型标注可信" —— F49 的一键两类型今天真实存在，只是被 F35 挡在阶段 [8] 之外。
+> **（以下为 F9 轮之前各轮的指针，已被上面一段取代，保留作历史）**
 > **F8 轮收尾（2026-10-17）：F8 勾 `[x]`，本段取代下一段** —— 交付提交 **`9c56b45`**（`runtime/infy_rt.c` 的回滚 +
 > `runtime/infy_rt_internal.h` 的 `InfyTry` 两个快照字段 + `runtime/test_rt.c` 的成对断言 + 两份脚本）。
 > **实现形状**：`InfyTry` 在**安装期**快照 `host_depth` 与 `host_lock_depth`（新增的第二根计数器 = "`g_host_mu`

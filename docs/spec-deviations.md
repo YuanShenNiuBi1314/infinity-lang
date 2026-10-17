@@ -287,6 +287,11 @@ C1 轮落 `src/hir.rs` 时撞上三条"规范没写、但 `.infib` 一定能观�
 3. **判别式的语法**。`Variant.disc` 是 `Option<u128>`，即只能装整数字面量；规范 §3 的 EBNF 没有 `enum_decl` 的产生式体，
    没写 `A = expr` 是否允许常量路径或负数。**选择**：只接受非负整数字面量，其它形态报 `E-0053`（解析器的语法码），
    字面量宽于 `u128` 时留给 §2.8 的范围检查（`E-0042`/`E-0043`），不重复报同一个记号。
+   **F9 轮实测更正（2026-10-17）**：第 3 点的"留给 §2.8"今天**落空** —— `variant()` 只把 `i.value` 存进
+   `disc`、字面量表达式本体被丢掉，所以宽于 `u128` 的 `A = 2^128` 与"没写 `= …`"是同一个 AST 形状，
+   `infy check` 与 `infy build` 实测 **0 诊断 / exit 0**。已登记 BACKLOG **F51**（与 **F10** 的 `u128 as u64`
+   回绕同族、不同层）；本条**选择**保持不变（不接受常量路径与负数），但"超宽必须报 `E-0042`"这一半在
+   F51 修掉之前不许声称已实现。
 
 **顺带修掉的真实缺陷**（就是这条语法选择暴露的）：`src/parser.rs::variant()` 原来的判据是
 `if let ExprKind::Int(i) = &e.kind`，而 `primary()` 的第一个臂 `Kind::Lit(l)` 已把所有字面量构造为
@@ -298,6 +303,9 @@ C1 轮落 `src/hir.rs` 时撞上三条"规范没写、但 `.infib` 一定能观�
 （AST 侧 `[Some(3), None, Some(10)]`）与 `hir::tests::fieldless_enums_are_exactly_their_tag_and_discriminants_survive`
 （HIR 侧 `(3, 4, 10)`：`B` 由前一个显式值续号）。
 `primary()` 的死臂本身**未改**（改它会让 `ExprKind::Int` 突然在全树产生，风险跨模块），登记为 BACKLOG **F10**。
+**F9 轮（2026-10-17）更正**：那一档"两个形状并存"已经不存在 —— 交付提交 `83e7dec` 删掉的是 `ExprKind::Int`
+**变体本身**（唯一产地 `derive::lit_u` 改产 `ExprKind::Lit(Lit::Int(..))`），`variant()` 的双形状匹配因此收成一支。
+上面那句"同时接受两种形态"保留为**当时的修法**，读法是"只接受 `ExprKind::Lit(Lit::Int(..))`"。
 
 ## D-25 `enum` 的标签恒为 `uint32_t`，不按 §4.1"判别式最小容纳"逐类型收窄
 §4.1 的表示表（spec:538）给 `enum` 写的存储是"**判别式最小容纳** + payload（niches 由编译器选取，但**不得**被源码依赖，
