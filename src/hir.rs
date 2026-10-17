@@ -1191,11 +1191,12 @@ pub fn hir_ty_from_ast(t: &Type) -> Option<Ty> {
     })
 }
 
-/// §2.12: only a plain integer literal is const-evaluable at this stage (a computed length is
-/// `sema`'s job and would have been an error there).
+/// §2.12: only a plain integer literal is const-evaluable at this stage. A computed length is `sema`'s
+/// job, and stage [4] now reports it (`E-0131`, BACKLOG F11) instead of guessing a size — so nothing
+/// reaching here is unevaluated. A literal too wide for a length is `None`, never its low half.
 fn literal_len(e: &crate::ast::Expr) -> Option<u64> {
     match &e.kind {
-        crate::ast::ExprKind::Lit(crate::token::Lit::Int(i)) => i.value.map(|v| v as u64),
+        crate::ast::ExprKind::Lit(crate::token::Lit::Int(i)) => i.value.and_then(|v| u64::try_from(v).ok()),
         _ => None,
     }
 }
@@ -1503,6 +1504,25 @@ pub enum Wide { Lo = 1, Hi = 4294967296 }
             assert!(format!("{e:?}").starts_with(want), "{:?} -> {:?}", ty, e);
             assert_eq!(e.spec_code(), None, "an implementation-stage invariant is not a spec code");
         }
+    }
+
+    /// §2.12 at stage [7]: `literal_len` reads a written literal, and a literal too wide for a length
+    /// gives up instead of handing the layout engine its low half (`2^64` is not `0`). Stage [4]
+    /// refuses such a length now (F11), so this is the second reader rather than the first line of
+    /// defence — which is exactly why the fold had to go.
+    #[test]
+    fn an_over_wide_array_length_has_no_layout_at_stage_7() {
+        let mut sources = Sources::default();
+        let mut h = Handler::default();
+        let f = sources.add(
+            "m/mod.infy".to_string(),
+            "package m\n\nfn f(a: [u32; 18446744073709551616], b: [u32; 4]) { }\n".to_string(),
+        );
+        let lexed = lexer::lex_file(&sources, f, &mut h);
+        let pf = parser::parse(&sources, f, &lexed, &mut h);
+        let crate::ast::ItemKind::Fn { sig, .. } = &pf.items[0].kind else { panic!("the file is one fn") };
+        assert!(hir_ty_from_ast(&sig.params[0].ty).is_none(), "a length wider than u64 must not become 0");
+        assert_eq!(hir_ty_from_ast(&sig.params[1].ty).map(|t| t.text().to_string()), Some("[u32; 4]".to_string()));
     }
 
     // ------------------------------------------------------------ §8.4 / §5 chains

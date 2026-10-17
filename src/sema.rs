@@ -347,6 +347,11 @@ pub struct Checker<'a> {
     /// The unit whose `extern` block is being registered right now (§7.6.1: the `#[link]` attribute
     /// is on the block, so its declarations inherit it).
     cur_link_unit: Option<String>,
+    /// Spans whose failure to resolve a type has already been said out loud (§4.5 array lengths).
+    /// A struct's field types are resolved twice (registration + `check_item`), so without this the
+    /// same root cause prints twice — the dual resolution that also prints `E-0062` twice today
+    /// (BACKLOG F52).
+    unresolved_ty_spans: HashSet<(FileId, u32, u32)>,
 }
 
 impl<'a> Checker<'a> {
@@ -357,6 +362,7 @@ impl<'a> Checker<'a> {
             chain_nodes: Vec::new(), cur_node: 0, cur_chain: None, closure_counter: 0, manifest_module: module.to_string(), in_unsafe: false,
             a_track_declared: false, b_track_versions: Vec::new(), link_unit_names: Vec::new(),
             cur_link_unit: None,
+            unresolved_ty_spans: HashSet::new(),
         }
     }
 
@@ -445,8 +451,26 @@ impl<'a> Checker<'a> {
             TypeKind::Ref { inner, mutable, lifetime } => Ty::Ref { inner: Box::new(self.ty_from_ast(inner, generics)), mutable: *mutable, lifetime: lifetime.clone() },
             TypeKind::Ptr { inner, mutable } => Ty::Ptr { inner: Box::new(self.ty_from_ast(inner, generics)), mutable: *mutable },
             TypeKind::Array { inner, len } => {
-                let n = self.const_eval_usize(len).unwrap_or(0);
-                Ty::Array { inner: Box::new(self.ty_from_ast(inner, generics)), n }
+                let elem = self.ty_from_ast(inner, generics);
+                // §4.5 makes N a compile-time constant and §2.12 is the only set that can produce one.
+                // A length that is not in that set is an *unresolved* length: `0` would be a plausible
+                // value for the layout engine to eat, so it is reported here and carried as `Invalid`.
+                let before = self.h.diags.len();
+                match self.const_eval_usize(len) {
+                    Some(n) => Ty::Array { inner: Box::new(elem), n },
+                    None => {
+                        // `const_eval` already names the construct when §2.12 forbids it, and a field
+                        // type is resolved twice — so report this shape once (BACKLOG F52).
+                        let key = (len.span.file, len.span.start, len.span.end);
+                        if self.h.diags.len() == before && self.unresolved_ty_spans.insert(key) {
+                            self.emit("E-0131", len.span, "数组长度无法编译期求值", "此处的长度不是 §2.12 封闭集合可求值的常量", Some("§4.5：`[T; N]` 的 N 必须编译期常量（字面量 / `const` 读取 / 算术 / `as` / `std.math` 的 const fn）".into()), Some("写成字面量，或引用一个已声明且可 const-eval 的 `const`".into()));
+                        }
+                        // The enclosing type is `Invalid` now and it is *explained*, in this pass and
+                        // in whichever pass reads the same field again.
+                        self.unresolved_ty_spans.insert((t.span.file, t.span.start, t.span.end));
+                        Ty::Invalid
+                    }
+                }
             }
             TypeKind::Slice { inner } => Ty::Slice { inner: Box::new(self.ty_from_ast(inner, generics)) },
             TypeKind::Tuple(v) if v.is_empty() => Ty::Unit,
@@ -458,10 +482,11 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// §2.12 const-eval: only the closed set of constructs is evaluated here.
+    /// §2.12 const-eval: only the closed set of constructs is evaluated here. The result is a length,
+    /// so a value too wide for one is `None` — never the low half of it (BACKLOG F10's truncation shape).
     pub fn const_eval_usize(&mut self, e: &Expr) -> Option<u64> {
         self.const_eval(e).and_then(|v| match v {
-            ConstValue::UInt(u) => Some(u as u64),
+            ConstValue::UInt(u) => u64::try_from(u).ok(),
             ConstValue::Int(i) => u64::try_from(i).ok(),
             _ => None,
         })
@@ -921,7 +946,10 @@ impl<'a> Checker<'a> {
                 let mut seen: HashSet<String> = HashSet::new();
                 for f in fields {
                     let t = self.ty_from_ast(&f.ty, &generics);
-                    if t == Ty::Invalid {
+                    // Resolution reports its own reason where it can (an unevaluable array length);
+                    // "already explained" is a span, not a delta on the count, because a field type is
+                    // resolved in two passes (BACKLOG F52).
+                    if t == Ty::Invalid && !self.unresolved_ty_spans.contains(&(f.ty.span.file, f.ty.span.start, f.ty.span.end)) {
                         self.emit("E-0131", f.span, "类型无法解析", &f.name, Some(format!("字段 `{}` 的类型 `{name}` 未知", f.name)), None);
                     }
                     if !seen.insert(f.name.clone()) {
@@ -1067,7 +1095,10 @@ impl<'a> Checker<'a> {
                     }
                     None => declared.clone().unwrap_or(Ty::Invalid),
                 };
-                if matches!(actual, Ty::Invalid) && init.is_none() {
+                if ty.is_none() && init.is_none() {
+                    // Every annotation that fails to resolve reports where it failed (a broken type is
+                    // the parser's, an unevaluable array length is `ty_from_ast`'s), so this fallback is
+                    // only for the shape its own note names — one root cause, one diagnostic (F36).
                     self.emit("E-0131", s.span, "绑定类型无法确定", name, Some("既无类型标注也无初始化表达式（§4.1）".into()), None);
                 }
                 // §4.13 rule 7: an unconstrained integer literal defaults to `i32`.
@@ -1658,11 +1689,16 @@ impl<'a> Checker<'a> {
             }
             ExprKind::ArrayRepeat { value, len } => {
                 let t = self.check_expr(value);
-                let n = self.const_eval_usize(len);
-                if n.is_none() {
-                    self.emit("E-0060", len.span, "重复数组长度必须是编译期常量", "此处", Some("§3.11：`[x; N]` 的 N 必须 const-eval（§2.12 封闭集合）".into()), None);
+                let before = self.h.diags.len();
+                match self.const_eval_usize(len) {
+                    Some(n) => Ty::Array { inner: Box::new(t), n },
+                    None => {
+                        if self.h.diags.len() == before {
+                            self.emit("E-0060", len.span, "重复数组长度必须是编译期常量", "此处", Some("§3.11：`[x; N]` 的 N 必须 const-eval（§2.12 封闭集合）".into()), None);
+                        }
+                        Ty::Invalid
+                    }
                 }
-                Ty::Array { inner: Box::new(t), n: n.unwrap_or(0) }
             }
             ExprKind::StructLit { path, fields, rest } => {
                 let tn = path.last().cloned().unwrap_or_default();
@@ -2698,6 +2734,77 @@ mod tests {
         // `u64::MAX` is collectible at stage [4] but used to overflow the `disc + 1` continuation in
         // debug builds; stage [7] is the one that rejects it as a `uint32_t` tag.
         clean("enum Max { A = 18446744073709551615, B }");
+    }
+
+    // ------------------------------------------------------------- §4.5 / §2.12 array lengths
+
+    /// Stage [4] over a one-file module, keeping the `Program`: the array-length pairs below need the
+    /// *resolved* field type, which `diags` throws away.
+    fn program(src: &str) -> Program {
+        let mut sources = Sources::default();
+        let f = sources.add("p/mod.infy".to_string(), format!("package p\n\n{src}\n"));
+        let mut h = Handler::default();
+        let lexed = lexer::lex_file(&sources, f, &mut h);
+        let pf = parser::parse(&sources, f, &lexed, &mut h);
+        let owned: Vec<(FileId, String, ParsedFile)> = vec![(f, "t/p".to_string(), pf)];
+        check_files(&sources, &mut h, "t/p", &owned, false, vec![], vec![])
+    }
+
+    /// The first field's resolved type, as stage [4] left it.
+    fn field_ty(src: &str) -> String {
+        program(src).structs[0].fields[0].1.text().to_string()
+    }
+
+    /// §4.5 + §2.12: `N` in `[T; N]` is a compile-time constant, so a `const` read must produce the
+    /// real element count. This was BACKLOG F11's silent half: `unwrap_or(0)` made `[u32; N]` a
+    /// zero-length array and the layout engine sized the record from it.
+    #[test]
+    fn a_const_read_is_the_array_length() {
+        clean("const N: u32 = 4;\nstruct S { pub a: [u32; N] }");
+        assert_eq!(field_ty("const N: u32 = 4;\nstruct S { pub a: [u32; N] }"), "[u32; 4]");
+        assert_eq!(field_ty("struct S { pub a: [u32; 2 + 3] }"), "[u32; 5]");
+        assert_eq!(field_ty("struct S { pub a: [u32; 0] }"), "[u32; 0]", "a written `0` is a real length");
+        // The remaining half of this shape is order: the `const` table is filled in item order, so a
+        // length that reads a `const` declared later is refused now instead of sizing the record at
+        // zero elements (BACKLOG F52).
+        assert_eq!(errors("struct S { pub a: [u32; N] }\nconst N: u32 = 4;"), vec!["E-0131".to_string()]);
+    }
+
+    /// §4.5: a length that is not in §2.12's closed set must be said out loud, once, and must not
+    /// leave an `[T; 0]` behind for stage [7].
+    #[test]
+    fn an_unevaluable_array_length_is_e0131() {
+        assert_eq!(errors("struct S { pub a: [u32; NOPE] }"), vec!["E-0131".to_string()], "a struct's field type is resolved twice, so one report is the assertion");
+        assert_eq!(field_ty("struct S { pub a: [u32; NOPE] }"), "<invalid>");
+        assert_eq!(errors("fn f() { let a: [u32; NOPE]; }"), vec!["E-0131".to_string()]);
+        assert_eq!(diags("fn f() { let a: [u32; NOPE]; }")[0].1, "数组长度无法编译期求值", "the binding fallback names neither annotation nor initializer — that is not this shape");
+    }
+
+    /// The F10 family in the length slot: a value wider than a length was folded to its low half
+    /// (`2^64` became `0`) and a literal wider than `u128` became "no value" — both silently.
+    #[test]
+    fn an_over_wide_array_length_does_not_wrap() {
+        assert_eq!(errors("struct S { pub a: [u32; 18446744073709551616] }"), vec!["E-0131".to_string()], "u64::MAX+1 used to wrap to 0");
+        assert_eq!(field_ty("struct S { pub a: [u32; 18446744073709551616] }"), "<invalid>");
+        assert_eq!(errors("struct S { pub a: [u32; 340282366920938463463374607431768211457] }"), vec!["E-0131".to_string()], "wider than u128 has no value to wrap");
+        assert_eq!(errors("struct S { pub a: [u32; -1] }"), vec!["E-0131".to_string()]);
+    }
+
+    /// §3.11: the repeat expression keeps its own code (`E-0060`), but a length whose evaluation
+    /// already failed loudly must not be reported a second time — and must not keep an `[T; 0]`.
+    #[test]
+    fn a_repeat_expression_length_reports_once() {
+        assert_eq!(errors("fn f() { let v = [0u32; NOPE]; }"), vec!["E-0060".to_string()]);
+        assert_eq!(errors("fn f() { let v = [0u32; 1 / 0]; }"), vec!["E-0062".to_string()], "the division by zero is the reason, so `E-0060` is noise");
+        clean("fn f() { let v = [0u32; 4]; }");
+    }
+
+    /// §4.1: the "neither annotation nor initializer" report is still there for the shape its own
+    /// note names, and is no longer added under an annotation that already reported.
+    #[test]
+    fn an_untyped_binding_without_initializer_is_still_e0131() {
+        assert_eq!(errors("fn f() { let x; }"), vec!["E-0131".to_string()]);
+        assert_eq!(diags("fn f() { let x; }")[0].1, "绑定类型无法确定");
     }
 
     // ------------------------------------------------------------- §4.2 no implicit conversion
