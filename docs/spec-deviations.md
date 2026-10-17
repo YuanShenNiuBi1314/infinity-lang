@@ -1344,5 +1344,69 @@ D-51(b)(c) 只规定"目录→哪些文件"和"空集怎么报"，**没有**规�
 `sema` 与 `cli` 两条同时红（`left: ["E-0042"] right: ["E-0042", "E-0042"]`，即 `2^64` 那条又消失）。
 M2 = 把 `parser` 的 `Some(Discriminant{..})` 换回 `i.value.map(..)`（复刻 F51 的形状合并）⇒
 `parser`/`fmt`/`sema`/`cli` **四条同时红**，覆盖四个层。两处变异都已复原，复原后
-`grep -rn "i\.value\.map" src/*.rs` 只剩 `hir.rs:1198` 那处既有的数组长度读取（属 F11 那一族，本轮未动）。
+`grep -rn "i\.value\.map" src/*.rs` 只剩 `hir.rs` 那处既有的数组长度读取（属 F11 那一族，本轮未动）——
+**F11 轮之后这一处也改成 `and_then(u64::try_from)`，同一条 grep 现在返回 0 行**，见 **D-53(d)**。
+
+## D-53 `[T; N]` 的长度：文法写 `int_lit`、§2.12 说封闭集合"用于数组长度"、§4.5 说"N 必须编译期常量"，而求值失败该报哪条码规范没写 —— F11 轮的四处定死
+
+三个落点各说一半：spec:303 的文法是 `"[" type_ ";" int_lit "]"`（只写字面量）、spec:226 的 §2.12
+把"数组长度"列为 const-eval 封闭集合的**用途**（⇒ 长度可以是常量表达式）、spec:535 的 §4.5 表写
+"`sizeof(T) * N`，N 必须编译期常量"。而失败侧只给了两句通则：spec:590「参数为类型或常量时必须在编译期
+求值完成；无法常量求值 → `E-0131`」与 spec:227「违反（§2.12 的禁止构造）→ `E-0060`」。
+`sema.rs:448` 的 `const_eval_usize(len).unwrap_or(0)` 就是在这道缝里把不可求值的长度做成 `0`，
+布局与边界检查照 0 元素算，`infy check` 全绿。按协议 §0.3(c) 逐条定死：
+
+**(a) 类型位置按 §2.12 的封闭集合求值，不按文法的 `int_lit` 收窄。**
+文法那行不足以当唯一判据：若长度只能是一个字面量，§2.12 把"数组长度"列为用途就没有意义，
+而 §4.5 说的是"编译期常量"而不是"字面量"。所以 `const` 读取、算术、`as`、§10 里标注 `const fn` 的
+`std.math`/`std.num` 调用都算合法长度。实测（`target/scratch/f11`）：`[u32; 4]` → 4、`[u32; 2 + 3]` → 5、
+`const N: u32 = 4;` 之后的 `[u32; N]` → 4，三条都 `check ok`、exit 0。
+
+**(b) 失败码 = `E-0131`，但只在类型位置；表达式位置的 `[x; N]` 保留它已有的 `E-0060`。**
+`E-0131` 在 §9 码表里的样例是内置函数（`std.mem.size_of<dyn Unknown>()`），本条把它的使用面按 spec:590
+的原文扩到"类型参数与常量参数无法求值"；`E-0060` 的既有发射点（`[x; N]` 那一支，本轮之前的 `sema.rs:1663`）
+语义一字未动 ⇒ **同一份根因在两个句法位置有两个码**不是即兴，是"类型位置由 spec:590 管、
+表达式位置的 §3.11 判据早已落在 `E-0060`"。实测：`[u32; NOPE]` 一条 `E-0131`（exit 2），
+`[0u32; NOPE]` 一条 `E-0060`（exit 2）。
+
+**(c) 形状：求值失败 ⇒ `Ty::Invalid`，绝不返回 `Array { n: 0 }`。**
+`0` 是一个**写得出来的合法长度**（`[u32; 0]` 今天仍然干净通过，且 `§4.5` 给它 `sizeof = 0`），
+"求不出长度"与"长度是 0"共用一个形状 = D-52(a) 那一课（同一形状表示两个构造 ⇒ 判据必漂）；
+而 `type_compatible` 的第一条臂就放行 `Ty::Invalid`，所以换形状不制造级联（F36/F37 那一族）。
+实测：`struct S { pub a: [u32; NOPE] }` 的字段类型文本从 `[u32; 0]` 变成 `<invalid>`，
+`infy build` 不再能对着一份 `check` 绿的源码发 `uint32_t a[0]`。
+
+**(d) 长度读取口两处都不折位。**
+`sema::const_eval_usize` 的 `ConstValue::UInt(u) => Some(u as u64)` 换成 `u64::try_from(u).ok()` ——
+`u128` 放得下而长度放不下就是"没有长度"，不是取低半（`[u32; 18446744073709551616]` 修前静默得 `0`，
+本轮实测 = `check` 从 exit 0 变 exit 2）。`hir::literal_len` 的 `i.value.map(|v| v as u64)` 同批改
+`and_then(|v| u64::try_from(v).ok())`：这条今天已被 (b) 挡在阶段 [4] 之前，改它的理由是**第二个读取口
+不该留着同一族折位**（F10 的"把截断换成检查时顺手扫相邻算术"），并留一条直接打 `hir_ty_from_ast` 的锁点
+`hir::tests::an_over_wide_array_length_has_no_layout_at_stage_7`。
+
+**(e) 一个根因只报一条，代价是把"字段类型被解析两遍"量了出来。**
+同一份 `f.ty` 在注册通道（`sema.rs:607`）与 `check_item`（`923`）各解析一次；照 (b) 直接发诊断，
+`struct S { pub a: [u32; NOPE] }` 会在同一坐标打两条 `E-0131`（实测确实如此，加判据前 2 条）。
+实现改成：长度按 `Span` 只上报一次，并把该 `Type` 自己的 span 登记为"已解释"；字段与绑定那两条
+通用兜底只在没人说过的时候开口（绑定兜底的条件同时改成它自己 note 写的那个形状 —— "既无类型标注
+也无初始化表达式"，有标注而标注自己报过的情形不再重复报告）。**残留两条登记为 F52，本轮不修**：
+① 双通道解析本身还在，"const-eval 自己已经报过"的长度今天仍打两遍 —— 实测 `[u32; 1 / 0]` 的
+`E-0062` 在**新旧两个二进制里都是 2 条**，不是本轮引入；② `prog.consts` 按 item 顺序填充，
+所以 `struct S { a: [u32; N] }` 写在 `const N: u32 = 4;` **之前**时读不到值 ⇒ 本轮之后它显式失败
+（修前是 `uint32_t a[0]` + `sizeof(S) == 0` 且 `check` exit 0，实测于本轮保存的旧二进制），
+要让 §2.12 的"const 读取"与声明顺序无关，需要常量前置 pass 或定点迭代。
+
+**变异探针（五条全实测，跑在副本树里，仓库一字不动；脚本 = `scripts/f11-mutation-probe.ps1`）**：
+control（无变异）= `561 passed / 0 failed`；M1 = 两处长度求值换回 `Some(self.const_eval_usize(len).unwrap_or(0))`
+⇒ **4 条红**（`a_const_read_is_the_array_length` · `a_repeat_expression_length_reports_once` ·
+`an_over_wide_array_length_does_not_wrap` · `an_unevaluable_array_length_is_e0131`）；M2 = `ConstValue::UInt(u)`
+换回 `Some(u as u64)` ⇒ `an_over_wide_array_length_does_not_wrap` 红；M3 = 撤掉按 `Span` 的一次性上报 ⇒
+两条"恰一条"的断言红；M4 = 字段兜底不看"已解释"判据 ⇒ **2 红**；M5 = 绑定兜底换回
+`matches!(actual, Ty::Invalid) && init.is_none()` ⇒ **1 红**。脚本对每个变异都要求"它自己那条断言变红"，
+所以 (b)(c)(d)(e) 四条裁定各有牙齿，不是只有实现跑绿。
+**探针第一次跑失败的形态值得记下来**：副本目录里残留一个**名叫 `src` 的文件**（上一版脚本把 `src\*`
+复制到还不存在的目标目录，PowerShell 把其中一个文件改名成了 `src`），于是 `cargo` 在副本里读到的树是坏的、
+`test result` 行为空 —— 这会被后面的判据读成"变异没红"。现在脚本先清掉自己的 work 目录，再在复制完成后
+断言 `Cargo.toml`/`src/lib.rs`/`src/sema.rs`/`conformance/cases`/`docs/coverage.md` 五项齐备，缺一即 exit 2 ⇒
+**"没测"永远不许被读成"没红"**。
 

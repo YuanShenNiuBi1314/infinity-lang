@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 555 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out   # **F10/F51 轮 551 → 555**，`cli` 46→47 · `fmt` 40→41 · `parser` 10→11 · `sema` 23→24 = 超宽枚举判别式按层报 `E-0042` 的四条锁点（见下文 F10/F51 一节）；上一档 **F9 轮 548 → 551**，`derive` 57→58 · `parser` 9→10 · `sema` 22→23（整数字面量收成单一形状，见下文 F9 一节）
+test result: ok. 561 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out   # **F11 轮 555 → 561**，`sema` 24→29 · `hir` 21→22 = `[T; N]` 的长度求值失败改显式 `E-0131`（不得静默取 0）的六条锁点（见下文 F11 一节）；上一档 **F10/F51 轮 551 → 555**，`cli` 46→47 · `fmt` 40→41 · `parser` 10→11 · `sema` 23→24 = 超宽枚举判别式按层报 `E-0042` 的四条锁点（见下文 F10/F51 一节）；再上一档 **F9 轮 548 → 551**，`derive` 57→58 · `parser` 9→10 · `sema` 22→23（整数字面量收成单一形状，见下文 F9 一节）
 $ cargo check --offline --lib
 Finished `dev` profile  (0 warnings —— F2 轮把 50 条一次清零：20 条 `unreachable pattern`、6 条 unused import、6 条 unused variable、3 条 `depth` 赋值不读、2 条多余 `mut`、2 条 never-constructed 变体、11 条 never-used fn/method/field；**没有用 `#[allow(...)]` 消数**，其中两处是「没接上」而非「没用」，见下文 F2 一节。口径 = `cargo check --offline --lib --message-format=short` 先 `touch src/lib.rs` 再计数；上一档 50 = F1 轮，51 → 50 = D4(1) 轮删掉 `CodeBuilder.bounds`)
 $ infy check examples/tour
@@ -134,13 +134,13 @@ error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权�
 
 > **一行口径（F6 轮，2026-10-17）**：`infy fmt --check examples/tour` 从本轮起 **exit 0**（偏差 **D-17** 已裁 = §9.5 胜、样例侧改写到规范形态）。下文各轮小节里的 `exit 2`（F6 未裁决）、生成 C11 **12513** 字节、`build-id 4d8250b5…55ba`、节点表行号 **8/9/10/11/16/19** 全是**裁决前那棵树**的当时实测值，保留为历史；现值 = **12512** / **`d7c4408e…370015`** / **7/8/9/10/16/20**（产物 199975 与段 blob 738 没动）。这三组数只随 tour 的字节动。**F8 轮再加一句口径**：产物字节是**宿主镜像**的函数，`infy_rt.c` 一动它就动 ⇒ 本机现值 **200644**（宿主镜像 199842），而 build-id / C11 / 节点表行号三组没动（它们的输入里没有宿主镜像） —— 谁把规范化回滚掉，CI 步 12 的门禁与 `fmt::tests::the_tour_sources_are_the_9_5_fixpoint` 会同时红，不会静默。
 
-555 项按模块（`cargo test --offline --lib -j 1` 逐条分组计数，合计 555；**F10/F51 轮实测**，上一版 551 = F9 轮实测，再上一版 548 = F7 轮实测）：
+561 项按模块（`cargo test --offline --lib -j 1` 逐条分组计数，合计 561；**F11 轮实测**，上一版 555 = F10/F51 轮实测，再上一版 551 = F9 轮实测）：
 `lexer` 79 · `derive` **58**（**F9 轮 +1** = `generated_integer_literals_use_the_single_source_literal_shape`，把派生体的整数字面量钉在 parser 那一支形状上） · `fmt` **41**（**F6 轮 +1** = `the_tour_sources_are_the_9_5_fixpoint`，把 `examples/tour` 读回来逐字节比它自己的 §9.5 输出；**F10/F51 轮 +1** = `a_discriminant_wider_than_u128_is_reprinted_not_dropped`，格式化器不许把放不下 `u128` 的判别式整段删掉） · `cli` **47**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → F2 轮 39 → F4 轮 41 → F5 轮 46 → **F10/F51 轮 47** = `VALUE_OPTS` 的逐项跳值 + 取值点源码回扫 + 三条命令的目录参数本体 + 空目录/缺 module 的显式失败 + `expand --derive` 的显式拒绝 + `over_wide_discriminants_stop_check_instead_of_wrapping` 的端到端 exit 2） ·
 `macro_expand` 35 · `btrack` **31**（D1(1) 前是 0，D1(2) 轮 23 → 30，**F2 轮 +1** = wheel 归档里每个成员按自己的 local header 偏移取数据） ·
-`atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **27**（D3 轮 22 → 26，**F4 轮 +1** = 合法 `dyn` 形参在阶段 [8] 以条款号被拒） · `pkg` 24 · `sema` **24**（**F9 轮 +1** = `a_derived_body_reaches_stage_4_on_one_shared_span`，同时把 F49 那条 span 碰撞量成锁点；**F10/F51 轮 +1** = `over_wide_enum_discriminants_are_e0042_and_never_a_wrap`，两条超宽判别式各一条 `E-0042`、续号不得级联、`u64::MAX` 的收集不再算术溢出） ·
-`ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` **21**（**F4 轮 +1** = `docs/internals/runtime-abi.md` §1 写出的 vtable 偏移被读回来与布局器比） · `artifact` 18 ·
+`atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **27**（D3 轮 22 → 26，**F4 轮 +1** = 合法 `dyn` 形参在阶段 [8] 以条款号被拒） · `pkg` 24 · `sema` **29**（**F9 轮 +1** = `a_derived_body_reaches_stage_4_on_one_shared_span`，同时把 F49 那条 span 碰撞量成锁点；**F10/F51 轮 +1** = `over_wide_enum_discriminants_are_e0042_and_never_a_wrap`，两条超宽判别式各一条 `E-0042`、续号不得级联、`u64::MAX` 的收集不再算术溢出；**F11 轮 +5** = `a_const_read_is_the_array_length`（`[u32; N]` = 4、`[u32; 2 + 3]` = 5、写得出来的 `[u32; 0]` 仍是 0，外加"`struct` 写在 `const` 之前"那一半现在是显式 `E-0131`）、`an_unevaluable_array_length_is_e0131`（码集**恰一条**且字段形状是 `<invalid>` 而不是 `[u32; 0]`）、`an_over_wide_array_length_does_not_wrap`（`2^64` / 宽于 `u128` / `-1` 三支）、`a_repeat_expression_length_reports_once`（`[0u32; 1 / 0]` 只留 `E-0062`）、`an_untyped_binding_without_initializer_is_still_e0131`，见下文 F11 一节） ·
+`ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` **22**（**F4 轮 +1** = `docs/internals/runtime-abi.md` §1 写出的 vtable 偏移被读回来与布局器比；**F11 轮 +1** = `an_over_wide_array_length_has_no_layout_at_stage_7`，第二个长度读取口 `literal_len` 也不许把 `2^64` 折成 0） · `artifact` 18 ·
 `toml` 15 · `borrow` **22**（**F7 轮 15 → 22** = `E-0121` 的判据从「链内存活绑定」换到「全局可变路径」后的 3 条正例 + 7 条反例（含 A4 轮留下的 3 条边界）+ 1 条 span 锁点，见下文 F7 一节） · `sha256` 12 · `conformance` **19**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫，**F3 轮 +1** = `.gitignore` 的一次性产物名单形状（按"谁产生它"列的六条一条不能少）+ 反向红线（不得宽到吞掉 `*.bin`/`*.md`/`*.rs` 或整个目录）+ 每个 `scripts/*.ps1` 的审计日志必须落在 `logs/`，**F1 收尾 +1** = 语料 EOL 例外必须声明在全局规则之后） · `codes` 9 ·
-`parser` **11**（D3 轮 +1 = §3.6 的 `@c` 语句形态；**F9 轮 +1** = `every_integer_spelling_reaches_the_ast_as_the_single_literal_shape`，即 F2 轮欠的那条 `primary` 臂顺序锁；**F10/F51 轮 +1** = `a_discriminant_wider_than_u128_is_still_recorded_as_written`，宽于 `u128` 的判别式必须仍是"写过"的形状且 `Span` 指得住字面量） · `base64` 7 · `stdlib` 4 · `diag` 2 = **555**。
+`parser` **11**（D3 轮 +1 = §3.6 的 `@c` 语句形态；**F9 轮 +1** = `every_integer_spelling_reaches_the_ast_as_the_single_literal_shape`，即 F2 轮欠的那条 `primary` 臂顺序锁；**F10/F51 轮 +1** = `a_discriminant_wider_than_u128_is_still_recorded_as_written`，宽于 `u128` 的判别式必须仍是"写过"的形状且 `Span` 指得住字面量） · `base64` 7 · `stdlib` 4 · `diag` 2 = **561**（逐模块相加：79+58+41+47+35+31+27+27+24+29+22+22+18+15+22+12+19+9+11+7+4+2）。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -1905,3 +1905,82 @@ Windows 没有递归 mutex 的现成路。
 **措辞红线加一条（本轮）**：不许说"派生体的判别式宽度已按 D-52(b) 校验过" —— `derive` 那层的 `as u32` 理由是可达性
 （F35 挡着所有 derive）而不是等价，见 D-52(e)。
 
+
+## F11 轮（2026-10-17）：`[T; N]` 的长度要么按 §2.12 求出来，要么显式 `E-0131` —— 不再做成"看起来合法的 0"（交付提交 `af7a668`）
+
+**缺陷本体**：`src/sema.rs` 的类型位置写的是 `let n = self.const_eval_usize(len).unwrap_or(0);`。
+`const_eval_usize` 在 §2.12 的封闭集合之外返回 `None`，于是"求不出长度"被折算成**一个合法写出来的长度 `0`**，
+阶段 [4] 一条诊断都不打，阶段 [7] 的布局器拿着 `Ty::Array { n: 0 }` 算 `sizeof` ⇒ 边界检查也按 0 元素算。
+根因不是判据写错，是**形状合并**：`0` 同时表示"长度是 0"与"长度未知"（= D-52(a) 那一课的反方向复用）。
+
+**十一份最小 module 的对照实测**（`target/scratch/f11/c*`，每份自带 `MODULE.infy.toml`；旧二进制 = 本轮保存在
+`target/scratch/f11/infy-old.exe` 的 `af7a668` 之前版本，全部用 `infy check <dir>` 跑）：
+
+| 语料 | 写法 | 修前 | 修后 |
+|---|---|---|---|
+| `c7_lit` | `[u32; 4]` | exit 0 | exit 0 |
+| `c1_const` | `const SIZE = 4` ⇒ `[u32; SIZE]` | exit 0 | exit 0（真的 =4） |
+| `c6_binop` | `[u32; 2 + 3]` | exit 0 | exit 0（=5） |
+| `c9_legal` | `[u32; N]` + `[u32; 0]` 同处一个 struct | exit 0 | exit 0 |
+| `c2_2p64` | `[u32; 18446744073709551616]` | **exit 0 / 0 诊断** | **exit 2 / 1 条 `E-0131`** |
+| `c3_over_u128` | `[u32; 2^128+1]` | **exit 0 / 0 诊断** | **exit 2 / 1 条 `E-0131`** |
+| `c4_unknown` | `[u32; NOPE]` | **exit 0 / 0 诊断** | **exit 2 / 1 条 `E-0131`** |
+| `c8_field` | 同形状做 `struct` 字段 | **exit 0 / 0 诊断** | **exit 2 / 1 条 `E-0131`**（不是两条） |
+| `c10_order` | `struct` 写在 `const N` 之前 | **exit 0 / 0 诊断** | **exit 2 / 1 条 `E-0131`** |
+| `c5_repeat` | `let v = [0u32; NOPE];` | exit 2 / 1 条 `E-0060` | exit 2 / 1 条 `E-0060` |
+| `c11_divzero` | `struct` 字段 `[u32; 1 / 0]` | exit 2 / **2 条 `E-0062`** | exit 2 / **2 条 `E-0062`**（新旧同数 ⇒ 不是本轮引入） |
+
+**旧二进制的错布局实证**：`c10_order` 用 `infy build` 发出的 C 存在 `target/scratch/f11/before-c10`，
+第 13/15 行逐字为 `struct … { uint32_t a[0];};` 与 `sizeof(…) == 0u && _Alignof(…) == 4u` —— 而它的
+`infy check` 是绿的。同形状的对照 `c9_legal`（`const` 在前）在旧二进制里就已发 `uint32_t a[4]` + `sizeof == 16u`，
+⇒ **能不能求值取决于声明顺序**，这条残留登记为 **F52**。
+
+**改的四处**：① 类型位置 = 求值成功用真值，失败 ⇒ 一条 `E-0131`（渲染指得住长度那一格）+ `Ty::Invalid`，
+绝不返回 `Array { n: 0 }`；② `const_eval_usize` 的 `ConstValue::UInt(u) => Some(u as u64)` 换
+`u64::try_from(u).ok()`（F10 那一族的折位，`c2_2p64` 的根因就在这里）；③ 表达式位置 `[x; N]` 保留它已有的
+`E-0060`，但 const-eval 自己报过的（`E-0062`）不再补第二条，占位同样改 `Ty::Invalid`；
+④ 字段/绑定的通用兜底加"已解释"判据 —— 同一份 `f.ty` 在注册通道与 `check_item` 各解析一次，
+不去重就会在同一坐标打两条（实测加判据前 `c8_field` 就是 2 条）。`hir::literal_len` 的
+`i.value.map(|v| v as u64)` 同批改 `and_then(u64::try_from)`：那条今天已被阶段 [4] 挡在前面，
+改它的理由是**第二个读取口不许留着同族折位**（`grep -rn "i\.value\.map" src/*.rs` 现在 0 行）。
+
+**六条新锁点**：`sema::tests::{a_const_read_is_the_array_length, an_unevaluable_array_length_is_e0131,
+an_over_wide_array_length_does_not_wrap, a_repeat_expression_length_reports_once,
+an_untyped_binding_without_initializer_is_still_e0131}` + `hir::tests::an_over_wide_array_length_has_no_layout_at_stage_7`；
+其中三条断言的是"**恰一条**"和字段类型的**文本**（`<invalid>` 而不是 `[u32; 0]`），不只是"有没有报错"。
+
+**变异探针（`scripts/f11-mutation-probe.ps1`，副本树里跑，仓库一字不动）**：control = `561 passed / 0 failed`；
+M1 恢复 `unwrap_or(0)` ⇒ **4 红**；M2 恢复 `as u64` ⇒ **1 红**；M3 撤掉按 `Span` 的一次性上报 ⇒ **2 红**；
+M4 撤掉字段兜底的"已解释"判据 ⇒ **2 红**；M5 恢复绑定兜底原判据 ⇒ **1 红**；脚本 exit 0。
+本条第一次跑探针时副本里残留一个**名叫 `src` 的文件**（上一版脚本把 `src\*` 复制进还不存在的目标目录 ⇒
+PowerShell 把其中一个 `.rs` 改名成了 `src`），`cargo` 因此在副本里读出 0 项测试 —— 那会被判据读成"变异没红"。
+现在脚本先清掉自己的 work 目录，复制完再断言 `Cargo.toml`/`src/lib.rs`/`src/sema.rs`/`conformance/cases`/
+`docs/coverage.md` 五项齐备，缺一即 exit 2 ⇒ **"没测"永远不许被读成"没红"**。
+
+**裁定** = 偏差 **D-53(a)–(e)**：类型位置按 §2.12 的封闭集合求值（不收窄成文法那行的 `int_lit`）、
+失败码 `E-0131`（spec:590）而表达式位置保留 `E-0060`、失败形状是 `Ty::Invalid` 不是 `Array{n:0}`、
+两处读取口都不折位、一个根因只报一条（并因此把"两遍解析"量成 **F52**）。
+
+**新基线（本机实测，`-j 1` 连跑两次同数）**：`cargo test --offline --lib` **561 passed / 0 failed**（= 555 + 6：
+`sema` 29 · `hir` 22）、全目标 = 561 + bin 0 + doc-test 0、`cargo check --offline --lib` **0 error / 0 warning**、
+`cargo build --offline --release` exit 0（35.6s）、tour 的 `check|build|run|test` + `--verify-reproducible` +
+`fmt --check examples/tour` + `artifact info --nodes` 全 exit **0**、**C11 12512 / 产物 200644 / build-id
+`d7c4408e…370015` / 节点表 7-8-9-10-16-20 四组一字未动**（本轮没碰 `examples/tour` 的字节也没碰 `infy_rt.c`）、
+`infy conformance --report` **rc=1**（83 = 77/0/6 · 92.8% · 缺口 2217）；**C 侧零改动**仍复跑四条链：
+`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 stderr **0 字节**、rt **32340 assertions / 0 failures**、
+两条 IFBC 链各 **180/180** 且 stdout `cmp` 无差异。
+
+**开头清掉的债 + 关闭的判据**：`scripts/push-branch.ps1` 先 `-DryRun`（脚本 exit 0）再 `-Branch toolchain`，
+第 **1** 次 TRY 即脚本 exit **0** ⇒ `gh api …/git/refs/heads/toolchain` 回查远端 = `430d68e` = 本地 HEAD ⇒
+现算欠账 **0**（cron-33 那笔补记已清）。**F10/F51 的远端判据同时关闭** = run **#16**（`39001097954`，
+head `4f99889`，树含交付 `50c87b4`）= **success、步 1-12 逐条 success**，`gh run view … --log`
+（983 行，落在 `target/scratch/ci-run16.log`）实录 步 7 = **555 passed / 0 failed**、步 10 =
+**32340 assertions, 0 failures**、步 11 = **180 asserts / 180 pass**。
+
+**下一轮 = ①** 现算欠账补推 + 回查覆盖本轮交付树的那条 run（**步 7 现在应打 561 passed**；`cancelled` ≠ 红，
+红了先分辨是不是那六条新锁点，**不许**为此放宽断言；一次交付只推一笔）。**②** §1 第一个 `[ ]` = **F12**
+（owned 值的移动在阶段 [8] 被拒，根因 = 运行时清理队列只能弹栈顶 ⇒ 要动 `infy_rt.h` 的清理 API 并复跑四条 C 链）。
+**措辞红线加一条（本轮）**：不许说"`[u32; 后声明的 const]` 已经能按 §2.12 求值" —— 本轮只做到"显式拒绝"，
+顺序无关的求值仍是 **F52②**；也不许说"阶段 [4] 的字段类型只解析一遍"（去重是把翻倍压住，不是修掉）。
+既有红线不变：覆盖 83/2300 ⇒ 不得声称「INFY v2.0 兼容」；"两侧装载期校验等价"不许讲（F26 前半 / D-42 (a)–(e)）；
+不许说"派生代码的类型标注可信"（F49 未修）；不许说"派生体的判别式宽度已按 D-52(b) 校验过"（可达性 ≠ 等价）。

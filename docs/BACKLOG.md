@@ -1091,11 +1091,33 @@
       `infy build` = **exit 6**、阶段 [7] 对 `Max::A`/`Max::B` 各报一条。裁定 = 偏差 **D-52(b)(c)**；
       变异探针 M1（换回 `x as u64`）实测让 `sema`+`cli` 两条红并已复原。
 
-- [ ] F11 **`[T; N]` 的 N 不是字面量时被 `unwrap_or(0)` 静默当成长 0**（C1 轮定位，未改）：
+- [x] F11 **`[T; N]` 的 N 不是字面量时被 `unwrap_or(0)` 静默当成长 0**（C1 轮定位；**F11 轮（2026-10-17）已改，交付提交 `af7a668`**）：
       `sema.rs:439` 是 `let n = self.const_eval_usize(len).unwrap_or(0);`，而 `const_eval_usize` 在 §2.12 闭集之外返回 `None`
       —— 于是 `let a: [u32; SOME_CONST]` 的类型变成 `[u32; 0]`，不报 `E-0131`，布局与边界检查全按 0 元素算。
       HIR 侧本轮至少不再猜：`hir::hir_ty_from_ast` 遇到非字面量长度返回 `None` → `UnresolvedType`。
       验收：`[u32; 常量表达式]` 要么按 §2.12 求值成功，要么显式 `E-0131`，不得静默取 0；补 `sema` 的成对测试。
+      **F11 轮（2026-10-17）验收本体（release 二进制实跑，不是测试内断言）**：`target/scratch/f11` 十一份最小 module
+      逐条量过 ⇒ 修前 `c2_2p64`（`[u32; 2^64]`）/ `c3_over_u128`（`2^128+1`）/ `c4_unknown`（`[u32; NOPE]`）/
+      `c8_field`（同形状做字段）/ `c10_order`（`struct` 写在 `const N` 之前）**全部 `check` exit 0、0 诊断**，
+      修后各 **exit 2 且恰 1 条 `E-0131`**（渲染指得住长度那一格的 caret）；求值成功那一半同时钉住：
+      `c1_const`（`const SIZE = 4`）/ `c6_binop`（`2 + 3` = 5）/ `c7_lit` / `c9_legal`（含写得出来的 `[u32; 0]`）
+      两轮都 **exit 0** ⇒ 收紧的是"求不出来"而不是"不许用常量"。
+      **形状选择按 D-53(c)**：失败 ⇒ `Ty::Invalid`，**不**保留 `Array { n: 0 }` —— `0` 本身是合法写出来的长度
+      （`c9_legal` 就是它），同一形状表示两个构造正是 D-52(a) 那一课。读取口两处都不折位：
+      `const_eval_usize` 的 `ConstValue::UInt(u) => Some(u as u64)` 换 `u64::try_from(u).ok()`（`2^64` 那一半的根因），
+      `hir::literal_len` 的 `i.value.map(|v| v as u64)` 换 `and_then(u64::try_from)`（今天已被阶段 [4] 挡在前面，
+      改它的理由是第二个读取口不该留着同族折位，并补一条直接打 `hir_ty_from_ast` 的锁点）。
+      **邻面两条按 §2 要求一起核了，结论不同形**：`sema.rs` 的重复表达式那一支（条目原写 `1665`）本来就在
+      `n.is_none()` 时发 `E-0060` ⇒ 它是"响过之后取 0"，本轮只把占位形状换成 `Invalid` 并让它**不再重复响**
+      （const-eval 自己报过的长度不再补 `E-0060`，实测 `[0u32; 1 / 0]` = 1 条 `E-0062`，`[0u32; NOPE]` = 1 条 `E-0060`）；
+      `hir.rs:1198` 那条按上一条改完。新锁点 6 条 = `sema` 24 → **29**、`hir` 21 → **22**；
+      变异探针五条各自红（`scripts/f11-mutation-probe.ps1`，副本树里跑：M1 恢复 `unwrap_or(0)` ⇒ 4 红、
+      M2 恢复 `as u64` ⇒ 1 红、M3 去掉按 `Span` 的一次性上报 ⇒ 2 红、M4 去掉字段兜底的"已解释"判据 ⇒ 2 红、
+      M5 恢复绑定兜底原判据 ⇒ 1 红；control 561/0 绿）。裁定 = 偏差 **D-53(a)–(e)**。
+      **本轮量出两条残留，登记为 F52 未修**：同一份字段类型在注册通道与 `check_item` 各解析一次 ⇒
+      `[u32; 1 / 0]` 的 `E-0062` 今天仍打 2 条（**新旧二进制实测同为 2**，不是本轮引入）；`prog.consts` 按 item
+      顺序填充 ⇒ `struct S { a: [u32; N] }` 写在 `const N` 之前求不到值，本轮之后**显式失败**（修前实证：
+      `uint32_t a[0]` + `sizeof(S) == 0`，见 `target/scratch/f11/before-c10`）。
 
 - [ ] F12 **owned 值的移动在 stage [8] 被拒绝，根因是运行时清理队列只支持弹栈顶**（C2 轮定位，实现选择见偏差 **D-31**）：
       `infy_rt.h:115-118` 的清理 API 是 `infy_cleanup_push(fn, &obj, is_defer)` + `infy_cleanup_pop_run()` /
@@ -1513,8 +1535,69 @@
       形状合并）实测让 **`parser`/`fmt`/`sema`/`cli` 四层同时红**，已复原。裁定 = 偏差 **D-52(a)(d)**；
       `derive` 那层的 `as u32` 保持不变，理由是可达性而不是等价（F35 仍挡着所有 derive）⇒ D-52(e) 加了措辞红线。
 
+- [ ] F52 **同一份 `Type` 在阶段 [4] 被解析两遍，而 `const` 表按 item 顺序填充**（F11 轮实测，未改）：
+      `sema.rs:607`（注册通道，产出的 `Ty` 进 `prog.structs` 并被阶段 [7] 的布局器消费）与 `sema.rs:923`
+      （`check_item` 的字段校验）对同一份 `f.ty` 各调一次 `ty_from_ast`。两遍的代价有实测形状：
+      `struct S { pub a: [u32; 1 / 0] }` 打 **2 条 `E-0062`**（同一坐标同一码），而 F11 刚加上长度诊断时
+      同一坐标也打了 2 条 `E-0131` —— 本轮是靠"按 `Span` 只上报一次 + 把该 `Type` 登记成已解释"压住的
+      （`Checker::unresolved_ty_spans`），**没有修根因**，所以任何在 `ty_from_ast` 里发诊断的新代码都必须
+      自带去重，否则立刻翻倍（M3 变异实测：撤掉去重 ⇒ 2 条测试红）。
+      第二条同族：`prog.consts` 随 item 顺序 push，于是 `struct S { pub a: [u32; N] }` 写在
+      `const N: u32 = 4;` **之前**时读不到值。修前实证 = `target/scratch/f11/before-c10`：`infy check`
+      **exit 0** 而 `infy build` 发出 `uint32_t a[0]` + `sizeof(…) == 0u`；修后（F11 轮）该形状 **exit 2、
+      1 条 `E-0131`** ⇒ 从"静默错布局"变成"显式拒绝"，但 §2.12 明写"`const`/`static` 读取"属合法常量化构造，
+      **声明顺序不该决定能否求值**，所以本条不许被当成已解决。
+      验收：① 字段类型只解析一遍（把 `check_item` 的字段循环并进注册通道，或让后者复用 `prog.structs` 里
+      已算好的 `Ty`），并**撤掉**本轮的 `unresolved_ty_spans` 去重 —— 撤得掉才算根因修了，同时
+      `[u32; 1 / 0]` 的 `E-0062` 应变成 1 条；② 常量前置 pass 或定点迭代，使 `target/scratch/f11/c10_order`
+      那份源码 `check` **exit 0** 且发出的 C 是 `uint32_t a[4]`（本轮把该形状同时用作正反例语料）；
+      两条各自成对测试。
 
 ## 2. 当前指针
+
+> **F11 轮收尾（2026-10-17）：F11 勾 `[x]`，本段取代下一段** —— 交付提交 **`af7a668`**
+> （`sema` 的 Array 类型臂改「求值或 `E-0131` + `Ty::Invalid`」+ `const_eval_usize` 的 `u128 as u64` 换
+> `u64::try_from` + 重复表达式那一支不再二次响 + 字段/绑定兜底加"已解释"判据 + `hir::literal_len` 同批去折位 +
+> 六条新锁点 + 新脚本 `scripts/f11-mutation-probe.ps1`）。**根因一句话**：求值失败被 `unwrap_or(0)` 做成一个
+> **看起来合法的形状**（`0` 是写得出来的长度），于是阶段 [4] 没有诊断、阶段 [7] 按 0 元素布局 ——
+> 与 D-52(a) 同一课（同一形状表示两个构造 ⇒ 判据必漂），裁定 = 偏差 **D-53(a)–(e)**。
+> **验收本体 = release 二进制实跑**（`target/scratch/f11` 十一份最小 module）：修前 `[u32; 2^64]`、
+> `[u32; 2^128+1]`、`[u32; NOPE]`、同形状做字段、`struct` 写在 `const` 之前这五条全 **exit 0 / 0 诊断**，
+> 修后各 **exit 2 / 恰 1 条 `E-0131`**；`[u32; SIZE]`（=4）、`[u32; 2 + 3]`（=5）、`[u32; 4]`、`[u32; 0]`
+> 两轮都 **exit 0** ⇒ 收紧的是"求不出来"，不是"不许用常量表达式"。**旧二进制的错布局实证**：
+> `target/scratch/f11/before-c10` = `uint32_t a[0]` + `sizeof(…) == 0u`（那份 `check` 是绿的）。
+> **新基线（本机 `-j 1` 连跑两次同数）**：`cargo test --offline --lib` **561 passed / 0 failed**
+> （555 + 6：`sema` 24→**29** · `hir` 21→**22**）、全目标 = 561 + bin 0 + doc 0、`cargo check --offline --lib`
+> **0 error / 0 warning**、`cargo build --offline --release` exit 0、tour 的 `check|build|run|test` +
+> `--verify-reproducible` + `fmt --check examples/tour` + `artifact info --nodes` 全 exit **0**、**C11 12512 /
+> 产物 200644 / build-id `d7c4408e…370015` / 节点表 7-8-9-10-16-20 四组一字未动**（没碰 tour 字节也没碰
+> `infy_rt.c`）、`infy conformance --report` 仍 **83 = 77/0/6 ⇒ exit 1**（92.8% · 缺口 2217）、C 侧零改动
+> 四条链未退化（两份 `-c` 各 stderr **0 字节**、rt **32340/0**、两条 IFBC 各 **180/180** + `cmp` 无差异）。
+> **变异探针五条全实测**（`scripts/f11-mutation-probe.ps1 -Apply`，副本树里跑、仓库一字不动）：control
+> 561/0 绿；M1 恢复 `unwrap_or(0)` ⇒ **4 红**；M2 恢复 `as u64` ⇒ **1 红**；M3 撤掉按 `Span` 的一次性上报 ⇒
+> **2 红**；M4 撤掉字段兜底的"已解释"判据 ⇒ **2 红**；M5 恢复绑定兜底原判据 ⇒ **1 红**；脚本 exit **0**。
+> **开头清掉的债 + 关闭的判据**：`push-branch.ps1` 干跑后第 **1** 次 TRY 即脚本 exit **0** ⇒ 远端 = `430d68e`
+> = 本地 HEAD、现算欠账 **0**；**F10/F51 的远端判据同时关闭** = run **#16**（`39001097954`，head `4f99889`）=
+> **success、步 1-12 逐条 success**，`gh run view … --log`（983 行）实录 步 7 = **555 passed / 0 failed**、
+> 步 10 = **32340 assertions, 0 failures**（`ci-run16.log` 落在 `target/scratch/`）。
+> **本轮新增的常驻面（下一轮直接用）**：① `Checker::unresolved_ty_spans` —— **任何在 `ty_from_ast` 里发诊断的
+> 新代码必须自带去重**，因为同一份字段类型在注册通道（`sema.rs:607`）与 `check_item`（`923`）各解析一次，
+> 不去重就是同坐标两条（这是 **F52** 的由来，撤掉该集合是它的验收①）；② 数组长度读取口只有
+> `const_eval_usize` 两个调用点（类型位置与 `[x; N]`），两处都不许再写 `as u64`；③ 类型位置失败 = `E-0131`、
+> 表达式位置 = `E-0060`（按句法位置分码，理由 = D-53(b)，别再"统一"成一个码）；④ 探针语料
+> `target/scratch/f11/c*`（每份自带 `MODULE.infy.toml`，**没有就走不到 module 根、会被父目录清单吸进去变成
+> `E-0501`**）+ 保存的旧二进制 `target/scratch/f11/infy-old.exe`（对照实测全靠它）。
+> **下一轮 = ①** 现算欠账补推 + 回查覆盖本轮交付树的那条 run（**步 7 现在应打 561 passed**；`cancelled` 既不是
+> 红也不是绿，红了先分辨是不是那六条新锁点，**不许**为此放宽断言；一次交付只推一笔）。**②** §1 第一个 `[ ]` =
+> **F12**（owned 值的移动在阶段 [8] 被拒，根因 = 运行时清理队列只能弹栈顶 ⇒ 要动 `infy_rt.h` 的清理 API 并
+> **复跑四条 C 链**；锁定点 `codegen::tests::moving_an_owned_binding_is_refused` 要从"必须报错"改成"必须生成 +
+> 成对断言旧地址不再被释放"）。F52 排在 F12…F51 之后（本仓库惯例：新登记的缺陷追加到 §1 尾部，不插队）。
+> **卫生欠账原地不动**：`btrack.rs:4739` 的 `fn dump_of` 零调用点（只在 `cfg(test)` 里 ⇒ `check --lib` 口径看不见）、
+> `codegen::emit_driver` 在 `chains.is_empty()` 时先 `return 1` 的入口顺序。
+> **措辞红线加一条（本轮）**：不许说"`[u32; 后声明的 const]` 已经能按 §2.12 求值" —— 本轮只做到"显式拒绝"，
+> 顺序无关的求值仍是 **F52②**。既有红线不变：覆盖 83/2300 ⇒ 任何文档不得声称「INFY v2.0 兼容」；
+> "两侧装载期校验等价"仍不许讲（**F26** 前半，清单 = D-42 (a)–(e)）；不许说"派生代码的类型标注可信"（**F49**）；
+> 不许说"派生体的判别式宽度已按 D-52(b) 校验过"（理由是可达性不是等价）。
 
 > **F10/F51 轮收尾（2026-10-17）：F10 与 F51 双双勾 `[x]`，本段取代下一段** —— 交付提交 **`50c87b4`**
 > （`src/ast.rs` 新增 `Discriminant { lit, span }` 取代 `Option<u128>` + `parser::variant()` 保存**写下来的字面量**
