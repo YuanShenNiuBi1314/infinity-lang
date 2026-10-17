@@ -7,7 +7,7 @@
 //! expandable source. Desugaring therefore happens in `sema`/`codegen`, never in the parser.
 
 use crate::span::Span;
-use crate::token::{Lit, Punct, Tree};
+use crate::token::{IntLit, Lit, Punct, Tree};
 
 #[derive(Clone, Debug, Default)]
 pub struct Docs {
@@ -215,14 +215,33 @@ pub struct Field {
 }
 
 #[derive(Clone, Debug)]
+/// §4.1's explicit discriminant, kept as **the literal as written**.
+///
+/// `lit.value == None` means the digits do not fit `u128`. That must stay distinguishable from
+/// "no `= …` written": folding the two together made `A = 2^128` the same AST as `A`, so `check`
+/// and `build` reported nothing and the enum silently became `A = 0, B = 1, C = 2` (BACKLOG F51).
+/// §2.8 makes the width stage [4]'s range error (`E-0042`), so the parser reports neither.
+pub struct Discriminant {
+    pub lit: IntLit,
+    pub span: Span,
+}
+
+impl Discriminant {
+    /// The numeric value, only when the literal fits `u128`.
+    pub fn value(&self) -> Option<u128> {
+        self.lit.value
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Variant {
     pub name: String,
     /// `Fetch(u32, str)`.
     pub tuple: Vec<(Visibility, Type)>,
     /// `Fetch { code: u32 }`.
     pub struct_fields: Vec<Field>,
-    /// Explicit discriminant, `Fetch = 3`.
-    pub disc: Option<u128>,
+    /// Explicit discriminant, `Fetch = 3`; `None` = nothing written.
+    pub disc: Option<Discriminant>,
     pub attrs: Vec<Attr>,
     pub docs: Docs,
     pub span: Span,

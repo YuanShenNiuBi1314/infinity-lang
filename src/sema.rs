@@ -622,8 +622,33 @@ impl<'a> Checker<'a> {
                     let mut payload: Vec<Ty> = v.tuple.iter().map(|(_, t)| self.ty_from_ast(t, &generics)).collect();
                 let more: Vec<Ty> = v.struct_fields.iter().map(|f| self.ty_from_ast(&f.ty, &generics)).collect();
                 payload.extend(more);
-                    let disc = v.disc.unwrap_or(next_disc as u128) as u64;
-                    next_disc = disc + 1;
+                    let disc = match &v.disc {
+                        // §2.8 + D-25: an out-of-range discriminant is `E-0042`, never a wrap. This
+                        // line used to be `v.disc.unwrap_or(next_disc as u128) as u64`, which folded
+                        // `2^64` back to `0` before stage [7] could see it (F10) and overflowed
+                        // `disc + 1` at `u64::MAX`; a literal wider than `u128` reached here at all
+                        // only became possible with F51's parser fix.
+                        None => next_disc,
+                        Some(d) => match d.value().and_then(|x| u64::try_from(x).ok()) {
+                            Some(u) => u,
+                            None => {
+                                let title = match d.value() {
+                                    None => format!("字面量超出 i128：{}", d.lit.digits),
+                                    Some(_) => format!("字面量超出可表示范围：{}", d.lit.digits),
+                                };
+                                self.emit(
+                                    "E-0042",
+                                    d.span,
+                                    title,
+                                    format!("枚举 `{name}` 的判别式装不进收集宽度 u64（D-25：标签恒为 `uint32_t`）"),
+                                    Some("§2.8：不回绕、不饱和——回绕只属于运行时的 `wrapping_*`".into()),
+                                    Some("把判别式改到 u32 以内".into()),
+                                );
+                                next_disc
+                            }
+                        },
+                    };
+                    next_disc = disc.saturating_add(1);
                     vs.push((v.name.clone(), payload, disc));
                 }
                 let repr_c = it.attrs.iter().any(|a| a.name() == "repr" && a.has_ident("C"));
@@ -2650,6 +2675,29 @@ mod tests {
         assert!(got("fn f() { let b: i32 = 0xFFFFFFFF; }", "E-0110"), "0xFFFFFFFF is not an i32");
         clean("fn f() { let c: i64 = 0xFFFFFFFFFF; }");
         assert!(got("fn f() { let d = 0xFFFFFFFFFFFFFFFFF; }", "E-0042"));
+    }
+
+    /// §2.8 + D-25 (BACKLOG **F10**/**F51**): an explicit enum discriminant that does not fit is
+    /// `E-0042`, never a wrap. The two widths broke in different layers: `2^64` *did* reach stage
+    /// [4] and `v.disc … as u64` folded it back to `0`, while `2^128` never arrived at all because
+    /// the parser stored only the value — and `None` already meant "no `= …` written".
+    /// `2^32` stays a clean stage-[4] collect on purpose: the `uint32_t` tag width is stage [7]'s
+    /// rule, locked by `hir::tests::a_discriminant_wider_than_the_tag_is_e0042`.
+    #[test]
+    fn over_wide_enum_discriminants_are_e0042_and_never_a_wrap() {
+        let wide = "enum Wide { A = 340282366920938463463374607431768211456, B, C }";
+        assert_eq!(errors(wide), vec!["E-0042"], "只该报 A 那一条，B/C 的续号不得级联：{:?}", codes(wide));
+        let title = diags(wide).into_iter().find(|(c, _)| c == "E-0042").map(|(_, t)| t).expect("E-0042");
+        assert!(title.contains("340282366920938463463374607431768211456"), "诊断要带上写下的数字本身：{title}");
+
+        let wrap = "enum Fits { A = 18446744073709551616, B }";
+        assert_eq!(errors(wrap), vec!["E-0042"], "2^64 从前在收集时就 as u64 回绕成 0，且全程 0 诊断");
+
+        clean("enum E { A = 3, B, C = 10 }");
+        clean("enum Tag { A = 4294967296, B }");
+        // `u64::MAX` is collectible at stage [4] but used to overflow the `disc + 1` continuation in
+        // debug builds; stage [7] is the one that rejects it as a `uint32_t` tag.
+        clean("enum Max { A = 18446744073709551615, B }");
     }
 
     // ------------------------------------------------------------- §4.2 no implicit conversion

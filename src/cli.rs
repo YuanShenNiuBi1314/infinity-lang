@@ -3618,6 +3618,29 @@ fn main() { }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// BACKLOG **F10**/**F51** 的端到端那一半：`infy check` 走的这条链（`check_verdict` = 阶段 [1]-[5]）
+    /// 必须把两个超宽判别式都拦下来。修前实测：`A = 2^64` 在阶段 [4] `as u64` 回绕成 0、
+    /// `A = 2^128` 在解析器就变成"没写判别式"，两条都是 0 诊断 / exit 0。
+    #[test]
+    fn over_wide_discriminants_stop_check_instead_of_wrapping() {
+        let dir = scratch_module(
+            "cli-f10-disc",
+            "",
+            "#![infy_version = \"2.0\"]\n\npackage embed\n\nenum Wide { A = 340282366920938463463374607431768211456, B, C }\n\
+             enum Fits { A = 18446744073709551616, B }\n\nfn main() { }\n",
+        );
+        let v = check_verdict(&dir, &Scope::default()).expect("module loads");
+        let es: Vec<String> = v.codes.iter().filter(|c| c.starts_with("E-")).cloned().collect();
+        assert_eq!(es, vec!["E-0042", "E-0042"], "两个超宽判别式各一条：{}", v.rendered);
+        assert!(
+            v.rendered.contains("340282366920938463463374607431768211456"),
+            "渲染里要看得见写下的数字本身：{}",
+            v.rendered
+        );
+        assert_eq!(v.exit, exit::DIAGNOSED, "超宽判别式不许被判成通过");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // --------------------------------------------------------------- §13.4 F5：目录参数与选项值
 
     /// `run()`'s `rest` (the argv without the program name) — what [`split_positional`] reads.

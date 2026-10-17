@@ -977,9 +977,11 @@ impl<'a> P<'a> {
             // shape an earlier revision of this arm also named was never produced here, and
             // matching only that one silently turned every `A = 3` into a bare `A`.
             match &e.kind {
-                // `value: None` means the literal is wider than `u128` — §2.8 makes that sema's
-                // range error, so the token is not reported twice here.
-                ExprKind::Lit(Lit::Int(i)) => disc = i.value,
+                // The literal is kept whole. Storing only `i.value` made a discriminant wider than
+                // `u128` (`value: None`) the same AST as "no `= …` written", so `A = 2^128` vanished
+                // and `check`/`build` reported nothing (BACKLOG F51); §2.8 makes the width stage
+                // [4]'s range error, so the parser itself still reports neither.
+                ExprKind::Lit(Lit::Int(i)) => disc = Some(Discriminant { lit: i.clone(), span: e.span }),
                 _ => self.syntax_err(&t, "枚举判别式的整数字面量（§4.1）"),
             }
         }
@@ -2905,7 +2907,7 @@ enum E { A = 3, B, C = 10 }
 ");
         assert!(codes.is_empty(), "{codes:?}");
         let discs = match &ast.items[0].kind {
-            ItemKind::Enum { variants, .. } => variants.iter().map(|v| v.disc).collect::<Vec<_>>(),
+            ItemKind::Enum { variants, .. } => variants.iter().map(|v| v.disc.as_ref().and_then(|d| d.value())).collect::<Vec<_>>(),
             _ => panic!("expected enum"),
         };
         assert_eq!(discs, vec![Some(3), None, Some(10)]);
@@ -2966,7 +2968,7 @@ enum E { A = yes }
         let (ast, codes) = parse_str("package main\n\n#[align(16)]\nenum E { A = 0x1F }\nfn g(a: [u32; 4]) { }\n");
         assert!(codes.is_empty(), "{codes:?}");
         let ItemKind::Enum { variants, .. } = &ast.items[0].kind else { panic!("enum expected") };
-        assert_eq!(variants[0].disc, Some(31), "hex discriminant reaches Variant::disc");
+        assert_eq!(variants[0].disc.as_ref().and_then(|d| d.value()), Some(31), "hex discriminant reaches Variant::disc");
         assert!(
             matches!(&ast.items[0].attrs[0].positional[0], AttrValue::Int(16)),
             "{:?}",
@@ -2978,6 +2980,26 @@ enum E { A = yes }
             ExprKind::Lit(Lit::Int(i)) => assert_eq!((i.digits.as_str(), i.value), ("4", Some(4))),
             other => panic!("array length must be ExprKind::Lit(Lit::Int(..)), got {other:?}"),
         }
+    }
+
+    /// BACKLOG **F51**: a discriminant wider than `u128` must stay recorded as **written**.
+    /// `variant()` used to store only `i.value`, and `value: None` is exactly how the lexer spells
+    /// "does not fit `u128`" — so `A = 2^128` and a bare `A` collapsed into one AST shape, the §2.8
+    /// range check had nothing to read, and `enum Wide { A = 2^128, B, C }` quietly meant
+    /// `A = 0, B = 1, C = 2` with `check`/`build` both exiting 0.
+    #[test]
+    fn a_discriminant_wider_than_u128_is_still_recorded_as_written() {
+        let digits = "340282366920938463463374607431768211456";
+        let text = format!("package main\n\nenum Wide {{ A = {digits}, B, C }}\n");
+        let (ast, codes) = parse_str(&text);
+        assert!(codes.is_empty(), "{codes:?}");
+        let ItemKind::Enum { variants, .. } = &ast.items[0].kind else { panic!("enum expected") };
+        assert!(variants[1].disc.is_none(), "B 没有写判别式，必须与 A 是不同的形状");
+        let d = variants[0].disc.as_ref().expect("A 的判别式不能凭空消失");
+        assert_eq!(d.value(), None, "宽于 u128 = 没有值，但不是没有写");
+        assert_eq!(d.lit.digits, digits);
+        assert_eq!(d.span.start as usize, text.find(digits).expect("digits in the source"), "诊断坐标要指得住字面量本身");
+        assert_eq!(d.span.file, variants[0].span.file);
     }
 
     #[test]

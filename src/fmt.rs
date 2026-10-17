@@ -63,7 +63,7 @@ use crate::diag::{Diagnostic, Handler, Phase};
 use crate::lexer;
 use crate::parser;
 use crate::span::{FileId, SourceFile, Sources, Span};
-use crate::token::{Comment, CommentKind, Delim, Kind, Lit, Punct, Tok, Tree};
+use crate::token::{Comment, CommentKind, Delim, IntLit, Kind, Lit, Punct, Tok, Tree};
 
 // --------------------------------------------------------------------------------------------
 // §9.5 rule 1 + rule 14: options. There is no other configuration surface.
@@ -3122,17 +3122,30 @@ fn leaf_text(tk: &Tok) -> String {
     }
 }
 
+/// An `IntLit` reprinted as written: radix prefix, underscores-stripped digits, suffix.
+fn int_lit_text(i: &IntLit) -> String {
+    let pre = match i.radix {
+        crate::token::Radix::Hex => "0x",
+        crate::token::Radix::Oct => "0o",
+        crate::token::Radix::Bin => "0b",
+        crate::token::Radix::Dec => "",
+    };
+    format!("{pre}{}{}", i.digits, i.suffix.clone().unwrap_or_default())
+}
+
+/// A §4.1 discriminant as one number of text. The decimal value is canonical whenever the literal
+/// fits `u128` (today's behaviour); a literal wider than `u128` has no value to print, so it is
+/// reprinted as written instead of dropped — dropping it is what made `A = 2^128` parse as `A`.
+fn disc_text(d: &Discriminant) -> String {
+    match d.value() {
+        Some(v) => format!("{v}"),
+        None => int_lit_text(&d.lit),
+    }
+}
+
 fn lit_text(l: &Lit) -> String {
     match l {
-        Lit::Int(i) => {
-            let pre = match i.radix {
-                crate::token::Radix::Hex => "0x",
-                crate::token::Radix::Oct => "0o",
-                crate::token::Radix::Bin => "0b",
-                crate::token::Radix::Dec => "",
-            };
-            format!("{pre}{}{}", i.digits, i.suffix.clone().unwrap_or_default())
-        }
+        Lit::Int(i) => int_lit_text(i),
         Lit::Float(f) => format!(
             "{}{}{}",
             f.mantissa,
@@ -3992,8 +4005,8 @@ fn fp_variant(v: &Variant, s: &mut String) {
     for f in &v.struct_fields {
         fp_field(f, s);
     }
-    if let Some(d) = v.disc {
-        s.push_str(&format!("={d}"));
+    if let Some(d) = &v.disc {
+        s.push_str(&format!("={}", disc_text(d)));
     }
     s.push(']');
 }
@@ -4193,8 +4206,8 @@ impl<'a> Printer<'a> {
             let list = self.delimited_list("{", nodes, "}", low, list_end, true);
             v.push(Doc::Cat(vec![Doc::Text(" ".to_string()), list]));
         }
-        if let Some(d) = var.disc {
-            v.push(Doc::Text(format!(" = {d}")));
+        if let Some(d) = &var.disc {
+            v.push(Doc::Text(format!(" = {}", disc_text(d))));
         }
         Doc::Cat(v)
     }
@@ -5240,6 +5253,23 @@ fn a() {}\n";
         assert!(codes.contains(&"W-1030".to_string()), "{codes:?}");
     }
 
+    /// BACKLOG **F51**: printing must not drop what it cannot evaluate. A discriminant wider than
+    /// `u128` has no value, so it is reprinted as written. Before the parser kept the literal,
+    /// `variant()` stored `None` — the same shape as "nothing written" — and the formatter emitted
+    /// the variant with no ` = …` at all: a source-changing rewrite, not a formatting choice.
+    #[test]
+    fn a_discriminant_wider_than_u128_is_reprinted_not_dropped() {
+        let digits = "340282366920938463463374607431768211456";
+        let out = idempotent(&hdr(&format!("pub enum Wide {{ A = {digits}, B, C }}\n")));
+        assert!(out.contains(digits), "格式化把超宽判别式整个丢了：\n{out}");
+        assert!(out.contains("A ="), "…连 ` = ` 一起没了：\n{out}");
+
+        // The other branch: `2^128 - 1` does fit `u128`, so it keeps today's canonical decimal.
+        let max = "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
+        let out = idempotent(&hdr(&format!("pub enum Hex {{ A = {max} }}\n")));
+        assert!(out.contains("340282366920938463463374607431768211455"), "有值的判别式仍按十进制规范形打印：\n{out}");
+    }
+
     // ---------------------------------------------------------------------------- corpus
 
     fn corpus() -> Vec<(String, String)> {
@@ -5248,6 +5278,7 @@ fn a() {}\n";
             ("fn", "package t\n\nfn a() {}\n"),
             ("struct", "package t\n\npub struct J {\n    pub id: u32,\n    pub src: String,\n}\n"),
             ("enum", "package t\n\npub enum Why { A, B(u32), C { x: u32 } }\n"),
+            ("enum-disc", "package t\n\npub enum Code { A = 0x1F, B = 340282366920938463463374607431768211456, C }\n"),
             ("trait+impl", "package t\n\npub trait Run {\n    fn run(&mut self) -> u32;\n}\n\nimpl Run for J {\n    fn run(&mut self) -> u32 { 0 }\n}\n"),
             ("match", "package t\n\nfn d(j: &J) -> String {\n    match (j.phase) {\n        Phase::Fetch => \"a\",\n        Phase::Compile => \"b\",\n    }\n}\n"),
             ("chain", "package t\n\nchain P {\n    label begin:\n    spawn();\n    {\n        goto(\"begin\");\n    }\n}\n"),

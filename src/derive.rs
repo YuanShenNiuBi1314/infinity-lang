@@ -1377,7 +1377,7 @@ fn gen_hash(agg: &Agg) -> Option<Item> {
         AggKind::Enum(vs) => {
             let mut arms: Vec<MatchArm> = Vec::new();
             for (vi, v) in vs.iter().enumerate() {
-                let disc = v.disc.unwrap_or(vi as u128) as u32;
+                let disc = v.disc.as_ref().and_then(|d| d.value()).unwrap_or(vi as u128) as u32;
                 let (pat, binds) = variant_bind_pattern(agg.name, v, span);
                 let mut inner: Vec<Stmt> = Vec::new();
                 inner.push(hash_feed_disc(disc, span));
