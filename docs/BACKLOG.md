@@ -1069,7 +1069,8 @@
       **本轮量出三条未修缺陷，只登记**：**F49**（派生节点共用宿主 span ⇒ `ty_of` 键碰撞）、**F50**
       （`infy init <path>` 忽略目录部分）、**F51**（宽于 `u128` 的显式判别式被静默降级）。
 
-- [ ] F10 **`sema` 收集枚举判别式时 `u128 as u64` 截断**（C1 轮定位，未改）：
+- [x] F10 **`sema` 收集枚举判别式时 `u128 as u64` 截断**（C1 轮定位；**F10/F51 轮（2026-10-17）已改，
+      交付提交 `50c87b4`**）：
       `Variant.disc` 是 `Option<u128>`，`sema.rs:625` 直接 `as u64`（F9 轮把锚点从条目原文的 `616`
       校正到现值 —— 那一带被 F9 删了两条臂），所以宽于 `u64` 的字面量**先回绕**才交给 HIR，
       D-25 的 `u32` 容纳检查拦不住已回绕的值。
@@ -1078,6 +1079,17 @@
       且无人报告；同文件的 `A = 2^128` 是另一条根因（parser 就丢了，见 **F51**）。
       验收：宽于 `u64` 的判别式报 `E-0042`（而不是回绕）；成对断言 `A = 4294967296` → `E-0042`（HIR，C1 已有）
       与 `A = 2^64` → `E-0042`（sema，待补）。
+      **F10/F51 轮（2026-10-17）验收本体已补齐**：阶段 [4] 不再 `as u64`，而是对"装不进收集宽度 `u64`"与
+      "连 `u128` 都放不下"两种各打一条 `E-0042`，然后按隐式续号继续收集（诊断是阻断的，继续只为让同文件其余
+      声明照常被检查）。`A = 2^64` 实测从 **exit 0 / 0 诊断** 变成 **exit 2**（渲染 = `:7:17`「字面量超出
+      可表示范围：18446744073709551616」）；成对的另一半（`A = 2^32` → 阶段 [7]）仍由 C1 那条
+      `hir::tests::a_discriminant_wider_than_the_tag_is_e0042` 钉，本条新增
+      `sema::tests::over_wide_enum_discriminants_are_e0042_and_never_a_wrap`（码集逐字相等 + 续号不级联）与
+      `cli::tests::over_wide_discriminants_stop_check_instead_of_wrapping`（端到端 exit 2）。**顺带收掉一个
+      本轮才可达的 panic**：`next_disc = disc + 1` 在 `A = u64::MAX`（阶段 [4] 合法、只有 [7] 会拒）上
+      debug 构建算术溢出 ⇒ 改 `saturating_add(1)`，实测 `f10b` = `check ok — 1 file(s), 0 error(s)` 而
+      `infy build` = **exit 6**、阶段 [7] 对 `Max::A`/`Max::B` 各报一条。裁定 = 偏差 **D-52(b)(c)**；
+      变异探针 M1（换回 `x as u64`）实测让 `sema`+`cli` 两条红并已复原。
 
 - [ ] F11 **`[T; N]` 的 N 不是字面量时被 `unwrap_or(0)` 静默当成长 0**（C1 轮定位，未改）：
       `sema.rs:439` 是 `let n = self.const_eval_usize(len).unwrap_or(0);`，而 `const_eval_usize` 在 §2.12 闭集之外返回 `None`
@@ -1474,7 +1486,8 @@
       成对断言 = 在临时父目录下 init 一个子目录 ⇒ 仓库根零新增、`<父>/<子>/MODULE.infy.toml` 存在，
       且清单里的 `path` 与真实位置逐字相同。§13.4 未给 `init` 的路径语义 ⇒ 裁定写进 `docs/spec-deviations.md`。
 
-- [ ] F51 **宽于 `u128` 的显式枚举判别式被 parser 静默降级成"无显式判别式"，`check` 与 `build` 全程 0 诊断**（F9 轮实测）：
+- [x] F51 **宽于 `u128` 的显式枚举判别式被 parser 静默降级成"无显式判别式"，`check` 与 `build` 全程 0 诊断**
+      （F9 轮实测；**F10/F51 轮（2026-10-17）已修，交付提交 `50c87b4`**）：
       `parser::variant()` 只把 `i.value: Option<u128>` 存进 `Variant::disc`（字面量本体被丢），
       而 `value: None` 正是词法器"放不下 `u128`"的表示（`token.rs:160`）⇒ `A = 2^128` 与"没写 `= …`"
       在 AST 里**同一个形状**。代码注释说"`value: None` 交给 sema 判范围"，但表达式已经从结构体里丢了，
@@ -1485,9 +1498,60 @@
       **F10** 的 `u128 as u64` 回绕（`2^64 as u64 == 0`），两条同族但根因不同层。
       验收：`A = 2^128` 报 `E-0042`（§2.8 的字面量范围），成对断言 = `A = 2^64` 也报 `E-0042` 而不是回绕成 0
       （后半正是 F10 的验收，动手时两条一起做、按层分配提交）。
+      **F10/F51 轮（2026-10-17）已修**：形状合并是根因，所以修在形状上而不是判据上 —— `ast::Variant::disc`
+      从 `Option<u128>` 改成 `Option<ast::Discriminant>`（`{ lit: token::IntLit, span: Span }`，保存**写下来的
+      字面量本身**），"有没有写"从此只由 `disc.is_some()` 回答，`lit.value` 的 `None` 只表示"放不下 `u128`"；
+      读取口只有一个 `Discriminant::value()`，`sema`/`derive`/`fmt` 三处共用（F9 那条经验的反方向：
+      **同一形状表示两个构造 ⇒ 判据同样必漂**，而且这次漂在唯一读取口上，谁都没有诊断可打）。
+      实测 `enum Wide { A = 2^128, B, C }` ⇒ `infy check` 与 `infy build` 都 **exit 2**、渲染 = `:5:17`
+      「字面量超出 i128：340282366920938463463374607431768211456」且 caret 宽 **39** 列 = 数字本身（修前两条命令
+      全 exit 0）。**格式化面同一族**：修前那支 ` = …` 会被整段删掉（`fmt` 只认 `Some(u128)`）⇒ 现在没值就打
+      写下来的形态，有值照旧打十进制规范形；锁点 = `fmt::tests::a_discriminant_wider_than_u128_is_reprinted_not_dropped`
+      + corpus 新增 `enum-disc` 行（同过 §9.5 规则 12 幂等与规则 13 指纹）。AST 侧锁点 =
+      `parser::tests::a_discriminant_wider_than_u128_is_still_recorded_as_written`（`is_some()` 而 `value() == None`
+      且 `Span.start` 逐字节对上字面量起点）。变异探针 **M2**（把 `variant()` 换回 `i.value.map(..)`，即复刻本条的
+      形状合并）实测让 **`parser`/`fmt`/`sema`/`cli` 四层同时红**，已复原。裁定 = 偏差 **D-52(a)(d)**；
+      `derive` 那层的 `as u32` 保持不变，理由是可达性而不是等价（F35 仍挡着所有 derive）⇒ D-52(e) 加了措辞红线。
 
 
 ## 2. 当前指针
+
+> **F10/F51 轮收尾（2026-10-17）：F10 与 F51 双双勾 `[x]`，本段取代下一段** —— 交付提交 **`50c87b4`**
+> （`src/ast.rs` 新增 `Discriminant { lit, span }` 取代 `Option<u128>` + `parser::variant()` 保存**写下来的字面量**
+> + `sema` 的收集改检查并按层报 `E-0042`（含续号 `saturating_add`）+ `derive`/`fmt` 走同一个读取口 + 四条新锁）。
+> **根因一句话**：同一形状表示两个构造（`disc = None` 同时是"没写 `= …`"与"放不下 `u128`"）+ 唯一读取口自己做截断
+> （`v.disc.unwrap_or(next_disc as u128) as u64`）⇒ 两层各自把信息丢掉、全程 0 诊断（F9 那条经验的**反方向**）。
+> 裁定 = 偏差 **D-52(a)–(e)**；`docs/spec-deviations.md` 顺带更正两处过期声称（D-24 第 3 点的 `Option<u128>` 形状、
+> D-25 把这条缺陷写成"BACKLOG **F11**"的编号笔误 —— 那是 **F10**，F11 是 `[T; N]` 长度那一族）。
+> **新基线（本机实测，`-j 1` 连跑两次同数）**：`cargo test --offline --lib` **555 passed / 0 failed**
+> （551 + 4：`cli` 46→**47** · `fmt` 40→**41** · `parser` 10→**11** · `sema` 23→**24**）、全目标 = 555 + bin 0 + doc 0、
+> `cargo check --offline --lib` **0 error / 0 warning**、`cargo build --offline --release` exit 0、
+> tour 的 `check|build|run|test` + `--verify-reproducible` + `fmt --check examples/tour` 全 exit **0**、
+> **C11 12512 / 产物 200644 / build-id `d7c4408e…370015` / 节点表 7-8-9-10-16-20 四组一字未动**（没碰 tour 字节也没碰
+> `infy_rt.c`；且 tour 那两个 `enum` 都没有显式判别式 ⇒ `fmt` 的改动动不到它）、`infy conformance --report` 仍
+> **83 = 77/0/6 ⇒ exit 1**（92.8% · 缺口 2217）、C 侧零改动四条链未退化（两份 `-c` 各 stderr **0 字节**、
+> rt **32340/0**、两条 IFBC 各 **180/180** + `cmp` 无差异）。实测行为落成 `docs/coverage.md` **P34**。
+> **开头清掉的债 + 关闭的判据**：`push-branch.ps1` 第 **1** 次 TRY 即脚本 exit **0** ⇒ 远端 = `5fba257` = 本地 HEAD、
+> 现算欠账 **0**（cron-32 收尾留的 2 笔清完，没改 git 配置也没换凭据）；**F9 的远端判据同时关闭** = run **#14**
+> （`38994727293`，head `344b889`，树含 `83e7dec` —— `git merge-base --is-ancestor` rc **0**）= **success、12 步逐条
+> success**，`gh run view … --log`（979 行）实录 = 步 7 **551 passed / 0 failed**、步 10 **32340 assertions, 0 failures**、
+> 步 11 **180 asserts / 180 pass**。
+> **本轮新增的常驻面（下一轮直接用）**：`ast::Discriminant::value()` 是判别式的**唯一**读取口（`sema`/`derive`/`fmt`
+> 三处共用，别再写第四份判据）；`fmt::disc_text` 与它下面的 `fmt::int_lit_text`（`lit_text` 的 `Int` 臂现在委托后者）；
+> 阶段 [4] 的 `E-0042` 两条标题分别是「字面量超出 i128：…」与「字面量超出可表示范围：…」，阶段 [7] 那句仍是
+> 「超出标签类型 u32 的范围」⇒ 同一份语料 `A = u64::MAX` 走 [7] 而 `A = 2^64` 走 [4]，两条命令的 exit 分别是 6 与 2。
+> **下一轮 = ①** 现算欠账补推 + 回查覆盖本轮交付树的那条 run（**步 7 现在应打 555 passed**；`cancelled` 既不是红也不是绿，
+> 红了先分辨是不是那四条新锁，**不许**为此放宽断言；一次交付只推一笔）。**②** §1 第一个 `[ ]` = **F11**
+> （`sema.rs:448` 的 `const_eval_usize(len).unwrap_or(0)` ⇒ `[u32; 常量]` 静默变成长 0；按 §2.12 求值成功或显式
+> `E-0131`）。**本轮顺手量到 F11 的邻面两条**，动手时一起核、别只改一处：`sema.rs:1665`（`[x; N]` 重复表达式那一支）
+> 同样 `unwrap_or(0)`，但它**已经**在 `n.is_none()` 时发 `E-0060` ⇒ 是"响过之后取 0"，与 448 的"静默取 0"不同形；
+> `hir.rs:1198` 的 `i.value.map(|v| v as u64)` 则把"放不下 `u128` 的数组长度"折成 `None`（与本轮 D-52(a) 同族的形状漏法）。
+> F48 仍排在它们之后，且动手前要先用探针量"第 2 层 host 调用是否卡死"（Windows 没有递归 mutex 的现成路）。
+> **卫生欠账原地不动**：`btrack.rs:4739` 的 `fn dump_of` 零调用点（只在 `cfg(test)` 里 ⇒ `check --lib` 口径看不见）、
+> `codegen::emit_driver` 在 `chains.is_empty()` 时先 `return 1` 的入口顺序。
+> **措辞红线加一条（本轮）**：不许说"派生体的判别式宽度已按 D-52(b) 校验过" —— `derive` 那层的 `as u32` 保持不变的
+> 理由是**可达性**（F35 挡着所有 derive）而不是等价。既有红线不变：覆盖 83/2300 ⇒ 任何文档不得声称「INFY v2.0 兼容」；
+> "两侧装载期校验等价"仍不许讲（**F26** 前半，清单 = D-42 (a)–(e)）；不许说"派生代码的类型标注可信"（**F49** 未修）。
 
 > **F9 轮收尾（2026-10-17）：F9 勾 `[x]`，本段取代下一段** —— 交付提交 **`83e7dec`**（`src/ast.rs` 删变体 +
 > `derive.rs` 的 `lit_u` 换形状 + `parser`/`sema`/`hir`/`fmt`/`codegen` 五处的判据收拢 + 三条新锁 +
