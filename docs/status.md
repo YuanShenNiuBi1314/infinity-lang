@@ -44,12 +44,12 @@ check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)   # exit 0
 $ infy build examples/tour
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)
 codegen ok — 12512 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
-artifact ok — 199975 byte(s) 写到 examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe（§7.4：宿主镜像 199173 + 段 blob 738 + 段尾 64，6 段）
-  build-id d7c4408e84614ac24fe0475c31e1af24c9ab27c2790c605d9e371b4fac370015   # exit 0（C3 轮起阶段 [9] 已落地；**F6 轮换值**：D-17 把 tour 规范化 ⇒ dirhash 变 ⇒ build-id 变，产物字节仍 199975）
+artifact ok — 200644 byte(s) 写到 examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe（§7.4：宿主镜像 199842 + 段 blob 738 + 段尾 64，6 段）
+  build-id d7c4408e84614ac24fe0475c31e1af24c9ab27c2790c605d9e371b4fac370015   # exit 0（C3 轮起阶段 [9] 已落地；**F6 轮换值** = D-17 把 tour 规范化 ⇒ dirhash 变；**F8 轮未变** —— build-id 的九类输入里没有宿主镜像，而产物字节恰恰因为 F8 改了 `infy_rt.c` 才 199975 → 200644）
 $ infy run examples/tour                                        # C4 轮起：[7]-[9] 建到临时目录 + 立即执行
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)
 codegen ok — 12512 byte(s) of C11 written to %TEMP%\infy-run-<pid>-<n>\ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
-artifact ok — 199975 byte(s) 写到 %TEMP%\infy-run-<pid>-<n>\ci.exe（…）       # 程序的 stdout/stderr 逐字节转发
+artifact ok — 200644 byte(s) 写到 %TEMP%\infy-run-<pid>-<n>\ci.exe（…）       # 程序的 stdout/stderr 逐字节转发
 run ok — 程序退出码 0（stdout 0 字节 / stderr 0 字节，§13.4）                  # 这行在 stderr
 $ echo $?
 0                                                                # 程序 stdout 为空的原因见 BACKLOG F19：没有任何 INFY 构造能写 stdout
@@ -91,7 +91,7 @@ $ infy check target/scratch/cli-test-green; infy test target/scratch/cli-test-gr
 check ok — 1 file(s), 0 error(s), 0 warning(s), 0 notice(s)       # §5.9：mod_test.infy 不进普通构建
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)       # 同一 module，infy test 看得见它
 $ infy build examples/tour --verify-reproducible
-verify-reproducible ok — 两个独立构建目录产物字节相同（199975 字节）            # exit 0，§7.3 第 3 项
+verify-reproducible ok — 两个独立构建目录产物字节相同（200644 字节）            # exit 0，§7.3 第 3 项
 $ infy build examples/tour --cc /no/such/cc
 error: E-0602 · … 无法启动 …（§7.6.2：A 轨工具链缺失或未注册，绝不静默跳过链接）  # exit 6
 $ infy artifact info examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe --nodes
@@ -107,7 +107,7 @@ $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
       runtime/infy_rt.c runtime/test_ifbc.c -o ifbc_real && ./ifbc_real
 IFBC harness: 180 asserts, 180 pass, 0 FAIL      # exit 0，0 error / 0 warning；B2 轮真实链生产 infy_rt.c，stdout 与上一行逐字节相同
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && (cd target/scratch && ./rt_tests)
-32335 assertions, 0 failures                     # exit 0，0 error / 0 warning；链的是生产 infy_rt.c；C3 轮 +32（Rust 写 ↔ C 读的夹具锁 + D-33）
+32340 assertions, 0 failures                     # exit 0，0 error / 0 warning；链的是生产 infy_rt.c；C3 轮 +32（Rust 写 ↔ C 读的夹具锁 + D-33）；F8 轮 +5 = §11.1 host 调用跨 panic 的回滚（4 条 CK_EQ + 1 条 expect_panic）
 $ gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c
 （无输出）                                        # exit 0，0 warning（B3 的验收命令；三项语义已于 B3 轮落地，见下文 B3 一节）
 $ infy fmt --check examples/tour
@@ -132,7 +132,7 @@ $ infy conformance --update-golden                 # §12.4 要求显式授权�
 error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权（`--i-know-this-is-breaking`），因为改动黄金文件等于改语义。
 ```
 
-> **一行口径（F6 轮，2026-10-17）**：`infy fmt --check examples/tour` 从本轮起 **exit 0**（偏差 **D-17** 已裁 = §9.5 胜、样例侧改写到规范形态）。下文各轮小节里的 `exit 2`（F6 未裁决）、生成 C11 **12513** 字节、`build-id 4d8250b5…55ba`、节点表行号 **8/9/10/11/16/19** 全是**裁决前那棵树**的当时实测值，保留为历史；现值 = **12512** / **`d7c4408e…370015`** / **7/8/9/10/16/20**（产物 199975 与段 blob 738 没动）。这三组数只随 tour 的字节动 —— 谁把规范化回滚掉，CI 步 12 的门禁与 `fmt::tests::the_tour_sources_are_the_9_5_fixpoint` 会同时红，不会静默。
+> **一行口径（F6 轮，2026-10-17）**：`infy fmt --check examples/tour` 从本轮起 **exit 0**（偏差 **D-17** 已裁 = §9.5 胜、样例侧改写到规范形态）。下文各轮小节里的 `exit 2`（F6 未裁决）、生成 C11 **12513** 字节、`build-id 4d8250b5…55ba`、节点表行号 **8/9/10/11/16/19** 全是**裁决前那棵树**的当时实测值，保留为历史；现值 = **12512** / **`d7c4408e…370015`** / **7/8/9/10/16/20**（产物 199975 与段 blob 738 没动）。这三组数只随 tour 的字节动。**F8 轮再加一句口径**：产物字节是**宿主镜像**的函数，`infy_rt.c` 一动它就动 ⇒ 本机现值 **200644**（宿主镜像 199842），而 build-id / C11 / 节点表行号三组没动（它们的输入里没有宿主镜像） —— 谁把规范化回滚掉，CI 步 12 的门禁与 `fmt::tests::the_tour_sources_are_the_9_5_fixpoint` 会同时红，不会静默。
 
 548 项按模块（`cargo test --offline --lib` 逐条分组计数，合计 548；**F7 轮实测**，上一版 541 = F6 轮实测）：
 `lexer` 79 · `derive` 57 · `fmt` **40**（**F6 轮 +1** = `the_tour_sources_are_the_9_5_fixpoint`，把 `examples/tour` 读回来逐字节比它自己的 §9.5 输出） · `cli` **46**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → F2 轮 39 → F4 轮 41 → **F5 轮 46** = `VALUE_OPTS` 的逐项跳值 + 取值点源码回扫 + 三条命令的目录参数本体 + 空目录/缺 module 的显式失败 + `expand --derive` 的显式拒绝） ·
@@ -167,7 +167,7 @@ error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权�
 B 轨 `src/btrack.rs` 的**库内**链路（探针→扫描→降级→本侧装载自检）已于 **D1(1) 轮**跑通并带 23 项单测，**D1(2) 轮**接进 CLI（阶段 [6a]）并把镜像交给 C 侧装载（30 项单测 + `ifbc_py_unit.bin` 夹具）⇒ D1 已勾；
 **D2 轮**再把 §7.8.4 的 `infy ifbc dump|verify` 命令接上（`cli` 20 → **28**，双侧文本第一次在命令层比对）。
 B 轨剩下的缺口在**产物那半边**：阶段 [8] 没有通往 IFBC VM 的调用通道 ⇒ `.inf ifbc` 恒空、含 `@py` 的 module 走不到 [9]（**F29**），§7.7.1 样例本体也被能力表红着拒（**F30**）；
-C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（C3 轮复跑 **32335 断言 / 0 失败**，直接链生产 `infy_rt.c`）；
+C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（**当前口径 32340 断言 / 0 失败**，直接链生产 `infy_rt.c`；C3 轮那次是 32335，F8 轮 +5）；
 `src/host.rs`、`src/doc.rs` 是 1 行占位文件（`src/conformance.rs` 的占位状态在 E1 轮结束，见下文 E1 一节）（`src/artifact.rs` 已于 C3 轮从"不存在"落成 §7.4 容器写入器 + 读取器 + §7.3 build-id，18 项独立单测）（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
 A 轨只落了 `@c` + `cc` + 标量/指针那一半（§7.6.2 工具链注册、§7.6.5 反向导出、§7.6.6 进程隔离未实现 = F32/F33）、`std.net` TLS、`infy lsp` 未实现。
 IFBC 断言（B3 轮 79 → 82，D4(2) 轮 **82 → 146**：合并线格式 + 17 条间隙指令 + Rust 写↔C 读执行的夹具；
@@ -1727,3 +1727,50 @@ span `e0121_reports_the_write_site_and_the_declaration`（`spans.len() == 2`、�
 "Not implemented" 并指名 F47。`check_statics` 的空臂注释也写明"这里刻意沉默，不是这里已经做了"。
 **F43/F44/F45/F46 未动**。**勾掉 F7 之后仍不许说的**：INFY 有数据竞争检测器 —— 本轮做的是 §4.3 的**可达**形状
 （`static mut` 的并发写），读侧竞争、闭包捕获跨焦点、跨链裸 `&mut T` 三面**没有发射点**（D-19 剩余面 ①②③）。
+
+## F8 轮（2026-10-17）：`infy_host_call_event` 的嵌套深度与 `g_host_mu` 在 catch 点一起回滚（交付提交 `9c56b45`）
+
+**改的是 C 运行时，Rust 侧一字未动**。`g_host_nesting` 的 `++` 在取锁之后、`--` 在回调返回之后，被 §4.16 的
+`focus`/`chain` 半径 longjmp 打断时两者一起跳过 ⇒ 该焦点之后**所有** host 调用假报 `R-0902`；同一帧跳过的还有
+`infy_mtx_unlock(&g_host_mu)`，而那把锁是 `AcquireSRWLockExclusive`（非递归）⇒ 真实症状是下一次调用**挂死**。
+形状：`InfyTry` 新增 `host_depth` / `host_lock_depth` 两个**安装期**快照，`infy_rt_catch` 与 `dispatch_node` 两条
+catch 路径都调 `host_call_rollback()`，**只降不升**。为什么是安装期快照而不是让 host 调用去写它所在的那一层 try：
+`infy_panic` 只 longjmp 到当时最内层的 try，而回调体内可能再装更深的 try 点 —— 更深的点必须用它自己的快照，
+否则会把还在飞行中的外层那一层一起清掉。
+
+**harness 的兜底已撤**：`infy_test_set_host_nesting(0)` 那行换成成对断言 `CK_EQ(infy_test_host_nesting(), 0)` +
+`CK_EQ(infy_test_host_lock_depth(), 0)`（新增两个读钩子），并补一个新形状 `fake_event` 的 id 9002 —— 回调体内
+再调 `infy_host_call_event(31337)` 并 panic，**真的跨过带锁的 in-flight 帧**。之后的那一次正常调用
+（`infy_host_call_event(5)`）就是端到端判据：泄漏未修时它要么假报 `R-0902` 要么卡死。
+
+**断言有牙齿的证据**（`scripts/f8-mutation-probe.ps1`，默认干跑、日志 `logs/f8-mutation-probe.log`，副本建在
+`target/scratch/f8mut/` ⇒ 主树不受污染）：control 副本复现 **32340 / 0 failures**；**M1**（去掉两处回滚 = 修前实现）
+→ 3 条 FAIL：`infy_test_host_nesting() == 8, want 0`（两次）+ `host callback panics mid-frame: wanted R-0900, got R-0902`
+⇒ 正是 F8 描述的症状链；**M2**（只回滚计数、不解锁）→ **挂死 60 s 被脚本 `taskkill /F /T` 杀掉**，且**一条 FAIL 都不打**
+⇒ 数字断言钉的是簿记，锁泄漏只能由"下一次调用"这条行为断言抓到（这也是为什么探针必须带超时）。
+
+**新登记 F48**（本轮定位、未修）：`g_host_mu` 持在整个回调期间 + 非递归 ⇒ §11.1 的 host↔INFY 互递归**到不了第 2 层**，
+`R-0902` 在真程序里是空条款，今天唯一能打出它的用例靠 `infy_test_set_host_nesting(8)` **伪造**深度。
+⇒ 措辞红线加一条：**不许说"`R-0902` 的嵌套上限已端到端验证"**。
+
+**`infy_tls_unwinding` 的核查结论**（BACKLOG F8 要求一并核）：**不可达，别再开条**。1→0 悬挂只在 `process_radius_exit()`
+被**测试钩子** `g_exit_hook` longjmp 打断时才出现 —— 生产路径里 `infy_panic` 开头就查该标志（`infy_rt.c:445`）⇒
+解卷期间再 panic 直接 R-0011 + `exit(3)`，进程本来就要终止，残留没有观察者。harness 在 `test_rt.c:357` 显式复位并写明
+同一理由，那是要的形状。
+
+**新基线（本机实测）**：rt harness **32340 assertions / 0 failures**（32335 → +4 条 `CK_EQ` +1 条 `expect_panic`）、
+两条 IFBC 链各 **180/180** 且 stdout `cmp` 无差异、`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 stderr **0 字节**、
+`cargo check --offline --lib` **0 error / 0 warning**、`cargo test --offline --lib` **548 passed / 0 failed**、
+tour 的 `check|build|run|test` + `--verify-reproducible` 全 exit **0**、`infy conformance --report` 仍 **83 = 77/0/6 ⇒ exit 1**、
+`infy fmt --check examples/tour` exit **0**。
+
+**产物口径变了，而且这是常理不是意外**：**199975 → 200644 字节**（宿主镜像 199173 → 199842；段 blob 738 + 段尾 64 未变）——
+`infy_rt.c` 静态链进镜像，**改 C 运行时必然动产物字节**。而生成 C11 **12512**、`build-id` **`d7c4408e…370015`**、
+§8.4 节点表 **7/8/9/10/16/20** 三组**没动**：build-id 的九类输入里没有宿主镜像，那三组只随 tour 源码字节动
+（`--verify-reproducible` 两个独立构建目录仍逐字节相同 = 200644）。
+
+**本轮的一条工具卫生教训（写进经验库）**：批量改文档的脚本用 `io.open(..., encoding="utf-8")` 读写 ⇒ Python 的
+universal newlines 把 `docs/status.md` 里**作为内容存在**的 3 个裸 `CR` 换成 `LF`，那一行被拆成多行（`git diff` 只看
+行数看不出来，因为 autocrlf 把行尾归一化了）。修法 = **字节读写**（`rb`/`wb`）+ 每条规则校验"期望命中数"+ 写前
+断言 CR/LF 计数不变 + 写后断言旧锚点已消失，全部 staged 在任何写盘之前。第二次跑还暴露了 `re.sub` 的替换串会被
+当成转义模板（锚点里有 `%TEMP%\infy-run-…` 的反斜杠）⇒ 替换串用 lambda 承载。

@@ -1022,14 +1022,25 @@
       ④ `E-1031`（`static mut` 读写缺 `unsafe`）仍无发射点，实测 `infy check` 对一个链体内写 `static mut` 的
       module 给 **0 error / exit 0** ⇒ 新登记 **F47**（含 `src/borrow.rs` 模块文档此前的假声称，本轮已改为"未实现"）。
 
-- [ ] F8 **host 调用的嵌套计数在 panic 跨越边界时不回滚**（B1 轮补 `runtime/test_rt.c` 时确认，未改实现）：
+- [x] F8 **host 调用的嵌套计数在 panic 跨越边界时不回滚**（B1 轮确认；**F8 轮（2026-10-17）已修，交付提交 `9c56b45`**）：
       `runtime/infy_rt.c:2654` 的 `static int32_t g_host_nesting` 是普通全局，`infy_host_call_event` 在
       `if (g_host_nesting >= 8) infy_panic(R_HOST_NESTING…)` 之后才 `++`、返回前 `--`；被 `§4.16` 的
       `focus`/`chain` 半径 longjmp 出去时，`--` 被跳过，于是**该焦点之后所有焦点的 host 调用都会假报 `R-0902`**。
-      harness 目前只能在 catch 之后手工 `infy_test_set_host_nesting(0)` 兜住（`test_rt.c` 的 `e_call_deep` 已注明"尾部复位是死代码"）。
+      harness 此前只能在 catch 之后手工 `infy_test_set_host_nesting(0)` 兜住（`test_rt.c` 的 `e_call_deep` 已注明"尾部复位是死代码"）。
       验收：把深度存进 `InfyTry`（`infy_rt_internal.h`）并在两条 catch 路径（`infy_rt_catch`、`dispatch_node` 的 `setjmp`）上恢复，
       再给 `test_rt.c` 加一对断言：深度 8 的调用 panic 被捕获后，下一次正常 `infy_host_call_event` 必须成功返回而不是 `R-0902`。
       同类风险请一并核：`infy_tls_unwinding`（`drain_scope`/`scope_end_common` 里 1→0 的赋值若被 panic 打断同样悬挂）。
+      **落地**：`InfyTry` 快照 `host_depth` + `host_lock_depth`（新增，等于"本 catch 点安装时 `g_host_mu` 的在手上层数"），
+      两条 catch 路径都调 `host_call_rollback()` ⇒ 只降不升；`g_host_nesting++` 与 `infy_mtx_lock` 的配对复位为
+      `g_host_lock_depth++/--`。**本轮同时发现回滚的第二半是锁不是计数**：`--` 被跳过时 `g_host_mu` 也被泄漏，
+      而下一次 host 调用会卡在非递归的 SRW 锁上（不是假报 `R-0902` 而是挂死）⇒ 二者一起回滚。
+      兜底 `infy_test_set_host_nesting(0)` 那行**已撤**，改成 `CK_EQ(infy_test_host_nesting(), 0)` +
+      `CK_EQ(infy_test_host_lock_depth(), 0)` 成对断言，并新增"host 体内再调 runtime 并 panic"这一形状
+      （`fake_event` 的 id 9002）⇒ 真正跨过带锁的 in-flight 帧。rt **32335 → 32340**（+4 CK_EQ +1 expect_panic）。
+      **`infy_tls_unwinding` 的核查结论（不是缺陷，别再开一条）**：1→0 悬挂只在 `process_radius_exit()` 被
+      **测试钩子** `g_exit_hook` longjmp 打断时才可达 —— 生产路径里 `infy_panic` 先看该标志（`infy_rt.c:445`）
+      ⇒ 解卷期间再 panic 直接 R-0011 + `exit(3)`，进程本来就要终止，残留无意义；harness 在 `test_rt.c:357`
+      显式复位并写明这个理由，已是要的形状。**真正的同类风险另有其条 ⇒ 新登记 F48**。
 
 - [ ] F9 **`ExprKind::Int(IntLit)` 这一形状从不由 parser 产生**（C1 轮定位；**死臂本身已由 F2 轮删除**）：
       `parser::primary()` 原先在 `Kind::Lit(l)`（匹配所有字面量）之后还挂着一条 `Kind::Lit(Lit::Int(i))` 臂，永不可达
@@ -1398,9 +1409,62 @@
       注意别把它并进 `E-0121`：`E-0121` 管"多焦点写同一绑定"（竞争），`E-1031` 管"未经 `unsafe` 触碰全局可变"
       （责任声明），规范给的是两个格子。
 
+- [ ] F48 **`g_host_mu` 非递归 ⇒ §11.1 的 host↔INFY 互递归到不了第 2 层，`R-0902` 在真程序里不可达**（F8 轮定位）：
+      `infy_host_call_event` 把 `g_host_mu` 持在**被调回调的整个期间**（`infy_rt.c:2810` 的
+      `infy_mtx_lock` → `g_host.call_native_event(…)` → `infy_mtx_unlock`），而 `infy_mtx_lock` 就是
+      `AcquireSRWLockExclusive`（`infy_rt_internal.h:61`，非递归、同线程重入即死锁）。§11.1 的"host 回调再调回
+      INFY、INFY 再调 host"要到第 9 层才判 `R-0902` ⇒ 第 2 层就先挂在锁上。**实测证据（不是推理）**：F8 的变异探针
+      M2 只去掉解锁、保留计数回滚，rt harness 就在下一次 `infy_host_call_event` 处**挂死 60 s 被脚本杀掉**
+      （`logs/f8-mutation-probe.log`），而 harness 里唯一能打出 `R-0902` 的用例 `e_call_deep` 靠
+      `infy_test_set_host_nesting(8)` **伪造**深度 —— 现有测试从来没有真的嵌套过两层 host 调用。
+      后果分两面：① 规范 §11.1 的这条上限在真实程序里是**空条款**（症状从"假报 R-0902"变成"进程挂起"，比报码更坏）；
+      ② `infy conformance` 无法为它写出可过的用例，只能写 Blocked。
+      验收（择一并写进 `docs/spec-deviations.md`，别同时做两套）：(a) 记 owner 线程 id + 重入层数，
+      同线程重入时只加层数不取锁（`R-0902` 的判定本来就早于取锁，所以语义不变）；(b) 把回调移出锁外，
+      用"每次调用一个事件锁"换成"只在读 `g_host` 时取锁"。**先量再改**：用 `pthread_mutex_t` 的
+      `PTHREAD_MUTEX_RECURSIVE` 在 Windows 这条路不存在，别照抄。成对断言 = 第 2 层嵌套调用返回成功、
+      第 9 层报 `R-0902`，两条都要在**真嵌套**的 host 回调里跑，不许再用 setter 伪造深度。
+
 ## 2. 当前指针
 
-> **F7 轮收尾（2026-10-17）：F7 勾 `[x]`，本段取代下一段** —— 交付提交 **`13ab2cf`**（`src/borrow.rs` 的新判据 +
+> **F8 轮收尾（2026-10-17）：F8 勾 `[x]`，本段取代下一段** —— 交付提交 **`9c56b45`**（`runtime/infy_rt.c` 的回滚 +
+> `runtime/infy_rt_internal.h` 的 `InfyTry` 两个快照字段 + `runtime/test_rt.c` 的成对断言 + 两份脚本）。
+> **实现形状**：`InfyTry` 在**安装期**快照 `host_depth` 与 `host_lock_depth`（新增的第二根计数器 = "`g_host_mu`
+> 此刻在手上的层数"，是回滚的唯一单位），`infy_rt_catch` 与 `dispatch_node` 两条 catch 路径都调
+> `host_call_rollback()`，**只降不升**（往回升会凭空造出这个 catch 点从没见过的层数）。为什么按"安装期快照"而不是
+> "host 调用去写它所在的那一层 try"：`infy_panic` 只 longjmp 到**当时最内层**的 try（`infy_rt.c:466` 取
+> `infy_tls_try`），而回调体内可能再装更深的 try 点 —— 更深的点用**它自己**的快照才正确（外层那一层还在飞行中，
+> 不该被清）。
+> **本轮真正多揪出来的是第二半**：`--` 被跳过时泄漏的不只是计数，还有那把**非递归**的 `AcquireSRWLockExclusive`
+> ⇒ 症状不是"假报 R-0902"而是下一次 host 调用**挂死**；变异探针 M2（只回滚计数、不解锁）实测挂满 60 s 被脚本杀掉
+> ⇒ 这条锁的形状单列成新缺陷 **F48**（`g_host_mu` 持在整个回调期间 ⇒ §11.1 的 host↔INFY 互递归到不了第 2 层 ⇒
+> `R-0902` 在真程序里不可达，今天没有任何用例真嵌套过两层）。**别把 F48 当已修**：本轮只修了"跨边界不回滚"，
+> 没修"到不了第 2 层"。`infy_tls_unwinding` 的核查结论也写在 F8 条目里（不可达，别再开条）。
+> **新基线（本机实测）**：rt harness **32340 assertions / 0 failures**（基线 32335，+4 条 `CK_EQ` +1 条 `expect_panic`）；
+> 两条 IFBC 链各 **180/180** + stdout `cmp` 无差异；`-c infy_rt.c` 与 `-c infy_ifbc.c` 各 stderr **0 字节**；
+> `cargo check --offline --lib` **0 error / 0 warning**、`cargo test --offline --lib` **548 passed / 0 failed**（Rust 侧零改动）、
+> tour 的 `check|build|run|test` + `--verify-reproducible` 全 exit **0**、`infy conformance --report` 仍 **83 = 77/0/6 ⇒ exit 1**（92.8%）、
+> `infy fmt --check examples/tour` exit **0**。
+> **产物口径变了**：**199975 → 200644 字节**（宿主镜像 199173 → 199842，段 blob 738 + 段尾 64 未变）——
+> `infy_rt.c` 是静态链进镜像的，**改 C 运行时必然动产物字节**，而 C11 **12512** / build-id **`d7c4408e…370015`** /
+> 节点表 **7-8-9-10-16-20** 三组没动（build-id 的九类输入里没有宿主镜像 ⇒ 只有 dirhash 那条会随 tour 源码动）。
+> `docs/status.md`（头一块）/ `docs/coverage.md`（P4·P9·P13·P26·P30·P33·§7.1·§7.3·§11 行）/ `README.md` 的活声称已按此改，
+> 历史小节里的旧数保留为当时实测；P30 那句远端实录**没改**（远端还没跑过 F8 ⇒ 不预填异步结果）。
+> **推送/CI 现状**：本轮**开头**补推 `5192ddb` 失败（脚本 2 次 TRY，git rc **128**，`unable to connect`，同时刻 `gh api` 正常 ⇒ 抖动）；
+> **`run #12`（head `0ff8690`）= `success`** ⇒ **F6 的远端门禁（步 12 的 `fmt --check examples/tour`）与 F7 的判据（步 7 = 548 passed）都已在远端落地**，
+> F6/F7 两轮遗留的远端回查到此关闭。本轮收尾把 `5192ddb` + `9c56b45` + 本笔做账一起推（欠账现算，只认 `gh api …/git/refs/heads/toolchain`）。
+> **下一轮 = §1 第一个 `[ ]` = F9**（`ExprKind::Int` 只由 `derive` 产生 ⇒ 凡**只**匹配它的判据逐条要么证明可达、要么删；
+> 名单起点 = `grep -n "ExprKind::Int" src/*.rs`，`ast::Attr::int_arg`、`cli.rs`、`sema.rs` 在内；**还欠一条锁** =
+> F2 轮没给 `primary` 的臂顺序留"整数字面量 = `ExprKind::Lit`"的回归测试）。F10（`sema.rs:616` 的 `u128 as u64` 判别式截断 ⇒
+> 报 `E-0042` 而不是回绕）与 F11（`sema.rs:439` 的 `unwrap_or(0)` 把非字面量数组长度静默当 0 ⇒ 显式 `E-0131`）都是同一族的
+> "静默取值"缺陷，小、可单轮做完，排在 F9 之后。基线口径提醒：**本机 rustc 在并行编译 lib test 时会 OOM**
+> （`memory allocation of 2097152 bytes failed` + `0xc0000409`，本机常驻 vmware-vmx 32 GB）⇒ `cargo test --offline --lib -j 1` 才是可复跑的口径，
+> 这不是回归、别去改代码。
+> **措辞红线不变**：覆盖 83/2300 ⇒ 任何文档不得出现「INFY v2.0 兼容」的肯定式声称；「两侧装载期校验等价」仍不许讲
+> （F26 前半 / D-42 (a)–(e)）；**F8 再加一条**：不许说"`R-0902` 的嵌套上限已端到端验证" —— 它今天只有**伪造深度**的测试，
+> 真嵌套被 F48 挡在门外。
+> **（以下为 F8 轮之前各轮的指针，已被上面一段取代，保留作历史）**
+> **F7 轮收尾（2026-10-17）：F7 勾 `[x]`，本段取代它下面那一段（现已被上面的 F8 段取代）** —— 交付提交 **`13ab2cf`**（`src/borrow.rs` 的新判据 +
 > `src/sema.rs` 的 `ConstInfo.is_mut` + `src/cli.rs`/测试的 `file_pkg` 随动 + 用例 4.7-ownership-0006 换形）。
 > **三条各自裁"实现错"**：(a) 数值不排除、非原子 `Rc` 不豁免；(b) 链内局部 `var` 不报（§8.2:1297 各焦点独立栈与
 > 独立所有权作用域 + `codegen.rs:1639` 帧槽 ⇒ "两条链写同一个链内 `var`"不可构造，旧判据报的就是这个不可达形状）；
