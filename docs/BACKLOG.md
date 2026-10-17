@@ -1580,6 +1580,12 @@
 > = 本地 HEAD、现算欠账 **0**；**F10/F51 的远端判据同时关闭** = run **#16**（`39001097954`，head `4f99889`）=
 > **success、步 1-12 逐条 success**，`gh run view … --log`（983 行）实录 步 7 = **555 passed / 0 failed**、
 > 步 10 = **32340 assertions, 0 failures**（`ci-run16.log` 落在 `target/scratch/`）。
+> **收尾那笔也推上去了**：同一脚本第 **1** 次 TRY 即 exit **0** ⇒ 远端 = **`9d8dd91`**（含代码交付 `af7a668`）= 本地 HEAD
+> ⇒ 现算欠账 **0**；**run #17**（head `430d68e`，本轮开头那笔补推）= **success**，**run #18**
+> （`39010035031`，head `9d8dd91`，`git merge-base --is-ancestor af7a668 9d8dd91` rc **0**）收尾时仍 **`in_progress`**
+> ⇒ **F11 的远端判据（步 7 应打 561 passed）挂下一轮**，那条 RUNLOG 补记（`cron-34-push` 行）**故意不推** ——
+> 连推两笔会因 `concurrency` + `cancel-in-progress` 取消掉覆盖交付树的 #18；若下一轮发现 #18 已被取消，
+> 判据改认"覆盖同一棵树的那条 `success` run"，不要为了绿去重推。
 > **本轮新增的常驻面（下一轮直接用）**：① `Checker::unresolved_ty_spans` —— **任何在 `ty_from_ast` 里发诊断的
 > 新代码必须自带去重**，因为同一份字段类型在注册通道（`sema.rs:607`）与 `check_item`（`923`）各解析一次，
 > 不去重就是同坐标两条（这是 **F52** 的由来，撤掉该集合是它的验收①）；② 数组长度读取口只有
