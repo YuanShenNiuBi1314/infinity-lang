@@ -1544,3 +1544,58 @@ check 带 build 全绿、值直接进产物**。一条规则两半都漏：该�
 **F57** = 宽度小于 64 的移位没有 codegen 入口（`x << 40`，`x: u8` = build 6，消息自己点名缺
 `R-0007` 检查入口），而 §4.12 承诺的是运行时事件。
 
+---
+
+## D-57 F58 的能力表版本忠实性：规范只说"数值键 = 该 minor 的 `dis.opmap` 值"，没说什么算该 minor 的
+opmap、没给"表描述错了版本"这一类错误的码、也没说契约该由谁来持有 —— 七处定死
+
+**现场**：`capabilities/IFBC-CAP-py-3.13.toml` 自 2026-10 起就是一份**改了标题的 3.14 表**（自己的头注释
+承认 "CPython 3.13 is NOT installed here… deliberately has NO numbered (0xNN) rows"）。后果方向与 §7.7.2
+的 P3 相反：不是漏放行，而是**假红** —— 真 3.13 主机上 `BINARY_SUBSCR`（3.13 的 0x05）在表里**一行都不存在**，
+扫描器打 "该 opcode 不在能力表内" + `E-0712`，于是 `x[i]` 这种合法 Python 被说成 INFY 不支持。
+实测两份表的数值行数：3.13 = **0**，3.14 = **154**；3.13 表里却出现 `BUILD_TEMPLATE`、
+`ANNOTATIONS_PLACEHOLDER`、`LOAD_FAST_BORROW`、`LOAD_SMALL_INT` 四个只有 3.14 才有的名字。
+
+* **(a) 缺解释器不等于不许有数值**。§7.7.3 只说能力表随版本发布，E.3 只说数值键是"该 minor 的
+  `dis.opmap` 值"。本轮把它定成：**取该 minor 自己发布的 `Include/opcode_ids.h`**（CPython 的发布件，
+  不是记忆），并在生成前用**本机装得上的那个 minor** 校准筛选规则 —— 规则复不出 3.14.6 的
+  `dis.opmap`（154 项逐名逐值相同）就**拒绝生成**（`scripts/gen-cap-table-py313.py` 退码 4）。
+  F28 当年写"凭记忆填等于编造常数"是对的，但它给的唯一出路是"等有 3.13 的机器"；本条把另一条出路定死。
+* **(b) opmap 的构造规则定死**：`opcode_ids.h` 的 `#define` 名集 **减去** 任何
+  `family(...) = { … }` 块的成员；**块里被 `//` 注释掉的名字仍算成员**。最后半句不是细节洁癖：
+  `BINARY_OP_INPLACE_ADD_UNICODE`（3.13 的 0x03）在 `bytecodes.c` 里就是被注释掉的家族成员，
+  而它同时又被 `analyzer.py` 硬写进 `instmap` —— 按"注释即排除"读，3.14 上复现 `dis.opmap` 精确到
+  每一个名与数；按"注释不算"读，3.14 多出一个名字，校准当场红。生成的 3.13 表因此**没有 0x03 行**，
+  这是定死的口径，下一轮不许"顺手补上"。
+* **(c) "表描述错了版本"用 `E-0713`，不许复用 `E-0712`**。`E-0712` 的标题被 §7.7.2 钉成
+  "字节码能力缺失"（这条指令不支持 ⇒ 出路是扩表或改写该处），`E-0713` 的标题是"字节码版本不匹配"
+  （clause §7.7.3 ⇒ 出路是换版本声明或重生成表）。两者**修法相反**，混用会把"重生成这张表"读成
+  "等能力扩容"。§9.3 的 210 码表里没有独立的"能力表谎报版本"码，故落 `E-0713`
+  （新增 `IngestErr::CapVersionMismatch`，`code()` 打 `E-0713`）。
+* **(d) 契约由工具链持有，不由表持有**。哪些名字必须出现、哪些不许出现，如果写进 TOML 就是**自我声明**
+  （正是阶段 G 的 G32 批评的那一类：可信度靠头注释声称）。定成
+  `src/cap_opmap.rs::opcode_contract(lang, minor)`（与表**不同源**，由同一生成器从 CPython 发布件写出），
+  `CapTable::load()` 装载时校验三个方向：该 minor 必有名**缺席**、别个 minor 的名**出现**、本 minor
+  从未分配过的**数值键**。
+* **(e) 数值键的规范式与两侧一致**。E.3 的例子写 `0x71`/`0xb8`（两位十六进制），两份表也这么写；
+  实现此前按 `format!("0x{opcode:x}")` 计算 ⇒ **0x10 以下的每一行，数值键都查不到自己**，
+  `check_alias_agreement` 对那 15 个 opcode **永不触发**（F28 说"永不触发"的那条，根因在这里）。
+  定死：`numeric_key` = `0x{opcode:02x}`，装载时把任何 `0xHEX` 键归一到该规范式（`0x5` 与 `0x05` 同一行），
+  而同一 opcode 两种拼法给出**两个不同值**则在解析期拒绝。
+* **(f) 11 个只有 3.13 才有的 opcode，映射值由本轮定**（规范不给，实现也未定）：
+  `BINARY_SUBSCR = "idx.get"`（与 3.14 表 `BINARY_OP` 的 `[]` 臂同目标，这就是 F58 点名的那条假红）；
+  `RETURN_CONST`、`BUILD_CONST_KEY_MAP`、`LOAD_ASSERTION_ERROR`、`BEFORE_WITH`、`BEFORE_ASYNC_WITH`、
+  `LOAD_METHOD`、`LOAD_SUPER_METHOD`、`LOAD_ZERO_SUPER_ATTR`、`LOAD_ZERO_SUPER_METHOD`、
+  `INSTRUMENTED_RETURN_CONST` 一律 `"-"`（**显式声明未映射**，硬约束 (d)）。理由逐条写进表头注释。
+  本轮**不引入新的 IFBC 助记符**：`RETURN_CONST` 需要 push+ret 融合、`BUILD_CONST_KEY_MAP` 需要
+  "键元组 + N 值"的融合构造，那是 §7.8 的 ISA 变更，登记为 **F60**，不是靠往表里填一个不存在的
+  助记符来"修好"（`check_mnemonic` 也会当场拒）。
+* **(g) `BINARY_OP` 的 `[]` 臂在 3.13 表里删掉**。3.13 的下标是 `BINARY_SUBSCR`，`BINARY_OP` 的参数域
+  里根本没有 `[]` 这一档；留着一臂 = 声称一个永不成立的用例，与 F58 的病同族（表说的和该 minor 的
+  事实不一致），只是方向不伤放行。
+
+**登记（本轮不做，实测成立）**：**F59** = 表里 `[builtin]`/`[import]`/`[exception]` 三段是从旧表
+**逐字搬过来**的，也就是 3.14 的名字集，同一类版本忠实性问题仍在（本轮的契约只覆盖 `[opcode]`；
+生成器已在段内写明这条，段内注释 = 本轮唯一被授权的"声称"，因为它指向 F59 而不是自称正确）。
+
+

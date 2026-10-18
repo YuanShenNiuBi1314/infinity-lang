@@ -25,7 +25,7 @@
 //! `module_hash` covers the normalised contents, so two runs over the same code-object dump produce
 //! byte-identical images.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -635,6 +635,15 @@ pub enum IngestErr {
     Scan(Vec<ScanViolation>),
     /// `E-0713`: interpreter or `.pyc` magic disagrees with `[b_track]` (§7.7.3).
     VersionMismatch { declared: String, observed: String, magic_declared: u32, magic_observed: u32 },
+    /// `E-0713`: a capability table does not describe the minor its file name declares (F58). The
+    /// opcode names it lacks, the ones belonging to another minor, and the numeric keys that minor
+    /// never assigned.
+    CapVersionMismatch {
+        declared: String,
+        missing: Vec<String>,
+        foreign: Vec<String>,
+        stray_numbers: Vec<String>,
+    },
     /// `E-0715`: `[b_track]` has no entry for the language in use (§7.7.3).
     VersionUndeclared { lang: String },
     /// `E-0714`: a wheel is not pure Python (§7.7.4).
@@ -653,6 +662,7 @@ impl IngestErr {
             // present to run the capability scan, and its absence is the §7.7.3 version code.
             IngestErr::ToolchainMissing { .. } => "E-0713",
             IngestErr::VersionMismatch { .. } => "E-0713",
+            IngestErr::CapVersionMismatch { .. } => "E-0713",
             IngestErr::VersionUndeclared { .. } => "E-0715",
             IngestErr::BinaryWheel { .. } => "E-0714",
             IngestErr::Scan(v) => return v.first().map(|x| x.code),
@@ -677,6 +687,9 @@ impl IngestErr {
             },
             IngestErr::VersionMismatch { declared, observed, .. } => format!(
                 "字节码版本不匹配：清单声明 py = \"{declared}\"，实际解释器为 {observed}"
+            ),
+            IngestErr::CapVersionMismatch { declared, .. } => format!(
+                "能力表与声明版本不符：IFBC-CAP-{declared}.toml 的 opcode 名字集不是 {declared} 的 opcode 集"
             ),
             IngestErr::VersionUndeclared { lang } => {
                 format!("使用 @{lang} 但清单没有 [{lang} 的] b_track 版本声明")
@@ -706,6 +719,26 @@ impl IngestErr {
             IngestErr::VersionMismatch { magic_declared, magic_observed, .. } => format!(
                 ".pyc magic 期望 {magic_declared}，实际 {magic_observed}（附录 §7.7.3：magic 必须等于声明版本的期望值）"
             ),
+            IngestErr::CapVersionMismatch { missing, foreign, stray_numbers, .. } => {
+                let list = |tag: &str, v: &[String]| {
+                    if v.is_empty() {
+                        return String::new();
+                    }
+                    let head: Vec<&str> = v.iter().take(6).map(|s| s.as_str()).collect();
+                    let more = if v.len() > head.len() {
+                        format!(" … 共 {} 项", v.len())
+                    } else {
+                        String::new()
+                    };
+                    format!("{tag}：{}{more}", head.join(", "))
+                };
+                [list("该 minor 必有名缺", missing), list("别个 minor 的名", foreign),
+                 list("该 minor 没有的数值键", stray_numbers)]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ")
+            }
             _ => String::new(),
         }
     }
@@ -718,6 +751,10 @@ impl IngestErr {
             IngestErr::Scan(_) => "按诊断列出的具体项等待能力表扩容，或改写该处（§7.7.2）".to_string(),
             IngestErr::VersionMismatch { declared, .. } => format!(
                 "infy toolchain add py --version {declared}.x，或把清单 [b_track] 改为实际版本"
+            ),
+            IngestErr::CapVersionMismatch { declared, .. } => format!(
+                "按 §7.7.3 用 {declared} 自己的 opcode 数值重生成该表（py 轨：scripts/gen-cap-table-py313.py），\
+                 不许改名或复用邻近 minor 的名字集"
             ),
             IngestErr::VersionUndeclared { lang } => {
                 format!("在 MODULE.infy.toml 写 [b_track] {lang} = \"<minor>\"（§7.7.3）")
@@ -1185,7 +1222,16 @@ impl CapTable {
                     .as_str()
                     .ok_or_else(|| bad(format!("[opcode] {k} 的值必须是字符串")))?
                     .to_string();
-                opcode_map.insert(k.clone(), s);
+                // E.3 writes the number as `0xNN`; an author may reasonably type `0x7`. Both spellings
+                // have to reach the same row, otherwise the numeric half of the audit silently misses.
+                let key = CapTable::canonical_opcode_key(k);
+                if let Some(prev) = opcode_map.insert(key.clone(), s.clone()) {
+                    if prev != s {
+                        return Err(bad(format!(
+                            "[opcode] {k}（规范式 {key}）出现两次且值不同：{prev} / {s}"
+                        )));
+                    }
+                }
             }
         } else {
             return Err(bad("缺 [opcode] 段".to_string()));
@@ -1257,6 +1303,7 @@ impl CapTable {
             )));
         }
         t.table_hash = computed;
+        t.check_version_contract(lang, minor)?;
         Ok(t)
     }
 
@@ -1279,7 +1326,62 @@ impl CapTable {
     }
 
     fn numeric_key(opcode: u32) -> String {
-        format!("0x{opcode:x}")
+        // Appendix E.3's own spelling is two hex digits (`0x71`), and both shipped tables use it;
+        // `0x{:x}` used to miss every opcode below 0x10, so `check_alias_agreement` could never fire
+        // for those rows (F58).
+        format!("0x{opcode:02x}")
+    }
+
+    /// The opcode a numeric key spells, or `None` for an `OPNAME` alias key.
+    fn numeric_opcode(key: &str) -> Option<u32> {
+        let hex = key.strip_prefix("0x")?;
+        if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(hex, 16).ok()
+    }
+
+    /// Canonical form of an `[opcode]` key: numbers collapse onto E.3's `0xNN`, names pass through.
+    fn canonical_opcode_key(key: &str) -> String {
+        match CapTable::numeric_opcode(key) {
+            Some(n) => CapTable::numeric_key(n),
+            None => key.to_string(),
+        }
+    }
+
+    /// §7.7.3 read the other way: the table must describe the minor it is shipped for. The opcode
+    /// names and numbers come from CPython's own released header ([`crate::cap_opmap`]), never from
+    /// the table, so a neighbouring minor's table renamed to this one cannot pass (F58 — the shipped
+    /// 3.13 table *was* a renamed 3.14 table, which turned legal `x[i]` into `E-0712`).
+    pub fn check_version_contract(&self, lang: &str, minor: &str) -> Result<(), IngestErr> {
+        let Some(contract) = crate::cap_opmap::opcode_contract(lang, minor) else {
+            return Ok(());
+        };
+        let declared = format!("{lang}-{minor}");
+        let known: BTreeSet<&str> = contract.iter().map(|(n, _)| *n).collect();
+        let numbers: BTreeSet<u32> = contract.iter().map(|(_, o)| *o).collect();
+        let missing: Vec<String> = contract
+            .iter()
+            .filter(|(n, _)| !self.opcode_map.contains_key(*n))
+            .map(|(n, o)| format!("{n} (0x{o:02x})"))
+            .collect();
+        let foreign: Vec<String> = self
+            .opcode_map
+            .keys()
+            .filter(|k| CapTable::numeric_opcode(k).is_none() && !known.contains(k.as_str()))
+            .cloned()
+            .collect();
+        let stray_numbers: Vec<String> = self
+            .opcode_map
+            .keys()
+            .filter_map(|k| CapTable::numeric_opcode(k))
+            .filter(|o| !numbers.contains(o))
+            .map(|o| CapTable::numeric_key(o))
+            .collect();
+        if missing.is_empty() && foreign.is_empty() && stray_numbers.is_empty() {
+            return Ok(());
+        }
+        Err(IngestErr::CapVersionMismatch { declared, missing, foreign, stray_numbers })
     }
 
     /// The row for an opcode: numeric key first (E.3's normative form), then the `OPNAME` alias.
@@ -5058,47 +5160,53 @@ mod tests {
 
     /// appendix E.3 keys `[opcode]` rows by **number** and carries the `OPNAME` alias beside it; the
     /// two must agree, or the table cannot be audited against the interpreter's own `dis.opmap`
-    /// (§7.7.2). Only `IFBC-CAP-py-3.14.toml` satisfies the numeric half today — it was generated from
-    /// the interpreter installed on this host. The 3.13 and lua tables are name-keyed only, recorded
-    /// as BACKLOG **F28**: those numbers cannot be filled in here without inventing them (§12.2), and
-    /// while they are missing `check_alias_agreement` can never fire for those two tables.
+    /// (§7.7.2). Both python tables satisfy the numeric half now: 3.14 was generated from the
+    /// interpreter on this host, 3.13 from CPython 3.13's own released `opcode_ids.h`
+    /// (`scripts/gen-cap-table-py313.py`, BACKLOG F58/F28). `IFBC-CAP-lua-5.4.toml` is still
+    /// name-keyed — the lua numbers are the half of F28 that stays open.
     #[test]
     fn the_number_keyed_table_agrees_between_its_number_and_name_rows() {
-        let (lang, minor) = ("py", "3.14");
-        let (name, text) = CapTable::shipped(lang, minor).expect("shipped table");
-        let c = CapTable::load(lang, minor).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let mut numeric = 0usize;
-        for line in text.lines() {
-            let t = line.trim();
-            let Some(rest) = t.strip_prefix("0x") else { continue };
-            let (key, val) = rest.split_once(" = ").unwrap_or_else(|| panic!("{name}: 行格式 {t}"));
-            let (value, alias) = match val.split_once("   # ") {
-                Some((v, cm)) => (v.trim().trim_matches('"').to_string(), cm.trim().to_string()),
-                None => panic!("{name}: {key} 缺 OPNAME 别名注释"),
-            };
-            let key = format!("0x{key}");
-            numeric += 1;
-            assert_eq!(
-                c.opcode_map.get(&alias),
-                Some(&value),
-                "{name}: {key} = {value} 但 {alias} = {:?}",
-                c.opcode_map.get(&alias)
-            );
-            let n = u32::from_str_radix(&key[2..], 16).unwrap();
-            assert!(
-                c.check_alias_agreement(n, &alias).is_ok(),
-                "{name}: {key}/{alias} 自相矛盾"
-            );
+        for (lang, minor) in [("py", "3.13"), ("py", "3.14")] {
+            let (name, text) = CapTable::shipped(lang, minor).expect("shipped table");
+            let c = CapTable::load(lang, minor).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let mut numeric = 0usize;
+            for line in text.lines() {
+                let t = line.trim();
+                let Some(rest) = t.strip_prefix("0x") else { continue };
+                let (key, val) = rest.split_once(" = ").unwrap_or_else(|| panic!("{name}: 行格式 {t}"));
+                let (value, alias) = match val.split_once("   # ") {
+                    Some((v, cm)) => (v.trim().trim_matches('"').to_string(), cm.trim().to_string()),
+                    None => panic!("{name}: {key} 缺 OPNAME 别名注释"),
+                };
+                let key = format!("0x{key}");
+                numeric += 1;
+                assert_eq!(
+                    c.opcode_map.get(&alias),
+                    Some(&value),
+                    "{name}: {key} = {value} 但 {alias} = {:?}",
+                    c.opcode_map.get(&alias)
+                );
+                let n = u32::from_str_radix(&key[2..], 16).unwrap();
+                assert!(
+                    c.check_alias_agreement(n, &alias).is_ok(),
+                    "{name}: {key}/{alias} 自相矛盾"
+                );
+                assert_eq!(
+                    c.opcode_row(n, &alias),
+                    Some(&value),
+                    "{name}: {key} 数值键查不到自己那一行"
+                );
+            }
+            assert!(numeric > 100, "{name}: [opcode] 段只有 {numeric} 行");
         }
-        assert!(numeric > 100, "{name}: [opcode] 段只有 {numeric} 行");
     }
 
-    /// The two name-keyed tables must still resolve **every** row: `check_alias_agreement` cannot
-    /// help there (F28), so the only thing standing between a typo and a silently unmapped opcode is
-    /// that each row parses (§7.7.2).
+    /// The name-keyed table must still resolve **every** row: `check_alias_agreement` cannot help
+    /// there (F28), so the only thing standing between a typo and a silently unmapped opcode is that
+    /// each row parses (§7.7.2).
     #[test]
     fn the_name_keyed_tables_still_map_every_row() {
-        for (lang, minor) in [("py", "3.13"), ("lua", "5.4")] {
+        for (lang, minor) in [("lua", "5.4")] {
             let (name, text) = CapTable::shipped(lang, minor).expect("shipped table");
             assert!(
                 !text.lines().any(|l| l.trim().starts_with("0x")),
@@ -5149,11 +5257,94 @@ mod tests {
             let cov = c.coverage();
             assert!(cov.unparseable.is_empty(), "{lang}-{minor}: 这些行无法解析：{:?}", cov.unparseable);
             assert!(cov.builtins > 0, "{lang}-{minor}: [builtin] 段一行可用都没有：{cov:?}");
-            if minor == "3.14" {
-                // `coverage()` counts E.3's numeric rows, so a name-keyed table reports 0 by design.
+            if lang == "py" {
+                // `coverage()` counts E.3's numeric rows, so lua's name-keyed table reports 0 by design.
                 assert!(cov.mapped > 0 && cov.rejected > 0, "{lang}-{minor}: 覆盖统计 {cov:?}");
             }
         }
+    }
+
+    /// F58: the shipped 3.13 table used to be a renamed 3.14 table, so the opcodes only 3.13 emits had
+    /// no row at all and the scanner called them "never mapped" — legal Python reported as a capability
+    /// gap. The rows exist now, and `x[i]` lands on the same mnemonic 3.14's `BINARY_OP` uses for `[]`.
+    #[test]
+    fn the_313_table_covers_the_opcodes_a_313_host_actually_emits() {
+        let c = CapTable::load("py", "3.13").expect("3.13 表要读得回来");
+        for n in ["BINARY_SUBSCR", "RETURN_CONST", "BUILD_CONST_KEY_MAP", "LOAD_ASSERTION_ERROR",
+                  "BEFORE_WITH", "LOAD_METHOD"] {
+            assert!(c.opcode_map.contains_key(n), "{n} 是 3.13 的真 opcode，表里必须有行");
+        }
+        for n in ["BUILD_TEMPLATE", "ANNOTATIONS_PLACEHOLDER", "LOAD_FAST_BORROW", "LOAD_SMALL_INT"] {
+            assert!(!c.opcode_map.contains_key(n), "{n} 只在 3.14 存在，留在 3.13 表里就是版本谎报");
+        }
+        assert_eq!(
+            c.opcode_row(0x05, "BINARY_SUBSCR").map(String::as_str),
+            Some("idx.get"),
+            "x[i] 既不许缺席也不许标成 \"-\"：那正是 F58 报的假红"
+        );
+        assert_eq!(
+            c.mapping(0x05, "BINARY_SUBSCR").unwrap().unwrap().resolve("").mnemonic(),
+            Some("idx.get"),
+            "数值键那一行必须给同一个目标"
+        );
+    }
+
+    /// F58 验收 ③：把 3.14 表改名成 3.13 必须红，且必须是**版本**码 `E-0713` —— 不是 `E-0712`
+    /// （那条的意思只是"这条指令不支持"，正是旧表对每条合法 3.13 指令说的话）。
+    #[test]
+    fn a_capability_table_naming_the_wrong_minor_is_rejected_with_e_0713() {
+        let (_, t314) = CapTable::shipped("py", "3.14").expect("shipped table");
+        let renamed = CapTable::parse(t314, "IFBC-CAP-py-3.13.toml").expect("3.14 表本身可读回");
+        let e = renamed
+            .check_version_contract("py", "3.13")
+            .expect_err("改名的表按 3.13 装载必须红");
+        assert_eq!(e.code(), Some("E-0713"), "{e}");
+        match &e {
+            IngestErr::CapVersionMismatch { declared, missing, foreign, stray_numbers } => {
+                assert_eq!(declared, "py-3.13");
+                for n in ["BINARY_SUBSCR", "RETURN_CONST", "BUILD_CONST_KEY_MAP",
+                          "LOAD_ASSERTION_ERROR", "BEFORE_WITH", "LOAD_METHOD"] {
+                    assert!(missing.iter().any(|m| m.starts_with(n)), "缺名清单没点到 {n}：{missing:?}");
+                }
+                for n in ["BUILD_TEMPLATE", "ANNOTATIONS_PLACEHOLDER", "LOAD_SMALL_INT"] {
+                    assert!(foreign.contains(&n.to_string()), "外来名没点到 {n}：{foreign:?}");
+                }
+                assert!(!stray_numbers.is_empty(), "3.14 的编号在 3.13 里必须是未知数值键");
+            }
+            other => panic!("应当是 CapVersionMismatch，实际 {other:?}"),
+        }
+        let (_, t313) = CapTable::shipped("py", "3.13").expect("shipped table");
+        let back = CapTable::parse(t313, "IFBC-CAP-py-3.14.toml")
+            .expect("3.13 表本身可读回")
+            .check_version_contract("py", "3.14")
+            .expect_err("反向改名同样要红");
+        assert_eq!(back.code(), Some("E-0713"), "{back}");
+    }
+
+    /// E.3 spells a numeric key `0xNN` while the loader used to compute `0x{:x}`, so every opcode below
+    /// 0x10 was invisible to the numeric half of the audit and `check_alias_agreement` could never fire
+    /// there (F58, and the hole F28 says `check_alias_agreement` "永不触发" about). Both spellings now
+    /// reach one row, and a two-row disagreement is caught even under 0x10.
+    #[test]
+    fn numeric_opcode_keys_canonicalize_and_still_contradict_when_told_to() {
+        let base = "[cap]\nlang = \"py\"\nformat = \"CPY-399\"\ncap_version = 1\n\n[opcode]\n";
+        let padded = CapTable::parse(&format!("{base}0x05 = \"idx.get\"\n"), "t").unwrap();
+        assert_eq!(padded.opcode_row(5, "WHOEVER").map(String::as_str), Some("idx.get"));
+        let short = CapTable::parse(&format!("{base}0x5 = \"idx.get\"\n"), "t").unwrap();
+        assert_eq!(
+            short.opcode_row(5, "WHOEVER").map(String::as_str),
+            Some("idx.get"),
+            "0x5 与 0x05 必须落在同一行"
+        );
+        let split = CapTable::parse(&format!("{base}0x5 = \"idx.get\"\n0x05 = \"pop\"\n"), "t")
+            .expect_err("同一 opcode 两种拼法给两个值 = 表自相矛盾");
+        assert!(split.title().contains("0x05"), "{split}");
+        let contradictory =
+            CapTable::parse(&format!("{base}0x05 = \"idx.get\"\nBINARY_SUBSCR = \"-\"\n"), "t").unwrap();
+        assert!(
+            contradictory.check_alias_agreement(5, "BINARY_SUBSCR").is_err(),
+            "数值行与名行不一致必须红（修前这一支在 0x10 以下永不触发）"
+        );
     }
 
     /// §7.7.1 rule 1: the units parameter table comes from the INFY-side declaration when the host

@@ -30,6 +30,7 @@ pub mod atrack;
 pub mod base64;
 pub mod borrow;
 pub mod btrack;
+pub mod cap_opmap;
 pub mod cli;
 pub mod codegen;
 pub mod codes;
