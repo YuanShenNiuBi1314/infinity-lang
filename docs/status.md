@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 570 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out   # **F12/F53 轮 561 → 570**，`codegen` 27→**33**（owned 移动改「按地址取消清理项」的成对锁）· `parser` 11→**14**（链体顶层连携语句 `E-0300` + 两条前进守卫锁，见下文 F12 / F53 两节）；上一档 **F11 轮 555 → 561**，`sema` 24→29 · `hir` 21→22 = `[T; N]` 的长度求值失败改显式 `E-0131`（不得静默取 0）的六条锁点（见下文 F11 一节）；再上一档 **F10/F51 轮 551 → 555** = 超宽枚举判别式按层报 `E-0042` 的四条锁点
+test result: ok. 576 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out   # **F13 轮 570 → 576**，`sema` 29→**35**（负字面量取上下文类型 + 每个已知上下文各一对正反例 + 移位量按 §4.12 排除 + 带后缀字面量按自己的范围取负，裁定 = 偏差 **D-55**，见下文 F13 一节；`codegen` 33 不变，但 `literals_carry_their_resolved_width` 改认带符号发射形 `INT8_C(-128)` 并加"旧幅度形不许复现"的反向断言）；上一档 **F12/F53 轮 561 → 570**，`codegen` 27→**33**（owned 移动改「按地址取消清理项」的成对锁）· `parser` 11→**14**（链体顶层连携语句 `E-0300` + 两条前进守卫锁，见下文 F12 / F53 两节）；再上一档 **F11 轮 555 → 561**，`sema` 24→29 · `hir` 21→22 = `[T; N]` 的长度求值失败改显式 `E-0131`（不得静默取 0）的六条锁点（见下文 F11 一节）；再上一档 **F10/F51 轮 551 → 555** = 超宽枚举判别式按层报 `E-0042` 的四条锁点
 $ cargo check --offline --lib
 Finished `dev` profile  (0 warnings —— F2 轮把 50 条一次清零：20 条 `unreachable pattern`、6 条 unused import、6 条 unused variable、3 条 `depth` 赋值不读、2 条多余 `mut`、2 条 never-constructed 变体、11 条 never-used fn/method/field；**没有用 `#[allow(...)]` 消数**，其中两处是「没接上」而非「没用」，见下文 F2 一节。口径 = `cargo check --offline --lib --message-format=short` 先 `touch src/lib.rs` 再计数；上一档 50 = F1 轮，51 → 50 = D4(1) 轮删掉 `CodeBuilder.bounds`)
 $ infy check examples/tour
@@ -134,13 +134,13 @@ error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权�
 
 > **一行口径（F6 轮，2026-10-17）**：`infy fmt --check examples/tour` 从本轮起 **exit 0**（偏差 **D-17** 已裁 = §9.5 胜、样例侧改写到规范形态）。下文各轮小节里的 `exit 2`（F6 未裁决）、生成 C11 **12513** 字节、`build-id 4d8250b5…55ba`、节点表行号 **8/9/10/11/16/19** 全是**裁决前那棵树**的当时实测值，保留为历史；现值 = **12512** / **`d7c4408e…370015`** / **7/8/9/10/16/20**（产物 199975 与段 blob 738 没动）。这三组数只随 tour 的字节动。**F8 轮再加一句口径**：产物字节是**宿主镜像**的函数，`infy_rt.c` 一动它就动 ⇒ 本机现值 **200700**（宿主镜像 199898；**F12 轮 200644 → 200700** = `infy_rt.c` 多了 `infy_cleanup_cancel`，+56 字节），而 build-id / C11 / 节点表行号三组没动（它们的输入里没有宿主镜像） —— 谁把规范化回滚掉，CI 步 12 的门禁与 `fmt::tests::the_tour_sources_are_the_9_5_fixpoint` 会同时红，不会静默。
 
-570 项按模块（`cargo test --offline --lib -j 1 -- --list` 逐条分组计数，合计 570；**F12/F53 轮实测**，上一版 561 = F11 轮实测，再上一版 555 = F10/F51 轮实测）：
+576 项按模块（`cargo test --offline --lib -j 1 -- --list` 逐条分组计数，合计 576；**F13 轮实测**，上一版 570 = F12/F53 轮实测，再上一版 561 = F11 轮实测）：
 `lexer` 79 · `derive` **58**（**F9 轮 +1** = `generated_integer_literals_use_the_single_source_literal_shape`，把派生体的整数字面量钉在 parser 那一支形状上） · `fmt` **41**（**F6 轮 +1** = `the_tour_sources_are_the_9_5_fixpoint`，把 `examples/tour` 读回来逐字节比它自己的 §9.5 输出；**F10/F51 轮 +1** = `a_discriminant_wider_than_u128_is_reprinted_not_dropped`，格式化器不许把放不下 `u128` 的判别式整段删掉） · `cli` **47**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → F2 轮 39 → F4 轮 41 → F5 轮 46 → **F10/F51 轮 47** = `VALUE_OPTS` 的逐项跳值 + 取值点源码回扫 + 三条命令的目录参数本体 + 空目录/缺 module 的显式失败 + `expand --derive` 的显式拒绝 + `over_wide_discriminants_stop_check_instead_of_wrapping` 的端到端 exit 2） ·
 `macro_expand` 35 · `btrack` **31**（D1(1) 前是 0，D1(2) 轮 23 → 30，**F2 轮 +1** = wheel 归档里每个成员按自己的 local header 偏移取数据） ·
-`atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **33**（D3 轮 22 → 26，**F4 轮 +1** = 合法 `dyn` 形参在阶段 [8] 以条款号被拒；**F12 轮 27 → 33** = +7 条新锁（三种移动形式各一条 `cancel`/`pop` 成对、`return P { s }` 的字面量移动、借用**不**取消、无清理项**不**取消、帧局部带析构器按条款号被拒）与 −1 条被改写掉的 `moving_an_owned_binding_is_refused`（它锁的正是本轮关掉的那个缺口）） · `pkg` 24 · `sema` **29**（**F9 轮 +1** = `a_derived_body_reaches_stage_4_on_one_shared_span`，同时把 F49 那条 span 碰撞量成锁点；**F10/F51 轮 +1** = `over_wide_enum_discriminants_are_e0042_and_never_a_wrap`，两条超宽判别式各一条 `E-0042`、续号不得级联、`u64::MAX` 的收集不再算术溢出；**F11 轮 +5** = `a_const_read_is_the_array_length`（`[u32; N]` = 4、`[u32; 2 + 3]` = 5、写得出来的 `[u32; 0]` 仍是 0，外加"`struct` 写在 `const` 之前"那一半现在是显式 `E-0131`）、`an_unevaluable_array_length_is_e0131`（码集**恰一条**且字段形状是 `<invalid>` 而不是 `[u32; 0]`）、`an_over_wide_array_length_does_not_wrap`（`2^64` / 宽于 `u128` / `-1` 三支）、`a_repeat_expression_length_reports_once`（`[0u32; 1 / 0]` 只留 `E-0062`）、`an_untyped_binding_without_initializer_is_still_e0131`，见下文 F11 一节） ·
+`atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **33**（D3 轮 22 → 26，**F4 轮 +1** = 合法 `dyn` 形参在阶段 [8] 以条款号被拒；**F12 轮 27 → 33** = +7 条新锁（三种移动形式各一条 `cancel`/`pop` 成对、`return P { s }` 的字面量移动、借用**不**取消、无清理项**不**取消、帧局部带析构器按条款号被拒）与 −1 条被改写掉的 `moving_an_owned_binding_is_refused`（它锁的正是本轮关掉的那个缺口）） · `pkg` 24 · `sema` **35**（**F13 轮 +6** = 负字面量取上下文类型、每个已知上下文的站点各一对正反例、移位量按 §4.12 排除、带后缀字面量按自己的范围取负，见下文 F13 一节；**F9 轮 +1** = `a_derived_body_reaches_stage_4_on_one_shared_span`，同时把 F49 那条 span 碰撞量成锁点；**F10/F51 轮 +1** = `over_wide_enum_discriminants_are_e0042_and_never_a_wrap`，两条超宽判别式各一条 `E-0042`、续号不得级联、`u64::MAX` 的收集不再算术溢出；**F11 轮 +5** = `a_const_read_is_the_array_length`（`[u32; N]` = 4、`[u32; 2 + 3]` = 5、写得出来的 `[u32; 0]` 仍是 0，外加"`struct` 写在 `const` 之前"那一半现在是显式 `E-0131`）、`an_unevaluable_array_length_is_e0131`（码集**恰一条**且字段形状是 `<invalid>` 而不是 `[u32; 0]`）、`an_over_wide_array_length_does_not_wrap`（`2^64` / 宽于 `u128` / `-1` 三支）、`a_repeat_expression_length_reports_once`（`[0u32; 1 / 0]` 只留 `E-0062`）、`an_untyped_binding_without_initializer_is_still_e0131`，见下文 F11 一节） ·
 `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` **22**（**F4 轮 +1** = `docs/internals/runtime-abi.md` §1 写出的 vtable 偏移被读回来与布局器比；**F11 轮 +1** = `an_over_wide_array_length_has_no_layout_at_stage_7`，第二个长度读取口 `literal_len` 也不许把 `2^64` 折成 0） · `artifact` 18 ·
 `toml` 15 · `borrow` **22**（**F7 轮 15 → 22** = `E-0121` 的判据从「链内存活绑定」换到「全局可变路径」后的 3 条正例 + 7 条反例（含 A4 轮留下的 3 条边界）+ 1 条 span 锁点，见下文 F7 一节） · `sha256` 12 · `conformance` **19**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫，**F3 轮 +1** = `.gitignore` 的一次性产物名单形状（按"谁产生它"列的六条一条不能少）+ 反向红线（不得宽到吞掉 `*.bin`/`*.md`/`*.rs` 或整个目录）+ 每个 `scripts/*.ps1` 的审计日志必须落在 `logs/`，**F1 收尾 +1** = 语料 EOL 例外必须声明在全局规则之后） · `codes` 9 ·
-`parser` **14**（D3 轮 +1 = §3.6 的 `@c` 语句形态；**F9 轮 +1** = `every_integer_spelling_reaches_the_ast_as_the_single_literal_shape`，即 F2 轮欠的那条 `primary` 臂顺序锁；**F10/F51 轮 +1** = `a_discriminant_wider_than_u128_is_still_recorded_as_written`，宽于 `u128` 的判别式必须仍是"写过"的形状且 `Span` 指得住字面量；**F53 轮 +3** = 链体顶层的 `goto`/`start`/`start_flag` 各报 `E-0300` 且**必须返回**（修前这三个语料把 `infy check` 挂死，见下文 F53 一节）+ 链体遇到非语句记号只报一次并前进 + 挂在宿主语句上的 `goto` 不受这条新诊断影响） · `base64` 7 · `stdlib` 4 · `diag` 2 = **570**（逐模块相加：79+58+41+47+35+31+27+**33**+24+29+22+22+18+15+22+12+19+9+**14**+7+4+2，与 `-- --list` 的 570 行一致）。
+`parser` **14**（D3 轮 +1 = §3.6 的 `@c` 语句形态；**F9 轮 +1** = `every_integer_spelling_reaches_the_ast_as_the_single_literal_shape`，即 F2 轮欠的那条 `primary` 臂顺序锁；**F10/F51 轮 +1** = `a_discriminant_wider_than_u128_is_still_recorded_as_written`，宽于 `u128` 的判别式必须仍是"写过"的形状且 `Span` 指得住字面量；**F53 轮 +3** = 链体顶层的 `goto`/`start`/`start_flag` 各报 `E-0300` 且**必须返回**（修前这三个语料把 `infy check` 挂死，见下文 F53 一节）+ 链体遇到非语句记号只报一次并前进 + 挂在宿主语句上的 `goto` 不受这条新诊断影响） · `base64` 7 · `stdlib` 4 · `diag` 2 = **576**（逐模块相加：79+58+41+47+35+31+27+**33**+24+**35**+22+22+18+15+22+12+19+9+**14**+7+4+2，与 `-- --list` 的 576 行一致）。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -407,7 +407,8 @@ stdout 逐字节相同）；`cargo test --offline --lib` **333 passed / 0 failed
 静默选错。现在按 §5.3/§4.14 以**调用方 package 优先**解析，多候选才报错（有测试）。
 
 **测试反过来暴露的 3 个上游缺口**（都不是 codegen 能修的，登记为 F13/F14/F15）：
-`-128` 这类无后缀负字面量在阶段 [4] 就 `E-0110`（F13）；`Q::Y(n)` 的绑定不进作用域（F14）；
+`-128` 这类无后缀负字面量在阶段 [4] 就 `E-0110`（F13，**F13 轮把这条关掉了** —— 负号不再产生类型判据，
+范围检查改落到上下文已知的十个站点，见下文 F13 一节）；`Q::Y(n)` 的绑定不进作用域（F14）；
 `fmt!` 在阶段 [2]/[4] 没有 lowering 路径，`sema` 见残留 `MacroCall` 就发 `E-0402`（F15）——
 所以 C2 验收清单里的 `fmt` 覆盖被上游阻塞，本轮**没有**为了让它过而在后端假展开。
 
@@ -2058,4 +2059,56 @@ blob 738 + 段尾 64）/ build-id `d7c4408e…370015` 一字未动 / 节点表 7
 （`E-0300` 只是报错，`resume` 那一半仍漏 = **F54**）；也不许把 F53 说成"测试驱动发现的红灯" —— 它是临时探针
 把进程打死后回推出来的，**修前它一条测试都不红**。
 既有红线不变：覆盖 83/2300 ⇒ 不得声称「INFY v2.0 兼容」。
+
+## F13 轮（2026-10-18）：`-128` 写的出来也编得掉了 —— 一元负号不再冒充类型判据，§2.8 的范围检查落到每个"上下文类型已知"的站点（裁定 = 偏差 **D-55(a)–(g)**，交付提交 `d8b6287`）
+
+**一句话根因**：把"这个字面量能不能取负"做成了**类型判据**（`Ty::Prim(p) if p.is_signed() || p.is_float()`），
+而 `Ty::IntLit` 的含义恰恰是"类型还没人给"⇒ 负号在类型上必然失败，报出来的却是 `E-0110 · 一元负号作用于
+非数值类型`。同一条 §2.8 范围规则的另一半则是**空**的：`300` 放进 `u8` 的上下文里，阶段 [4] 没有任何站点
+检查过它，直到阶段 [8] 才由 `numeric_text` 显式拒绝 —— 一条规则两半都漏。
+
+**实测对照**（`target/scratch/f13/` 十九份最小 module，release 二进制逐条跑，`python gen.py --build`）：
+
+| 形状 | 修前 `check` | 修前 `build` | 修后 `check` | 修后 `build` |
+| --- | --- | --- | --- | --- |
+| `fn g() -> i32 { -128 }` | **2**（`E-0110`） | 2 | **0** | **0** |
+| `fn m() { let x: i8 = -128; }` | **2**（`E-0110`） | 2 | **0** | **0** |
+| `fn m() { let x = -1; }` / `-0x10` / `take(-128)` | **2** | 2 | **0** | 0 |
+| `fn g() -> i8 { -128i8 }` | 0 | **6** | 0 | **0** |
+| `fn g() -> u32 { -1 }` | 2（`E-0110` 走错门） | 2 | **2 · 恰 1 条 `E-0042`** | 2 |
+| `fn g() -> u8 { 300 }` / `take(300)` / `P { a: 300 }` / `[1u8, 300]` / `x + 300` | **0** | **6** | **2 · `E-0042`** | 2 |
+| `var x: u8 = 0; x = 300;` | **0** | **6** | **2 · `E-0042`** | 2 |
+| `const K: u8 = -1;` | **0** | **0（值进产物）** | **2 · `E-0042`** | 2 |
+| `fn g() -> u32 { -1u32 }` | 0 | **6** | **2 · `E-0043`** | 2 |
+| `fn m(x: u8) -> u8 { x << 200 }` | 0 | 6 | **0（§4.12：运行时 `R-0007`）** | 6（= **F57**） |
+
+**读回来的生成 C**（本轮验收本体之一，不是测试内断言）：`int8_t x_1 = INT8_C(-128);`、
+`return INT8_C(-128);` —— 旧实现这里必然拒绝，因为它先把字面量按**幅度**格式化（`128` 放不进 `i8`），
+再在外层补负号；`numeric_text` 改收 `i128` 之后"放不放得进"只有一个判断点。
+
+**顺带修掉的两个形状缺陷**（都不是附带清理，是范围规则能落地的前提）：
+① `(Ty::IntLit, Some(标注))` 此前丢掉标注 ⇒ `var x: u8 = 0;` 的 `x` 是 `IntLit`，于是
+`x = 300`（`E-0042`）与 `let y: u32 = x;`（`E-0110`）**没有判据可依**（修前实测两条都 exit 0）；
+② 超 `i64` 的十进制无后缀字面量报完 `E-0042` 仍返回 `IntLit` ⇒ 与新增规则**对同一根因报两条**，
+被外部用例 `2.8-literals-0011` 的多重集比对当场逮住（非十进制那一支早就是 `Ty::Invalid`）。
+
+**范围规则没落到的四类位置 = 本轮新登记**：**F55**（`return v;` 收尾的函数体一律 `E-0053`，
+诊断自己的 note 与现场矛盾；用 `target/scratch/f11/infy-old.exe` 复跑证明早于本轮）、
+**F56**（`const`/`static` 初值不做类型检查 —— `const K: u8 = 1i32;` check/build 全绿；构造器实参
+`Some(300)` 与模式字面量 `300 =>` 不在上下文清单里 = check 绿 build 6；§2.8 的加宽特例对无后缀
+`i64::MIN` 那一档仍未接）、**F57**（8/16/32 位宽的移位没有 codegen 入口）。
+
+**基线（本机 `-j 1` 连跑两次同数）**：`cargo test --offline --lib` **576 passed / 0 failed**
+（`sema` 29 → **35**；`codegen` 33 不变但 `literals_carry_their_resolved_width` 改认新发射形并加了
+"旧幅度形不许复现"的反向断言）、`cargo check --offline --lib` **0 error / 0 warning**、
+`cargo build --offline --release` exit 0、tour 的 `fmt --check|check|build|run|test` +
+`--verify-reproducible` + `artifact info --nodes` 全 exit **0**、**C11 12512 / 产物 200700 /
+build-id `d7c4408e…370015` / 节点表 7-8-9-10-16-20 一字未动**（tour 源码里没有负字面量，也没动 `infy_rt.c`）、
+`infy conformance --report` 仍 **83 = 77/0/6 ⇒ exit 1**（92.8%）、四条 C 链（C 侧零改动）两份 `-c`
+各 stderr **0 字节**、rt **32353 / 0**、两条 IFBC 各 **180/180** + `cmp` 无差异。
+
+**措辞红线（本轮加一条）**：不许说"字面量的范围检查已覆盖所有上下文"—— F56 那三类（`const`/`static`
+初值的类型匹配、构造器实参、模式字面量）今天仍会 check 绿 build 红，`const K: u8 = 1i32;` 甚至会
+全绿进产物。既有红线不变：覆盖 83/2300 ⇒ 不得声称「INFY v2.0 兼容」；"两侧装载期校验等价"不许讲
+（F26 / D-42 (a)–(e)）；不许说"派生代码的类型标注可信"（F49）；`[u32; 后声明的 const]` 仍只是显式拒绝（F52②）。
 
