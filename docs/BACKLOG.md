@@ -1691,6 +1691,305 @@
       要么在 `docs/spec-deviations.md` 记明"移位只对 64 位宽度可发射"并让 `check` 阶段就拒绝而不是
       留到 [8]。
 
+### 阶段 G：竞品对标 —— 竞品的优点逐个超越，竞品的已知缺陷逐个封死
+
+> 来源：2026-10-18 对项目所有者点名的竞品（rustc/cargo、Go、Zig/Nim、CPython/Lua/JS/TS、JVM/.NET/Swift、
+> 以及诊断/LSP/合规/供应链这一整层工程实践）做的一轮定向调研。每条给出**竞品机制 + 竞品公开痛点（带出处）+
+> INFY 现状（实测到文件/行）+ 验收命令**，没有实测过的现状写"未核实"，不许照抄调研结论。
+> **排产规则**：G 排在阶段 F 之后，§1 第一个 `[ ]` 空了才轮到 G1；一轮一格，与 §0 协议同权重。
+> **不许做的**：附录 F.1 的封闭清单（`async`、GC、全局随机、`eval`、隐式转换、第三方过程宏……）
+> 不因"竞品有"而加回 —— 那是 MAJOR 变更，不属于本阶段。G0 就是把这条边界写成一条可执行的检查。
+
+- [ ] G0 **把"竞品有但规范明确不做"钉成一条合规检查**（防的是以后有人拿"Go 有 goroutine"当理由往语言层塞特性）：
+      新增 `conformance/cases/nongoals/**`，每个附录 F.1 条目一份"试图使用"的语料（`async fn`、`await`、
+      `spawn`、`eval`、`"{x}"` 插值、无 `Option` 的 `null`、`#[cfg]`），判据 = **必有一条诊断且退出码非 0**
+      （禁止静默通过、禁止退化成 `E-0053` 这种"语法不认识"的通用红）。
+      验收：`infy conformance --report` 里新增一类，条数 = 附录 F.1 表行数；每条能指出它锁的是 F.1 哪一行。
+      现状：**未核实**——现有 83 条用例里是否已覆盖这些形状（`conformance/cases/` 未逐条读）。
+
+- [ ] G1 **`infy explain <CODE>`：把 210 条码表的长文说明变成可查的第一方接口**（Rust 的 `rustc --explain` 是它诊断体系里最便宜、也最被模仿的一环）。
+      竞品机制与代价：Rust 的诊断码带独立的 long-error 索引，`--explain` 离线可查；rustc 的 JSON 诊断（`--error-format=json`）是
+      rust-analyzer/cargo 的消费面，**不是给人看的第二等输出**。
+      INFY 现状（实测）：`src/codes.rs` 每条码已带 `title/note/help/clause`，但**只有渲染进诊断横幅这一条消费路径**；
+      `src/cli.rs:76` 的 `NOT_IMPLEMENTED` 里没有 `explain`，所以这个子命令根本不存在。
+      验收：`infy explain E-0111` 打印"标题 + 条款号 + note + help + 相关码"，未知码报专门诊断而不是打印空串；
+      再加一条**码表自检**：`infy explain --all` 必须 210 条全有非空 note（把"有条目但正文空"这一类封死），
+      并与 §9.6 的"只有 W-/N- 可调"不冲突。
+
+- [ ] G2 **`--diag-json` 补结构与金样测试**（Rust 的教训：JSON 是消费面，字段漂了没人红 = LSP 静默错位）。
+      竞品公开痛点：rustc 的 JSON 诊断字段变更会直接打挂下游工具，所以它有 `--error-format=json` 的**版本化**约定与专门的 UI 测试；
+      Go 的 `go vet`/`gopls` 走的是另一条 `analysis` 注册表，靠"诊断必须可 quickfix"保持一致。
+      INFY 现状（实测）：`src/diag.rs:render_json` 按附录 E.5 产出，但 `docs/coverage.md` 自己写着
+      "`--diag-json` 有发射点、**无金样/结构测试**"；`origin`/`expand_chain`/`phase` 三个必需字段没有一条测试断言它们存在。
+      验收：① 一份金样（文本 + JSON 双份，同一语料）；② 一条**结构不变式**测试：每条诊断的
+      `phase ∈ {typck,borrow,link,embed,fmt,runtime}`、`spans[].origin` 非空、`code` 必在 210 表内；
+      ③ §9.4 的同码同文：对同一份语料断言 `infy check --diag-json` 的 message 与 `infy fmt`/（G3 之后的 lsp）逐字节一致。
+
+- [ ] G3 **`infy lsp` 落地，并把"IDE 与 CLI 不同码不同文"当成一条被测面**（这是竞品层最贵的坑：rust-analyzer 的 salsa 缓存与
+      `cargo check` 结果不一致是长期 bug 源；TypeScript 的 `--incremental` `.tsbuildinfo` 与 `tsc` 全量结果也会漂）。
+      竞品机制：gopls 用 analysis pass 失效、tsserver 用语义缓存 + `LSP host` 的"版本化 snapshot"来保证可重放；
+      公开痛点：这两家都有"缓存脏了不重算"的长期 issue 类别。
+      INFY 现状（实测）：`src/cli.rs:76` 把 `lsp` 放在 `NOT_IMPLEMENTED` 里显式拒绝（D-50(a)），`src/cli.rs:3583` 有锁点
+      保证它不会被误报成"能跑"。⇒ 优点未补齐，但**没有假成功**。
+      验收（按可交付顺序拆两格）：① 先做**增量正确性**的判据本身：一条测试用"改一个字节 ⇒ 只重算受影响阶段"
+      与"全量 `infy check`"两条路径，断言诊断集合**逐字节相同**（这条不需要 lsp，先把它变红再修）；
+      ② `infy lsp` 实现 stdio JSON-RPC 的最小面（`initialize`/`textDocument/didOpen`/`didChange`/`publishDiagnostics`），
+      诊断取自与 CLI 同一个 `Handler`，退出拒绝臂时同步把 `NOT_IMPLEMENTED` 与 `docs/status.md` 改掉。
+
+- [ ] G4 **`.infib` 清单补齐 `[[deps]]` 与 `sig` 占位，`target` 不再写宿主架构**（.NET 强名的教训：身份与完整性两件事必须分开，
+      但**字段先占位**才不会破坏容器格式；规范附录 C-5 已裁定"占位、不改容器版本号"）。
+      竞品公开痛点：.NET strong naming "不是安全边界"且精确版本绑定造成 binding-redirect 地狱（
+      https://learn.microsoft.com/en-us/dotnet/core/compatibility/core-libraries/6.0/strong-name-signing-exceptions）；
+      CPython 的 Stable ABI "解释器并不检查扩展是否真守约定"（https://docs.python.org/3/c-api/stable.html）。
+      INFY 现状（实测，`src/btrack.rs:4430 infib_manifest`）：只写 `[lib]`/`[lib.profiles]`/`[[code]]`，
+      **`target` 取 `std::env::consts::ARCH`（构建主机），不是请求的 triple**；没有 `[[deps]]` 行、没有 `sig` 字段。
+      验收：① `target` 用 `infy build --target` 传下来的 triple（缺省才回落主机），② 附录 E.2 的 `[[deps]]` 行按实际依赖写出，
+      ③ `sig = ""` 占位且 `src/toml.rs` 的 round-trip 测试认它，④ 缺 `ifabi`/`abi_hash`/`deps.dirhash` 任一经 E-0554 拒绝
+      （规范已写，需实现接上）。
+
+- [ ] G5 **build-id 必须覆盖"产物自身"：主机镜像摘要 + `.inf ifbc` 段摘要**（这是对标 Go sumdb / Debian 可复现构建时唯一真正的输点）。
+      竞品机制：Go 的 sumdb 用平铺 Merkle 树给"内容"背书；Debian 可复现构建把**非确定性来源**列成清单（路径、时间戳、排序、locale、PE 时间戳）。
+      INFY 现状（实测，`src/artifact.rs:385-400 BuildInputs` 与 `:931 build_id()`）：输入面含
+      dirhash/lock/manifest/target/opt/profile/toolchain/IFABI/编译器版本，**不含**被塞进容器的宿主镜像与 `.inf ifbc` 字节
+      ⇒ 两个内嵌运行时的产物可以共享同一个 build-id（除非恰好跑了 `--verify-reproducible`）。
+      验收：同一 build-id ⇒ `cmp` 两棵不同构建目录下的产物**逐字节相同**（反向用例：改动 `.inf ifbc` 一个字节 ⇒ build-id 必变，
+      写成探针而不是注释）；§7.3 的输入清单同步到 `docs/spec-deviations.md`（这是裁定，不是补洞）。
+
+- [ ] G6 **`infy artifact info` 报告 OS 签名区与 `INFYART2` 尾部的相对位置**（竞品层最容易翻车的一环：PE 的 Authenticode
+      不是"整文件哈希"，签名 SIP 会跳过 checksum 字段与证书表，所以**签名之后追加内容不破坏签名**——CVE-2013-3900 就是这么来的，
+      后来才有 `EnableCertPaddingCheck`；arm64 macOS 直接拒绝跑未签名代码）。
+      竞品公开痛点：https://learn.microsoft.com/en-us/windows/win32/secbp/understanding-pe-signatures
+      INFY 现状（实测）：全仓 `docs/` 与规范里 `authenticode|codesign|notarization|signtool` **零命中** ⇒ 完全没有这一层。
+      验收（ std-only 可做的范围）：① 解析 PE 数据目录 `IMAGE_DIRECTORY_ENTRY_SECURITY`，若证书表存在且
+      `INFYART2` 尾部落在签名区**之外/之内**，分别给一条确定诊断（`W-` 提示"签名后追加"与 `E-` 拒绝"尾部覆盖了证书表"）；
+      ② 用一份手工构造的带证书目录假 PE 夹具做正反两条测试；③ Mach-O/ELF 分别给"未做签名"的显式说明，**不许静默 0**。
+
+- [ ] G7 **确定性调度要在多 worker 下被测，而不是只在单 worker 下被断言**（这是 INFY 相对 Temporal/Kotlin coroutines 的立身之本，
+      现状却是最薄的一格：Kotlin 的 dispatcher 碎片化逼用户注入 `TestDispatcher` 才谈可测性；
+      Temporal 因为"在途工作流遇到代码变更就不可重放"而不得不推 worker versioning）。
+      竞品公开痛点：https://developer.android.com/kotlin/coroutines/test 、
+      https://temporal.io/blog/safe-deployments-with-temporal-worker-versioning-on-kubernetes
+      INFY 现状（实测）：缺省 worker = `min(logical_cpus, 8)`，`INFY_THREADS` 可覆盖（`runtime/infy_rt.c:1954-1967`）；
+      而 `infy_rt.c:2243` 自己写着 chain 半径的清理路径"单 worker —— 即确定性配置 —— **永远走不到**"
+      ⇒ 与规范 §8.5 的五类抢占点相比，实现有整条路径只在非确定配置下被触及，且**没有跨 worker 等价测试**。
+      验收：`runtime/test_rt.c` 加一类"同一份链拓扑 + 同一份事件序列，在 `INFY_THREADS=1` 与 `=4` 下
+      节点访问序列与 drop 顺序**逐条相同**"；不等价就红，**不许**把断言改成"只比集合不比序"（§12.3 的可观察行为含顺序）。
+
+- [ ] G8 **每包级增量与缓存真正落地（§5.10）**（Rust 的公开第一痛点就是增量：1.52.1 因 `found unstable fingerprints`
+      直接把增量降为默认关闭；2025 编译器性能调查里 55% 的人改一行要等 >10s，链接还完全增量不了）。
+      竞品公开痛点：https://blog.rust-lang.org/2021/05/10/Rust-1.52.1.html 、
+      https://blog.rust-lang.org/2025/06/16/rust-compiler-performance-survey-2025/
+      INFY 现状（实测）：`infy clean --cache` 只打印 §5.10 的缓存目录路径、**不删也不复用**（`src/cli.rs:2594`）；
+      `docs/coverage.md` 的 §5.10 行是"未做"。⇒ 竞品会痛的这一格，INFY 目前不是"做得差"，是**没有**。
+      验收（必须带失效判据，否则就是给增量编译埋雷）：① 指纹 = 该包源文件 dirhash + manifest + 请求 target + IFABI +
+      编译器版本，五项任一变 ⇒ 该包阶段 [1]-[6] 重算；② 连续两次 `infy build` 第二次打印 `cached` 且产物字节不变；
+      ③ **反向用例**：只改 `MODULE.infy.toml` 的一个依赖范围 ⇒ 不许命中缓存；④ 缓存损坏（截断文件）时报专门码并回落全量，
+      不许假成功。
+
+- [ ] G9 **`unsafe` 区域要有可跑的审计，而不是只有码表**（Rust 的结构性缺口：`unsafe` 不可验证、`cargo miri test` 极少进 CI、
+      `unsafe_op_in_unsafe_fn` 到 Ed.2024 仍只是 warn）。INFY 说"对标 Rust"，那么"边界内全管"必须有**执行面证据**，
+      否则这句话与竞品一样是空头。
+      INFY 现状（实测）：`src/borrow.rs:22` 有 `in_unsafe` 状态，`src/codes.rs:1361` 的 `E-1031` **只在码表里**
+      （`grep -rn '"E-1031"' src/*.rs` 命中数 = 1）⇒ F47 登记的"零发射点"仍未收。
+      验收：`E-1031`…`E-1034` 每条各有一正一负两条语料 + 一份变异探针（把检查点删掉必须有测试变红，
+      沿用 `scripts/f14-mutation-probe.ps1` 那一族的做法），且 `infy conformance --report` 里对应类目从 0 变非 0。
+
+- [ ] G10 **把"零发射点"扫成一条常驻门禁**（竞品层的共性反模式：Rust 的 lint 表里有条目但 `--cap-lints` 才能压、
+      合规套件里 `.stderr` 金样靠 `--bless` 重新生成 —— 这两条 INFY 已经用 D-48(e) 的"拒绝 `--update-golden`"封了一半，
+      但**诊断码可达性**没有全量扫过）。
+      验收：`scripts/` 下新增一个只读扫描脚本，输出"210 条码里有多少条在 `src/` 里既不是字面量发射点、也不在拒绝臂里"，
+      数字进 `docs/status.md` 并随轮次变化；**目标不是 0**，而是"每一条要么可发射、要么显式登记为未实现"。
+      现状（实测）：`src/codes.rs` 2128 行、210 条码齐全；可达性只有 F47/F13 轮手工数过的那几条。
+
+- [ ] G11 **A 轨的编译期策略要有第二 TU 与 LTO 的出口**（Rust 在这一层的优点值得追：`rust-lld` 进 stable、PGO/BOLT 可用、
+      `cdylib/staticlib` 分工明确；它的缺点也值得避：单 crate 一次编译 ⇒ 改一行全量重编）。
+      INFY 现状（实测）：D-26 记的是**整 crate 单个 C11 TU** ⇒ 编译时间随规模线性炸、且没法只重编一个包；
+      `docs/coverage.md` 阶段 [9] 行写"无 LTO/PGO/多对象"。
+      验收（先量再改，别先做）：① 给一个"最坏的单一真实语料"计时基线进 `docs/status.md`（命令 + 秒数），
+      ② 拆成**每包一个 TU** + 链接期合装，产物字节在 `-O0` 下与拆分前**不要求相同**但 build-id 判据必须更新（见 G5），
+      ③ 显式声明 `-flto`/PGO 属 v2.1（不做就写清不做，禁止静默降级）。
+
+- [ ] G12 **全局错误上限 + 同根因去重**（clang `-ferror-limit`、GCC `-fmax-errors` 是几十年的答案，专门对付"一个根因爆 N 条"）。
+      INFY 现状（实测）：`src/parser.rs:44` 只有一个布尔 `stop`（"同一根因过多时硬停"），**没有可配的数字上限**，
+      也没有跨阶段的全局封顶；本文件已登记的同族缺陷 F37（一个 `E-0702` 级联出 8 条 `E-0053`）、
+      F52（同一错误经两条通道各报一次）正是这两家 flags 对付的形状。
+      验收：① `infy check --max-errors=N`（缺省给一个确定值并写进 `docs/status.md`），超限后打印"还有 K 条因同类被抑制"
+      并以专门码退出，**不许**静默截断；② F37/F52 的语料在该 flag 下的诊断条数成为断言；
+      ③ 与 §9.4 不冲突：`--max-errors=0`（不限）时输出与今天逐字节一致（金样回归不许动）。
+
+- [ ] G13 **每条诊断码至少一份"渲染金样"语料**（Elm 把整仓库做成 error-message-catalog 语料库，是这一层最强的一招：
+      https://github.com/elm/error-message-catalog ）。
+      INFY 现状（实测）：`src/codes.rs` 有 210 条码，`src/diag.rs` 只有 **1 份** §9.2 逐字节金样 + 1 条插入符规则测试；
+      `docs/coverage.md` §9.2/§9.4 两行自己写着"金样缺"。⇒ 208 条码的**文本形态无人背书**。
+      验收：`conformance/cases/diag/<CODE>.infy` + 同名 `.ver.txt` 存**渲染后的字节**；
+      `infy conformance --report` 新增一类 `diag`，报告"N/210 条码有金样"，一轮加一批（不许一次塞 200 份粗样，
+      每份要能指出它锁的是哪条 note/help 分支）。
+
+- [ ] G14 **`infy fix`：把机器可应用的 suggestion 变成真正的修复器**（Rust 的 `cargo fix` + `rustfix` 让 `suggestions`
+      字段有消费方；否则建议只是写给人眼的第二等信息）。
+      INFY 现状（实测）：`src/diag.rs:129` 的 `Applicability {Machine,Casual,Unspecified}` 已实现并随附录 E.5 输出，
+      但 `src/cli.rs` 里 `"fix"` 零命中 ⇒ **建议是只写不读的**。
+      验收：① `infy fix --dry-run` 列出将做的替换（只吃 `machine`，`casual` 必须**不**自动应用），
+      ② 应用后 `infy check` 的对应码消失且 `infy fmt --check` 仍干净（防止修复器产出非不动点文本 —— §9.5 第 13 条），
+      ③ 幂等：连跑两次第二次 0 改动；④ 至少三条真实语料（E-0042 加宽、E-0063 级 lint 迁移、`as` 显式转换）。
+
+- [ ] G15 **lint 抑制要有"理由"与"作用域"，还要能压依赖**（Rust 的现行答案是 **RFC 2383**，1.81 稳定：
+      `allow/warn/deny/expect` 都带 `reason = "…"`，`#[expect]` 在未命中时反过来报警；
+      工作区 `[lints]` 表 1.74 起由 Cargo 跟踪进重建判据，`--cap-lints` 专门压非本包 lints。
+      https://blog.rust-lang.org/2024-09-05/Rust-1.81.0.html 、https://rust-lang.github.io/rfcs/2383-lint-reasons.html）。
+      INFY 现状（实测）：§9.6 的 `[lints]` 已接（D-49，`cli.rs` 的 `lint.set`），
+      且 **E 与 W 的不对称是被测的**（`W-0002` 可 allow、`E-… = "allow"` → `E-0093`，F2/P1 锁点）—— 这一半已合规；
+      缺的是 `reason` 字段、`#[expect]` 的"未命中即报警"、以及**导入符号（A/B 轨摄取来的码）无上限抑制**。
+      验收：① `#[allow(E-…, reason = "…")]` 语法接进解析器（保留字位置要用 `word_at()` 那一族，见经验库
+      infy-spec-ident-vs-keyword-trap），reason 只做文档、**不许**改变判定；
+      ② `#[expect(code)]` 未命中 ⇒ 报专门 W-；③ 摄取来的模块自带的 W- 一律封顶为 allow（`--cap-lints` 等价），
+      并把这条判据写进 `docs/internals/runtime-abi.md` 之外的清单文档。
+
+- [ ] G16 **一份可调文件，且未知键必须红**（clippy.toml / `.golangci.yml` / ESLint 的共性是"tunable 与 severity 分家"；
+      https://doc.rust-lang.org/clippy/lint_configuration.html 、https://golangci-lint.run/usage/false-positives/）。
+      INFY 现状（实测）：只有 level 重映射与 `--max-width` 一个命令行旋钮；**没有 knob 文件**。
+      验收：`INFY-LINT.toml`（沿用 `src/toml.rs` 子集解析器）承载 line-width / 数值上限类旋钮，
+      未知键与非法值各报专诊断（禁止静默忽略 —— 这是"属性被静默丢掉"那一族缺陷的配置面同族）。
+
+- [ ] G17 **语法错误后的可用性（编辑器要求的最小正确性）**（tree-sitter 的立身之本是
+      "有语法错误时仍给出有用的树"，https://github.com/tree-sitter/tree-sitter ；rust-analyzer family 靠 on-demand
+      memoized query（Salsa，https://github.com/salsa-rs/salsa）保证局部改动只重算受影响面，gopls 则是
+      "每次编辑把 analyzers 全跑一遍"的粗但**可预测**模型，https://github.com/golang/tools/blob/master/gopls/doc/analyzers.md）。
+      INFY 现状（实测）：恢复只有 `parser.rs` 的 `synchronize()` 一处窄路径（F37 就是它的现场）；
+      两种增量模型**一个都没选**。
+      验收：① 明确选边并把裁定写进 `docs/spec-deviations.md`（批次裁定：先做 gopls 式"全量重算但缓存阶段 [1]-[2]"，
+      因其与 §9.4 的逐字节一致性最容易互证）；② 三条语料：坏在第一个 `fn` ⇒ 后面的 `fn`/`impl`/`use` 仍被解析出条目、
+      仍参与类型检查；③ G3 的 IDE≡CLI 判据复用同一份语料。
+
+- [ ] G18 **`infy doc` + 将文档示例当作测试跑**（rustdoc 的 doctest 与 `--document-private-items` 是表桩：
+      https://doc.rust-lang.org/rustdoc/command-line-arguments.html ；Go 的 example 函数是可执行文档：
+      https://go.dev/blog/examples ）。
+      INFY 现状（实测）：`src/doc.rs` 与 `src/host.rs` 各 **1 行**（`wc -l` 都是 1），`infy doc` 在
+      `NOT_IMPLEMENTED`（`src/cli.rs:76`）里显式拒绝；`cargo test` 的 doctest 数 = 0（P30 记录）。
+      验收（分两格，先做有牙齿的那格）：① **可执行文档**：`docs/**/*.md` 里标了 ```` ```infy ```` 的块必须
+      经 `infy check` 且失败即红，接入现有 `conformance` 计数之外的一条独立门禁；
+      ② `infy doc` 生成 Markdown 站点骨架 + 条款反链（§条款号已在 `codes.rs` 里）。
+
+- [ ] G19 **把 §9.2 的几何从"实现选定"升级为"可推导 + 属性测试"**（这是本阶段最要紧的一条诚实记录：
+      规范的 §9.2 样例自身与实现不完全一致，`src/diag.rs` 的头注释明写几何是由实现固定的）。
+      后果：一旦有人按规范样例改渲染，§9.4 的"逐字节一致"承诺就同时坏两处。
+      验收：① `docs/internals/diag-geometry.md` 写出**算法**（ gutter 宽度 = 位数最大值、RI 旗宽度、
+      插入符对齐、多 span 时的续行规则），② 属性测试：随机生成 200 组 span（含 9/10/99/100 行号边界、
+      跨行 span、`origin` 四种取值），断言"同一算法两次渲染逐字节相同"且"列数变化不改变前缀字节"，
+      ③ 偏差登记（样例与实现的差异不许偷偷改实现，要在 `docs/spec-deviations.md` 新增一格）。
+
+- [ ] G20 **`SOURCE_DATE_EPOCH` 与跨机器可复现**（Debian 把非确定性来源列成清单：时间戳、文件顺序、构建路径，
+      https://wiki.debian.org/ReproducibleBuilds ；事实规范 https://reproducible-builds.org/specs/source-date-epoch/ ）。
+      INFY 现状（实测）：全仓无 `SOURCE_DATE_EPOCH` 使用；`docs/coverage.md` 自认 build-id 是**主机 `cc` 的函数**
+      （P30：远端产物 221666 vs 本机 199975 字节），`--verify-reproducible` 只证同机确定性。
+      验收：① 读取 `SOURCE_DATE_EPOCH`（存在则参与 build-id 输入并钉住任何内嵌日期；不存在 ⇒ 行为与今天相同），
+      ② 两条测试：同一份输入在 `SOURCE_DATE_EPOCH=0` 与 `=1700000000` 下 build-id **不同**（可追踪），
+      而同一值下跑两次字节相同；③ `docs/status.md` 把"跨主机产物字节不等（因为 `cc` 不等）"写成显式不承诺，
+      并把判据换成"同一 toolchain 声明 ⇒ 同 build-id"（G5 的输入面补全后才能成立）。
+
+- [ ] G21 **`infy sumdb`：本地透明日志 + 平铺 Merkle 包含证明**（Go sumdb 是这一层公认答案：
+      平铺树、包含/一致性证明、离线镜像；https://go.dev/blog/module-mirror-launch ）。
+      INFY 现状（实测）：`src/cli.rs:76` 把 `sumdb` 列在 `NOT_IMPLEMENTED`；§5.8 与附录 E.1 已把
+      `sumdb <path>@<ver> tree_head=… inset=… proof=…` 的**行格式定好了**（⇒ 这是"格式先行、实现未接"），
+      `src/pkg.rs` 已有 Merkle dirhash 可复用。
+      验收：① `infy sumdb add|lookup|verify --db <目录>` 三动作本地可用（无网络），行格式与附录 E.1 逐字节一致；
+      ② 篡改 `MODULE.infy.lock` 里一行 dirhash ⇒ `infy mod verify` 报 `E-0560`，篡改数据库 tree_head ⇒ `E-0562`；
+      ③ 包含证明长度随条目数对数增长（写成断言，不是描述）；④ 签名身份仍不做（附录 C-5 的裁定不变），
+      但 `docs/status.md` 要明写"透明日志证完整性、不证作者"。
+
+- [ ] G22 **给合规套件一个"只增不减"的棘轮**（现状是 D-48(a) 故意让 `infy conformance --report` exit 1 且不进 CI
+      ⇒ 剩下 2217 条用例**没有任何回归信号**，谁都能把它改小）。
+      竞品对照：外部成熟项目很少报"覆盖百分比"（LLVM 基本不报），而 §12.5 强制分类比率 + `docs/coverage.md` 的表
+      由测试重算 —— INFY 在这点已严于竞品，缺的只是**门禁**。
+      验收：CI 新增一步（**不改** D-48(a) 的 exit 语义）：比较本次与上一份 `CATEGORY.toml` 的每类用例数，
+      任一类减少 ⇒ 红并指出哪一类少了几条；总数增加则把新数字写进 job summary。
+      现状（实测）：`.github/workflows/ci.yml` 明写 conformance 刻意不进 CI，并给了理由（第 20 行附近）。
+
+- [ ] G23 **把两处"已严于竞品"的机制登记成不可回退面**（不是新功能，是防拆护栏）：
+      ① `--update-golden` 两侧均拒绝（D-48(e)），且 `conformance::tests::the_ci_workflow_never_sets_the_regeneration_switches`
+      把 `INFY_REGENERATE_FIXTURE` / `_CANONICAL` / `_CATEGORIES` / `INFY_CONFORMANCE_PROBE` 四个开关钉成"workflow 里绝不赋值"
+      （实测：`.github/workflows/ci.yml:13-15` 注释 + 该测试存在）—— Rust 生态的 `--bless`/`trybuild` 恰恰**没有**这层锁；
+      ② §12.5 的"分类比率、禁止只报总数"由 `the_pass_rate_table_in_coverage_md_matches_the_corpus` 重算校对。
+      验收：两条各有一条"删掉检查就必须红"的变异探针（沿用 `scripts/` 里 f11/f14 探针那一族），
+      并在 `docs/internals/` 写一段"为什么拒绝重新生成金样"，防止后来者当遗留清理掉。
+
+- [ ] G24 **从产物本身读回"这是怎么造出来的"**（Go 的 `go version -m <exe>` 把 module 与构建设置嵌进可执行文件，
+      是"部署的东西能自证出身"这一层的标准答案；Go 还发过"完全可复现、已验证的工具链"（https://go.dev/blog/rebuild ）
+      与调试可观测性（https://go.dev/blog/debug-bootstrap 一类））。
+      INFY 现状（实测）：`.inf meta` 里已有 build-id/IFABI/节点表（`docs/internals/runtime-abi.md` §5），
+      但 `docs/coverage.md` 自认**产物字节是主机 `cc` 的函数**（本机 gcc 16.2 → 200700，CI gcc 15.2 → 221666），
+      且没有"从产物读回编译器串/依赖清单"的入口 ⇒ 拿到一个 exe 无法判断它由哪个工具链造。
+      验收：① `infy artifact info <exe>` 多打印"编译器版本串 + module@version+dirhash 列表 + toolchain 声明摘要"，
+      全部从文件字节读出（不是从当前目录重算）；② 一份手工截断的产物 ⇒ 显式 `E-`（禁止读半截当完整）；
+      ③ 与 G5 的 build-id 输入面互证（同一 exe 的 build-id 与它自报的字段一致）。
+
+- [ ] G25 **离线安全通告面：`infy mod audit` + 调用图感知**（Go 在这一层的答案是 govulncheck：
+      不是"匹配包名版本"，而是"这个漏洞函数**是否真被你的代码路径调用**"（https://go.dev/blog/govulncheck 、
+      https://go.dev/blog/vuln ）。Go 调查里"找不到可信模块"占 26%（https://go.dev/blog/survey2025 ））。
+      INFY 现状（实测）：规范 + `docs/` 全量 `grep -i 'vuln\|CVE'` **零命中** ⇒ 这一轴完全空白；
+      同时 crates.io 被策略拦截 ⇒ **不可能**联网取 OSV。
+      验收（离线形态）：① 通告库是一个本地 TOML（复用 `src/toml.rs`），条目含 `module-path`、版本范围、
+      `symbols[]`（受影响函数全限定名）、码；② `infy mod audit --db <目录>` 报"命中且**可达**"与"命中但不可达"两档，
+      可达性用已有的符号表/调用图算（做不到可达性分析就明确降级为"包级命中"并写进偏差，禁止把包级命中说成调用级证据）；
+      ③ 无通告库时报专诊断、exit 非 0，**不许**打印 0 findings 冒充干净。
+
+- [ ] G26 **`infy bind cc`：A 轨绑定的脚手架生成器**（这是规范自己欠的一条：附录 C-1 的主路径 (a) 要求
+      "`infy` 必须提供 C API 绑定生成的脚手架（目前 §13.4 无对应子命令）"。Zig 的对照教训很直接：
+      `@cImport` 已被弃用、改走 `b.addTranslateC` —— 它退出了"语言层直接吃 C"，而 INFY 押的是相反方向，
+      所以必须把"生成 + 校验"做实（https://ziglang.org/download/0.16.0/release-notes.html ））。
+      INFY 现状（实测）：A 轨有 `#[repr(C)]` + `extern "C"` + 名字哈希块校验（D-38/D-42 两侧 dump/verify），
+      `src/atrack.rs` 有绑定消费端，但**没有任何生成入口**，`infy` 的 `NOT_IMPLEMENTED`（`src/cli.rs:76`）里也没有 `bind`。
+      验收：① `infy bind cc --header <file> --out <package>` 产出手写形的 `.infy` 声明（不做 C 预处理器全量解析，
+      范围 = `docs/internals/` 里写死的可解析子集，越界项**逐条报"未生成"并计数**）；② 产物再过 `infy check` 必须 0 诊断；
+      ③ 与 §13.4 的冲突登记偏差（新增子命令是文档级变更，不动容器格式）。
+
+- [ ] G27 **实验性/未完成的开关一律要么有后果、要么显式拒**（Go 的文化是 `GOEXPERIMENT=greenteagc,swissmap,jsonv2` 全在
+      release notes 里标"experimental"，SIMD 至今只在实验通道 —— 好处是**用户不会把半成品当成成品**）。
+      INFY 现状（实测，两处真洞）：① `infy check --deadlock` 只把 `handler.lint.deadlock_analysis = true`
+      写进 `src/diag.rs:329` 的字段，**没有任何分析消费它**，而 `W-0800` 在全仓只出现在 `src/codes.rs:1552`
+      ⇒ 这是经验库 infy-unreachable-implementation-branch 里"开关读进结构体没人查"那一格；
+      ② `src/lib.rs:99-100` 声明的 §13.4 环境面（`INFY_CACHE`/`INFY_PRIVATE`/`INFY_NOSUMDB`/`INFY_TOOLCHAIN`/
+      `INFY_TARGET_DIR`/`INFY_DIAG_COLOR`/`INFY_THREADS`）里，`INFY_NOSUMDB` 与 `INFY_PRIVATE` 目前只出现在
+      `src/codes.rs` 的 help 文本，`grep` 不到读取点 ⇒ **文档承诺了、代码没读**。
+      验收：① `--deadlock` 在分析落地前改为**具名拒绝**（打印"本 build 未接锁序图分析"并 exit 非 0），
+      落地后再摘掉；② 一条常驻测试：枚举 `src/lib.rs` 声明的每个 `INFY_*`，断言它要么被真实读取、
+      要么不出现在声明里；③ 一条常驻测试：`usage()` 打印的每个 flag 至少改变一处可观察输出或退出码（金样对照）。
+
+- [ ] G28 **锁文件/哈希格式的"代数"纪律**（Zig 与 Nim 的包管理都栽在格式突变上：Zig 重写 hash 格式后旧哈希全废、
+      依赖迁到项目本地 `zig-pkg`，issue 族 #17135/#17942/#25973 都是"同一份依赖两种 hash / 传递依赖必须在根清单列全"；
+      Nim 的 nimble 连 semver 都不强制（https://github.com/nim-lang/nimble/issues/130 ）且锁文件有洞）。
+      INFY 现状（实测）：附录 E.1 的行格式与 `h1:` 前缀已经**自带代数**（这是优点，要保住），
+      `src/pkg.rs` 的 dirhash 有测试；但"未知前缀/旧代数"的处理路径没有专门码与测试。
+      验收：① `h1:` 之外的前缀（如 `h2:`）必须**明确拒绝并报"需要更新工具链"**，不许当 dirhash 比对后误报 `E-0560`
+      （把"格式不认识"与"内容被换包"混成同一个码是典型可诊断性缺陷）；② 一份旧代数锁文件夹具 + 正反两条测试；
+      ③ 迁移规则写进 `docs/internals/`（改格式 = 新前缀，永不就地重定义旧前缀语义）。
+
+- [ ] G29 **目标三元组从"写死在代码"改为"表驱动"**（Go 的教训是端口流失会造成用户侧硬失败：
+      windows/arm 从有到废（https://github.com/golang/go/issues/71671 ），每次都是 breaking）。
+      INFY 现状（实测）：`--target` 是 5 个 triple 的封闭集、未注册的报 `E-0601`，`//infy:build riscv` 走 `E-0012`
+      ⇒ 加一个架构要改代码 + 改规范，这方向对（语言层封闭），但**注册表本身应数据化**。
+      验收：① 三元组与其能力（可执行格式、C ABI 串、`ld` 形态、IFBC 是否可用）收进一张表（`src/target.rs` 或数据文件），
+      `infy target list --json` 读它；② 新增一个**测试专用** triple 只加表不改判据；③ `E-0601`/`E-0012` 现有测试不退化。
+
+- [ ] G30 **可观测性预算要被测量并写下来**（Go 公开了 gopls 可扩展性预算：v0.12 重写在 28 个头部仓库上平均省 ~75%
+      内存/启动（https://go.dev/blog/gopls-scalability ）；这类数字是新工具链取得信任的方式，也是 rust-analyzer 族
+      被长期诟病的点）。INFY 现状（实测）：**没有任何性能基线**，`bench` 甚至不在 §13.4（`cli.rs` 的拒绝臂里写明
+      "`bench` = §13.4 无此子命令"）。
+      验收（按经验库 controlled-variable-experiments 的口径）：① `scripts/perf-baseline.ps1` 固定语料（阶段 [1]-[5]
+      全跑一次 + 单文件 [1]-[9] 各计时），**先测噪声底**；两次运行差值 > 噪声底才允许写结论，否则脚本只打印不判定；
+      ② 基线数字进 `docs/status.md`（命令 + 秒数 + 机器串）；③ 不承诺门槛，只承诺"可复跑"。
+
+### 阶段 G 的调研出处（逐条可回查）
+
+- Rust 版本化事实：`[lints]` 工作区表 1.74；`#[expect]`/`lint_reasons` = RFC 2383、1.81 稳定；
+  MSRV 感知解析与 strict provenance = 1.84；`#[diagnostic::on_unimplemented]` = 1.78；`rust-lld` 进 x86_64-linux = 1.90；
+  增量被默认关闭 = 1.52.1。出处见 https://blog.rust-lang.org/ 各版本发布页。
+- 供应链真实事件：2026-08 crates.io 上 `arrayref`/`internment`/`appendix-only` 一族因 **`build.rs` 执行任意代码**被打码并投毒，
+  存活 86–107 分钟（https://blog.rust-lang.org/2026-08-20/supply-chain-attack-on-arrayref/）。
+  ⇒ INFY 零依赖、无 build script 是**结构性免疫**，这条要写进 README 的安全段（已登记为 G12 的文档格）。
+- Go/CPython/.NET/Swift 的出处分散在上文各条内联 URL；`gh`/实时 crates.io 未能访问到的具体 issue 号
+  （rust-lang#14595、advisory-db#3161、#120924、#68560）在本文档里**不引用**，避免把未独立复核的编号当证据。
+
 ## 2. 当前指针
 
 > **F13 轮收尾（2026-10-18）：F13 勾 `[x]`，新登记 F55/F56/F57 未修；本段取代下一段** ——
