@@ -1691,6 +1691,21 @@
       要么在 `docs/spec-deviations.md` 记明"移位只对 64 位宽度可发射"并让 `check` 阶段就拒绝而不是
       留到 [8]。
 
+- [ ] F58 **`capabilities/IFBC-CAP-py-3.13.toml` 是一份改了标题的 3.14 表 ⇒ 真 3.13 主机上 `x[i]`、`with`、`assert` 全部假红 `E-0712`**（阶段 G 调研实测出的最重一条，本轮独立复核）：
+      **两份证据**：① 本机 diff 两张表 —— 3.13 表**数值 opcode 行数 = 0**（3.14 表 = 154），且 3.13 表里出现
+      `BUILD_TEMPLATE`、`ANNOTATIONS_PLACEHOLDER`、`LOAD_FAST_BORROW`、`LOAD_SMALL_INT` 这四个 3.14 才有的名字；
+      ② 直接取上游 `https://raw.githubusercontent.com/python/cpython/3.13/Include/opcode_ids.h` 核对 ——
+      3.13 **有** `BINARY_SUBSCR`、`RETURN_CONST`、`BUILD_CONST_KEY_MAP`、`LOAD_ASSERTION_ERROR`、`BEFORE_WITH`、
+      `LOAD_METHOD`，而当前 3.13 表**一个都没有**。
+      后果方向要写清：这不是"漏放行了不安全代码"，而是**规范 §7.7.2 的假红**（把合法 Python 判成不支持），
+      与 P3 的方向相反、比漏检更难被发现（用户只会以为 INFY 不支持下标语法）。
+      文件自己的头注释已经承认根因："CPython 3.13 is NOT installed here… deliberately has NO numbered (0xNN) rows"
+      ⇒ 名字集合是从 3.14 探到的，版本号是手写的。
+      验收：① 3.13 表按 3.13 的名字集与数值重建（数值只能来自 3.13 自己，缺解释器就**拒生成**，不许用邻居版本顶）；
+      ② 新增一条**每代必有名**清单（3.13：上面那六个；3.14：`BINARY_OP` 吸收 `[]` 之后不许再要求 `BINARY_SUBSCR`），
+      `CapTable` 装载时校验，缺名 ⇒ 报"能力表与声明版本不符"的专门码（**不复用** `E-0712`，那是"这条指令不支持"）；
+      ③ 反例夹具：把 3.14 表改名成 3.13 必须红；④ `table_hash` 重算测试随表变化更新，不许手填。
+
 ### 阶段 G：竞品对标 —— 竞品的优点逐个超越，竞品的已知缺陷逐个封死
 
 > 来源：2026-10-18 对项目所有者点名的竞品（rustc/cargo、Go、Zig/Nim、CPython/Lua/JS/TS、JVM/.NET/Swift、
@@ -1979,20 +1994,143 @@
       全跑一次 + 单文件 [1]-[9] 各计时），**先测噪声底**；两次运行差值 > 噪声底才允许写结论，否则脚本只打印不判定；
       ② 基线数字进 `docs/status.md`（命令 + 秒数 + 机器串）；③ 不承诺门槛，只承诺"可复跑"。
 
+- [ ] G31 **wheel 摄取必须读 `.dist-info`**（Python 生态里"一个 wheel 的运行契约"就是它的 `.dist-info`：
+      `RECORD` = 路径+哈希+大小，`importlib.metadata` 靠扫 `*.dist-info` 提供 `version()/requires()/files()/entry_points()`；
+      https://packaging.python.org/en/specifications/binary-distribution-format/ 、
+      https://docs.python.org/3/library/importlib.metadata.html ）。
+      INFY 现状（实测）：`src/btrack.rs:4224 ingest_py_wheel` 对 `dist-info|METADATA|RECORD` 的 `grep` **零命中**
+      ⇒ 摄取完的包，任何用 `importlib.metadata` 读自身的代码在 lowering 之后**静默拿不到东西**，构建期无人报警。
+      验收：① `RECORD` 逐条核哈希与大小，不符 ⇒ `E-0560` 族（"内容被换包"与"清单缺失"必须两个码）；
+      ② `METADATA` 的 `Requires-Dist` 落进 G4 的 `[[deps]]` 行；③ `entry_points.txt` / `METADATA` 缺失 ⇒
+      具名诊断（禁止"没有就没有"的静默通过）；④ 一份真 wheel 夹具 + 一份删掉 `.dist-info` 的同款，两条测试各认一边。
+
+- [ ] G32 **能力表的可信度要能自证，而不是靠头注释声称**（这一条是 F58 的制度化：调研发现
+      `CapTable::check_alias_agreement` 已经会拒绝"数值行与名字行互相矛盾"，但**没有任何机制发现"整张表版本对不上"**）。
+      INFY 现状（实测）：`src/btrack.rs:1231` 能力表按 `(lang, minor)` 取；表头自称"由构建主机上真实安装的工具链生成，不是猜"，
+      而 3.13 表恰恰是零数值行 + 3.14 名字集（F58）。
+      验收：① 每张表带 `generated_from`（解释器版本串 + `dis.opmap` 的条目数 + 采集时间）且 `table_hash` 覆盖它；
+      ② 装载时交叉检查：`generated_from` 的版本与 `[cap] format` 声明的 minor **不等** ⇒ 拒绝装载并报"表是从别的版本搬来的"；
+      ③ F58 的每代必有名清单作为第二道；④ `infy ifbc cap check --all` 一次跑完全部表的这类自检。
+
+- [ ] G33 **探针必须声明它拿到的信息是否降级**（PEP 657 的列范围是**可关的**：`PYTHONNODEBUGRANGES` / `-X no_debug_ranges`
+      会让位置退化成行级；https://peps.python.org/pep-0657/ 、https://docs.python.org/3/using/cmdline.html ）。
+      INFY 现状（实测）：`src/btrack.rs:780,837` 用 `Command::new(python).arg("-E")` 起探针（好 —— 屏蔽用户 site/env），
+      但列范围缺失时是**静默回落 `co_lines()`** ⇒ §9.2 的列对齐与 `caret` 规则悄悄变粗，用户看不出差别。
+      验收：① 探针回报一个 `positions_degraded: bool`；② 为真时发一条 `W-`（"本次摄取无列范围，行号映射为行级"），
+      且 `--diag-json` 的 `spans[].col_*` 不许写猜测值（宁可写 0 并在 note 里说明）；③ 反例：人为设
+      `PYTHONNODEBUGRANGES=1` 的语料必须让这条 W- 出现（用 `-E` 时它被屏蔽 ⇒ 测试要显式构造，别指望环境）。
+
+- [ ] G34 **free-threading 是第三个维度，不是"同一个 3.13"**（PEP 703 在 3.13 是实验、PEP 779 在 3.14 转正，
+      官方明确 free-threaded 构建**与原构建不 ABI 兼容**：https://peps.python.org/pep-0703/ 、
+      https://peps.python.org/pep-0779/ ）。
+      INFY 现状（实测）：能力表键只有 `(lang, minor)`；全仓 `grep -i 'gil\|free.thr'` 零命中 ⇒ 拿 free-threaded 解释器
+      探针时，INFY 会把它当普通 3.13/3.14 用（opcode 集相近但**对象模型与引用语义不同**，B 轨 lowering 假设的是 GIL 模型）。
+      验收：① 探针回报 `sys._is_gil_enabled()`/`Py_GIL_DISABLED` 之类的可判事实，② `[b_track]` 声明里加 `gil = "on"|"off"`，
+      不匹配 ⇒ `E-0713` 族的一个专门分支；③ 未支持 free-threaded 前**默认拒绝**并给出路（`isolation = "process"` 或换解释器）。
+
+- [ ] G35 **`@lua` 要从"有表"走到"有管线"**（Lua 官方比 CPython 更硬：`luac` 手册明写"Precompiled chunks are not
+      portable across different architectures"，`lundump.c` 会因 `sizeof(Instruction)`/`lua_Integer`/`lua_Number`、
+      `LUAC_DATA`、整数与浮点格式不符直接拒载 —— 这恰恰证明 INFY 定宽+大端 IFBC 的方向是对的，
+      https://www.lua.org/manual/5.4/luac.html 、https://www.lua.org/source/5.4/lundump.c.html ）。
+      INFY 现状（实测）：`src/btrack.rs`（5462 行）里**没有任何** `luac` / `string.dump` 调用；
+      `capabilities/IFBC-CAP-lua-5.4.toml` 数值 opcode 行数 = 0（F28 已登记），而头注释自称"Lua 5.4 = 0x19"。
+      ⇒ 规范 C-2 定的实现顺序是"`@lua` 先打通管线"，现状是**表先行、管线为零**。
+      验收：① 一条 `@lua` 端到端：`luac -o` 产出的预编译块 → 解析头部 → lowering → `infy ifbc verify` → 装载执行 →
+      输出与 `lua` 直接跑同一份脚本比对；② 反例：把块的 `LUAC_DATA`/宽度字段改一个字节 ⇒ 专门拒绝码（不许当"不支持的指令"报 `E-0712`）；
+      ③ 数值 opcode 必须来自本机 Lua 5.4 实测，不许从手册抄（手册不列全部）。
+
+- [ ] G36 **`isolation = "process"` 这个逃生舱要真的能跑**（规范附录 C-1 的 (b) 出路，也是 CPython 扩展、
+      Node addon 这类"原生依赖"唯一诚实的兜底；竞品反例是 Go 的 `plugin`（平台限制一大把）与 Zig 弃用 `@cImport`）。
+      INFY 现状（实测）：`src/btrack.rs:3664-3709` 对 `@js/@ts` 发 `E-0716` 并提示走进程隔离，
+      但 `src/atrack.rs` 只会 spawn `gcc` ⇒ **没有 process runner**，help 指向了一个不存在的能力（这违反 §0 的"禁止假成功"精神）。
+      验收：① 最小 runner：宿主可执行 + §11 的 `HostApi` 事件（JSON over stdio），能跑一个 `@js` hello；
+      ② 跑不出来之前，把 `E-0716` 的 help 改成"本 build 未接进程隔离，出路是 A 轨 `@c` 或等 v2.1"，
+      **不许**继续指一条没有的路。
+
+- [ ] G37 **类型擦除类语言只能收"可擦除语法"**（这是 JS/TS 轨最大的坑，且业界已经给出闸门：Node 原生跑 TS 的
+      Amaro/swc 只处理 erasable syntax，官方点名 `enum`、参数属性、带运行时代码的 `namespace`、import alias 不支持，
+      并写明"Node.js does not type check your code"；esbuild 逐文件编译 ⇒ 跨文件 `const enum` 失效；
+      TypeScript 5.8 因此新增 `--erasableSyntaxOnly` 做构建期闸门（https://nodejs.org/en/learn/typescript/run-natively 、
+      https://esbuild.github.io/content-types/ 、https://devblogs.microsoft.com/typescript/announcing-typescript-5-8/ ）。
+      INFY 现状：`@js/@ts` 在 v2.0 明确不摄取（C-2 排到 v2.1）⇒ **不做可以，做半截不行**。
+      验收（v2.1 的前置闸）：① 一份"可擦除语法"封闭清单进 `capabilities/`，清单外构造逐个具名码拒绝；
+      ② 语料含 `enum`/`namespace`/参数属性/`import =` ⇒ 四条诊断、零 AST 静默丢弃（这是经验库
+      infy-spec-ident-vs-keyword-trap 那一族在 B 轨的翻版：解析器吃掉构造 = 下游永不会报警）。
+
+- [ ] G38 **原生互操作要有一层"可钉住 ABI"的稳定面**（Node 的 native addon ABI **每个大版本都变**，官方推荐 Node-API 作稳定层
+      （https://nodejs.org/docs/latest/api/addons.html ）；CPython 的 `abi3`/PEP 384 存在但**不被强制**，
+      audit wheel 若违规会"崩溃、不可预期行为、甚至可利用的内存破坏"（https://peps.python.org/pep-0384/ 、
+      https://github.com/trailofbits/abi3audit ）；平台标签也不是文件名策略：PEP 600 用
+      `manylinux_${GLIBCMAJOR}_${GLIBCMINOR}_${ARCH}` 取代 571/599，`auditwheel` 靠容器构建 + patchelf 兜住
+      （https://peps.python.org/pep-0600/ 、https://github.com/pypa/auditwheel ））。
+      INFY 现状（实测）：A 轨只有 `abi = "C"` + `#[repr(C)]`；`E-0714 BinaryWheel` 拒绝一切非 pure wheel（`btrack.rs:640`），
+      没有 abi3 概念，也没有 glibc/符号审计的等价物 ⇒ **拒绝是对的**，但拒绝之后用户没有任何"我这层 ABI 稳不稳"的判据。
+      验收：① `infy artifact info` 打印 A 轨链接的每个外部符号（名字 + 绑定来源 + `#[link]` 声明），
+      ② 一份 `docs/internals/abi-classes.md` 写明三档（纯 C ABI / 厂商稳定层（abi3、Node-API）/ 无稳定层 ⇒ 只能进程隔离），
+      ③ 无稳定层的绑定在 `infy check` 阶段就发 `W-` 指路，别到 `[9]` 链接期才炸。
+
+- [ ] G39 **把 IFBC 的字节格式补齐到"第三方能自己产出可装载镜像"**（Java 是这一层的行业参考：JVMS 把 §4.9 结构校验与
+      §4.10 类型检查分开，后者靠 `StackMapTable`（class 文件 ≥ 50.0），甚至还有 §4.10.2 的类型推断兜底
+      （https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html ）；反面教材是 GraalVM native-image：
+      可达性元数据靠 `native-image-agent` 采集，缺条目不是构建失败而是**运行时** `MissingReflectionRegistrationError`
+      （https://www.graalvm.org/latest/reference-manual/native-image/metadata/ ）—— INFY 的构建期扫描就是为了赢这一局）。
+      INFY 现状（实测）：附录 C-7① 明写 `line_map` 压缩编码与 `exception_table` 字节布局**未定**；
+      `runtime/fixtures/ifbc_py_unit.bin`（1062 B）是现有唯一的外部形态夹具。
+      验收：① 两个布局在 `docs/internals/ifbc-encoding-rust.md` 与 C 侧文档里给出**逐字段偏移表**；
+      ② 一份"由文档独立构造"的镜像（不是 INFY 自己吐的）能过 `infy ifbc verify` 并被装载执行；
+      ③ 三条破坏夹具（越界跳转、异常表区间重叠、行映射不单调）各命中一个确定检查项与码。
+
+- [ ] G40 **单文件产物的"自身定位"与"签名边界"要写清**（竞品公开痛点：PyInstaller onefile 每次运行解到
+      `_MEIxxxxxx`、注入 `sys.meta_path` 钩子，未签名构建会撞 macOS 的 Smart App Control（issue #6747）；
+      python-build-standalone 自己列的 quirks 里有"musl 静态构建禁扩展""Windows 无 `pip.exe`""libedit 而非 readline"；
+      Bun 单文件要求 `.node` 直接 require、非嵌入路径按 CWD 解析（https://pyinstaller.org/en/stable/advanced-topics.html 、
+      https://github.com/pyinstaller/pyinstaller/issues/6747 、https://gregoryszorc.com/docs/python-build-standalone/main/quirks.html 、
+      https://bun.sh/docs/bundler/executables ）。
+      INFY 现状（实测）：不解压、不注入钩子 ⇒ **这一类坑结构性不存在**（要在 README 明说，这是优点）；
+      但没有"产物读自身路径"的入口，也没写"签名/公证不在 v2.0"。
+      验收：① 一个只读的"自身定位"能力（`env` 或 `std.host` 下一档），返回产物路径且带"未链接文件系统时的显式失败"；
+      ② README 的安全段补两段：结构性免疫（零依赖、无 build script、不解压、无运行时代码生成）
+      与**不承诺**（不认证作者、v2.0 不做 OS 签名，见 G6/G21），并把 F58 这类"能力表版本谎报"列为已知限制。
+
 ### 阶段 G 的调研出处（逐条可回查）
 
 - Rust 版本化事实：`[lints]` 工作区表 1.74；`#[expect]`/`lint_reasons` = RFC 2383、1.81 稳定；
   MSRV 感知解析与 strict provenance = 1.84；`#[diagnostic::on_unimplemented]` = 1.78；`rust-lld` 进 x86_64-linux = 1.90；
   增量被默认关闭 = 1.52.1。出处见 https://blog.rust-lang.org/ 各版本发布页。
-- 供应链真实事件：2026-08 crates.io 上 `arrayref`/`internment`/`appendix-only` 一族因 **`build.rs` 执行任意代码**被打码并投毒，
-  存活 86–107 分钟（https://blog.rust-lang.org/2026-08-20/supply-chain-attack-on-arrayref/）。
-  ⇒ INFY 零依赖、无 build script 是**结构性免疫**，这条要写进 README 的安全段（已登记为 G12 的文档格）。
-- Go/CPython/.NET/Swift 的出处分散在上文各条内联 URL；`gh`/实时 crates.io 未能访问到的具体 issue 号
-  （rust-lang#14595、advisory-db#3161、#120924、#68560）在本文档里**不引用**，避免把未独立复核的编号当证据。
+- 供应链真实事件（本轮独立复核过出处）：官方博客条目《Supply chain attack on arrayref》（blog.rust-lang.org 首页
+  2026-08-20 列出；同一 URL 被 JPCERT/CC 周报引用 http://www.jpcert.or.jp/m/wr/2026/wr260826.html ）。
+  受影响的三个 crate 与恶意版本在线时长：**arrayref 0.3.10 = 86 分钟、internment 0.8.7 = 90 分钟、
+  append-only-vec 0.1.9 = 107 分钟**；载荷写在**构建脚本**里、编译期即以完整机器权限执行。
+  ⇒ INFY 零依赖 + 无 build script + 无第三方过程宏（附录 F.1）是**结构性免疫**，这段要写进 README 安全表（G40②），
+  但"免疫"不等于"安全"：换包风险仍在，所以透明日志那一格是 G21。
+- B 轨证据的**一手来源**已在各条内联（marshal/dis/py_compile 文档、PEP 384/600/657/703/735/740/779、
+  luac 手册与 `lundump.c` 源码、JVMS 第 4 章、Node/esbuild/TypeScript 官方页）。
+  **本轮亲测的一条**：`capabilities/IFBC-CAP-py-3.13.toml` 与上游
+  `https://raw.githubusercontent.com/python/cpython/3.13/Include/opcode_ids.h` 对不上（F58）——
+  这条是本阶段唯一"由调研发现、由本会话独立复核、结论可复跑"的缺陷，其余竞品结论**都要在下一次引用前重新回查**。
+- `gh`/实时网络取不到的具体编号（rust-lang#14595、advisory-db#3161、#120924、#68560）在本文档里**不引用**，
+  避免把未独立复核的编号当证据；Guppy / Roc / Kotlin K2 quick-fix / Scala 3 diff / Zed multi-buffer 这几家
+  在本轮调研中**没能定位到一手页面**（swift-guppy 两处 404、仓库搜索零命中）⇒ 不作为任何一条 G 的立论依据。
 
 ## 2. 当前指针
 
-> **F13 轮收尾（2026-10-18）：F13 勾 `[x]`，新登记 F55/F56/F57 未修；本段取代下一段** ——
+> **登记轮（2026-10-18，项目所有者指定的两项任务落地；这不是生产轮，没有做账意义上的基线数字）** ——
+> **① 排产变更**：§1 取活顺序本轮起为 **F58 → F14 → 其余 F → 阶段 G**。理由写清：F58 是
+> **假红方向**的规范级缺陷（合法 Python 被判成不支持，且现有测试一条都不会红），改的是
+> `capabilities/IFBC-CAP-py-3.13.toml` 这份数据表，与在途的 F14 前端改动**零文件重叠**，插到队首不制造冲突。
+> 阶段 G（G0…G40）整体排在阶段 F 全部勾完之后，不许"挑有意思的 G 先做"。
+> **② 自动化拓扑变更（防止下一班重复建任务）**：现在有两个 INFY 班次 ——
+> 生产循环 `44a36131-5c53-410c-a089-b5f702fabee7`（每 2 小时，取活+改码+交付）**与**
+> 每日推送对账 `77526f62-119e-47bb-ac22-8928f4b90609`（每天 21:30 Asia/Shanghai，**只推送与对账，不写码、不代提交**）。
+> 两班都按 §0.0.1 抢 `cron.lock`；推送班撞锁时先等（每 10 分钟重试，最多 3 次）再让路。
+> **生产班不许再新建任何定时任务**，也不许为了"今天没推上"去改推送班的调度。
+> **③ 交接事实**：本地 HEAD 已含 `7bf4662`（阶段 G 立项）与 `39de39d`（锁协议入库）；
+> 远端 sha 与欠账**必须现算**（`gh api …/refs/heads/toolchain` + `git rev-list --count`），别引用本段的说法。
+> 在途未提交的 F14 半成品（`src/sema.rs`、`src/codegen.rs`、`src/parser.rs`、`src/borrow.rs`、
+> `README.md`、`docs/{status,coverage}.md`、`scripts/{f14-mutation-probe.ps1,sync-doc-numbers-f14.py}`）**不属于本轮**，
+> 按 §0 第 2 条：谁在写谁负责收敛，别 `git checkout --` 掉它。
+
+> **F13 轮收尾（2026-10-18）：F13 勾 `[x]`，新登记 F55/F56/F57 未修；本段已被上面那段取代** ——
 > 交付提交 **`d8b6287`**（`sema`：负号不再冒充类型判据 + `check_int_in_ctx` 落到十个上下文站点 + 标注优先于
 > 初值字面量 + 超 `i64` 十进制字面量改 `Ty::Invalid`；`codegen`：`numeric_text` 收 `i128` ⇒ 字面量发带符号值、
 > `const_text` 删第二套"取幅度再补负号"表示 + 六条 `sema` 新锁点 + `literals_carry_their_resolved_width` 改认新形）。
