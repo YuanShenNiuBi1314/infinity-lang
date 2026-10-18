@@ -1342,6 +1342,12 @@
       把两份表重写成"数值键 + 别名"双式；然后把 `btrack::tests::the_name_keyed_tables_still_map_every_row`
       里那条"补上数值键就变红"的断言指向本条，把两张表移进 `the_number_keyed_table_agrees_…` 的列表，
       并确认 `check_alias_agreement` 对它们真的会触发（加一条人为造矛盾的测试）。
+      **批注（cron-38，提交 `57f6a0d`）：py-3.13 那一半已由 F58 关闭** —— 数值行 0 → 150，两张 py 表都进了
+      `the_number_keyed_table_agrees_…`，"人为造矛盾"的锁点也加了（`numeric_opcode_keys_canonicalize_…`），
+      而且比验收要求多修了一处根因：**`check_alias_agreement` 在 0x10 以下永不触发**不是"表没数值键"造成的，
+      实现按 `0x{:x}` 算键、表按 E.3 的 `0xNN` 写键，**两侧拼法不同**（见 D-57(e)）。
+      剩下的 = `IFBC-CAP-lua-5.4.toml` 一张（本机无 lua 5.4，需按 F58 的做法取 lua 自己的发布件并校准），
+      本条保持 `[ ]` 只为 lua。
 
 - [ ] F29 **阶段 [8] 没有通往 IFBC VM 的调用通道，`.inf ifbc` 因此恒空**（D1(2) 轮接线时确认）：
       阶段 [6a] 现在能从 CLI 产出真镜像（`Loaded::embed_images`），但 `codegen` 对 embed 体仍报
@@ -1693,7 +1699,7 @@
       要么在 `docs/spec-deviations.md` 记明"移位只对 64 位宽度可发射"并让 `check` 阶段就拒绝而不是
       留到 [8]。
 
-- [ ] F58 **`capabilities/IFBC-CAP-py-3.13.toml` 是一份改了标题的 3.14 表 ⇒ 真 3.13 主机上 `x[i]`、`with`、`assert` 全部假红 `E-0712`**（阶段 G 调研实测出的最重一条，本轮独立复核）：
+- [x] F58 **`capabilities/IFBC-CAP-py-3.13.toml` 是一份改了标题的 3.14 表 ⇒ 真 3.13 主机上 `x[i]`、`with`、`assert` 全部假红 `E-0712`**（阶段 G 调研实测出的最重一条，本轮独立复核）：
       **两份证据**：① 本机 diff 两张表 —— 3.13 表**数值 opcode 行数 = 0**（3.14 表 = 154），且 3.13 表里出现
       `BUILD_TEMPLATE`、`ANNOTATIONS_PLACEHOLDER`、`LOAD_FAST_BORROW`、`LOAD_SMALL_INT` 这四个 3.14 才有的名字；
       ② 直接取上游 `https://raw.githubusercontent.com/python/cpython/3.13/Include/opcode_ids.h` 核对 ——
@@ -1707,6 +1713,58 @@
       ② 新增一条**每代必有名**清单（3.13：上面那六个；3.14：`BINARY_OP` 吸收 `[]` 之后不许再要求 `BINARY_SUBSCR`），
       `CapTable` 装载时校验，缺名 ⇒ 报"能力表与声明版本不符"的专门码（**不复用** `E-0712`，那是"这条指令不支持"）；
       ③ 反例夹具：把 3.14 表改名成 3.13 必须红；④ `table_hash` 重算测试随表变化更新，不许手填。
+      **提交 `57f6a0d`（cron-38 轮）**，四条逐项对回：
+      ① 数值键行 **0 → 150**（每名 `0xNN` + `OPNAME` 双式）。数据来源 = CPython **3.13 自己**发布件
+      `Include/opcode_ids.h`（sha256 `e30e7b48f764be2b…`）+ `Python/bytecodes.c`（`fd819b75d19b96af…`），
+      不是本机解释器（本机只有 3.14.6）；opmap 的**筛选规则**用可观察的那一代校准 ——
+      按 tag `v3.14.6` 推导 `dis.opmap` 与本机 CPython 3.14.6 **逐名逐值相符（154/154）**，不符即退码 4 拒生成；
+      另加一道 3.13 分支头 vs `v3.13.0` 两次推导必须一致（不一致退码 3）。生成器
+      `scripts/gen-cap-table-py313.py`：默认干跑、`--apply` 才写、幂等（连跑两次产物字节相同，实测
+      toml `4df0410870ec…` / `cap_opmap.rs` `bf72898fa669…`）、动作追加 `logs/gen-cap-table-py313.log`。
+      **三条拒生成分支里本轮真实触发过的只有退码 5 那一条**（缺映射来源 ⇒ 不写文件）；3 与 4 是实现在案、
+      本轮未触发 = 未实测。
+      ② 契约不写进表（写进表 = 自我声明，正是 G32 要封的那类），定成工具链侧
+      `src/cap_opmap.rs::opcode_contract(lang, minor)`（同一生成器产出，py-3.13 = 150 名、py-3.14 = 154 名，
+      **与表不同源**），`CapTable::load()` 装载即校验**三个方向**：该 minor 必有名缺席 / 别个 minor 的名出现 /
+      该 minor 从未分配过的数值键。验收原文只要"必有名清单"，本轮定成**完整名集 + 数值**（更强且不可被表绕过）；
+      3.14 侧因此要求 `BINARY_OP` 而**不许** `BINARY_SUBSCR` 出现，与验收括注同向。码 = **`E-0713`**
+      （新增 `IngestErr::CapVersionMismatch`），`E-0712` 未被挪用。
+      ③ 反例夹具 = `btrack::tests::a_capability_table_naming_the_wrong_minor_is_rejected_with_e_0713`：
+      把 shipped 3.14 表按 `py-3.13` 校验必须红，且 `note` 里点名六个必有名与外来名、并带未知数值键；
+      反向（3.13 表按 3.14 校验）亦红。两条断言各测一次，`code()` 均为 `E-0713`。
+      ④ `table_hash` 由生成器按**装载侧同一条归一规则**（去掉 `table_hash` 行、按 `\n` 重拼）算出，
+      现值 `sha256:c78c1b69ecab9eb9…`（表头注释后又随 `[builtin]` 段的 F59 注记变过一次，故以文件为准），
+      `each_table_hash_matches_the_body_it_claims_to_cover` 复跑绿，**无手填**。
+      **本轮没做的事要写清**：本机没有 3.13 解释器，所以 3.13 表**没有在 3.13 上端到端跑过一次**。
+      能证的只有两件事 —— 名字与数值同 CPython 3.13 发布件一致（双源一致 + 生成器可复跑）、
+      `opcode_row(0x05, "BINARY_SUBSCR") == Some("idx.get")`（`x[i]` 那条假红在机读判据上消失）。
+      **措辞红线（新增）**：不许写"3.13 的 B 轨摄取已验证"；`with` / `assert` / `return <常量>` 在 3.13 上
+      仍走 `E-0712`，但方向变了 —— 从"表里根本没这一行（从未映射）"变成"表显式声明未映射"，
+      出路仍按 §7.7.4，差额登记为 **F60**。顺带消掉 F28 的 py-3.13 那一半（见该条批注），lua 那一半仍开。
+
+- [ ] F59 **能力表的 `[builtin]` / `[import]` / `[exception]` 三段仍是从未核对过版本的 3.14 名单**（F58 的
+      同一缺陷在 opcode 之外的三段上，本轮只把 `[opcode]` 修掉，剩下三段**逐字搬过来**）：
+      实测 `capabilities/IFBC-CAP-py-3.13.toml` 的 `[builtin]` 段 = 旧表原样，也就是**由 3.14.6 解释器生成的
+      名单**（本轮没有 3.13 的 builtins 名单，因此**既没证明它缺名、也没证明它不缺** —— 现状只能写到这一句），
+      而 F58 的契约 `opcode_contract()` 只覆盖 `[opcode]`。方向与 F58 相同：**缺名 = 合法 Python 被判成不支持**（`LOAD_GLOBAL` 的名字查不到 ⇒ `E-0712`），
+      多出的名只是噪声。生成器已把这条写在段内（两行注记，指向本条而不是自称正确）。
+      验收：① 三段各有一条**与表不同源**的每代名单（`py` 轨的 builtins 可取 CPython 发布件
+      `Python/bltinmodule.c` 的注册宏 + `Lib/builtins.py`（若该代有），并按 F58 的做法先在**本机装得上的
+      那一代**用 `dir(builtins)` 校准规则，复不出就拒生成）；② `CapTable::load()` 一并校验，缺名/外来名同样
+      打 `E-0713`；③ 3.14 表与 3.13 表的 builtins 差集逐条给出"这一代有没有这个名字"的出处。
+
+- [ ] F60 **3.13 上 `return <常量>`、`with`、`assert` 三条常见构造仍是显式未映射，缺的是 IFBC 的融合 lowering，
+      不是表里的一行**（F58 重建表时逐条实测出来的差额，登记以免被读成"表修好了"）：
+      `RETURN_CONST`（3.13 的 `0x67`）需要"压常量并返回"的**一条**指令，
+      而附录 D 只有 `push` 与 `ret` 两条，`"a|b"` 的语法意思是**候选**（取第一个可用的）不是**序列**，
+      所以往表里填 `push` 就是丢掉返回（假成功，硬约束 (d) 禁止）；`BUILD_CONST_KEY_MAP`（"键元组 + N 值"融合建
+      字典）同理；`BEFORE_WITH` / `LOAD_ASSERTION_ERROR` 则整条协议未实现（`SETUP_WITH`、`RAISE_VARARGS`
+      在两份表里都是 `"-"`，`[exception]` 段的注记也这么写）。本轮一律显式 `"-"` 并把理由写进表头。
+      验收（任选一条做完整即可，不许三条都半途）：① 在 §7.8/附录 D 里定一条 `ret.const` 形态（或让 lowering
+      层允许一行映射展开成指令序列 —— 那是 §7.8.2 的编码规则变更，要连 `ifbc.rs` 的编码器与 C 侧 VM 一起改），
+      配 §7.8.3 的装载自检与两侧 `cmp`；② 或走 §7.7.4 的出路：给 `with`/`assert` 出一条"改写为 A 轨 /
+      `isolation="process"`"的定向 help，并把它接进 `infy explain`（G1）；③ 无论走哪条，
+      `capabilities/*.toml` 的对应行必须从 `"-"` 改成真映射，且有 3.13 语料的端到端红/绿对照。
 
 ### 阶段 G：竞品对标 —— 竞品的优点逐个超越，竞品的已知缺陷逐个封死
 
@@ -2116,7 +2174,56 @@
 
 ## 2. 当前指针
 
-> **登记轮（2026-10-18，项目所有者指定的两项任务落地；这不是生产轮，没有做账意义上的基线数字）** ——
+> **F58 轮收尾（2026-10-19，cron-38）：F58 勾 `[x]`，新登记 F59/F60 未修，F28 只关掉 py-3.13 那一半** ——
+> 交付提交 **`57f6a0d`**（`capabilities/IFBC-CAP-py-3.13.toml` 重建 = 数值行 0 → 150；`src/cap_opmap.rs`（新）
+> = 每代 opmap 契约，与表**不同源**；`src/btrack.rs` = `check_version_contract()` 接进 `load()`、
+> 新 `IngestErr::CapVersionMismatch` → `E-0713`、`numeric_key` 归一成 E.3 的 `0x%02x`；
+> `scripts/gen-cap-table-py313.py` = 唯一被授权的表生成入口，默认干跑）+ 本笔做账。
+> **根因不是一句"表填错了"，是两件事**：① 这份表的**数据来源被顶替过**（本机没有 3.13 ⇒ 借了 3.14 的名字集、
+> 手写版本号，头注释自己承认 "deliberately has NO numbered rows"）；② 校验键在**读写两侧拼法不同**
+> （实现 `format!("0x{opcode:x}")` vs 表/E.3 的 `0xNN`）⇒ `check_alias_agreement` 对 0x10 以下的 15 个
+> opcode **空转**。裁定 = 偏差 **D-57(a)-(g)**。
+> **本轮的方法论（下一轮直接抄）**：要给一个本机装不上的版本生成数据表时 —— 取**那一代自己的发布件**
+> （CPython `Include/opcode_ids.h`）作数值源，把"哪些名字算 `dis.opmap`"的**筛选规则**放到**本机装得上**
+> 的那一代上校准（复不出 `dis.opmap` 的 154/154 逐名逐值 ⇒ 生成器退码 4 拒写），再加一道跨 tag 一致性
+> （3.13 分支头 vs `v3.13.0`，不一致退码 3）。既不是"等那台机器"，也不是"照邻居抄"。
+> **新基线（本机 `-j 1`）**：`cargo test --offline --lib` **583 passed / 0 failed**（= 开工 580 + 本笔 3，
+> 全部在 `btrack` 31 → **34**）、`cargo check --offline --lib` **0 error / 0 warning**、
+> `cargo build --offline --release` exit **0**、`infy check examples/tour` exit **0**（2 files, 0 error）。
+> **本轮没重跑、也没声称的**：C 侧三项（rt / 两条 IFBC / `cmp`）、`conformance --report`、tour 的
+> `fmt --check|build|run|test|artifact info` —— 改动面 = `src/btrack.rs` + `src/cap_opmap.rs` +
+> `src/lib.rs` + 两份 `.toml` + 一个 python 脚本，与 C 侧、前端**零重叠**；`runtime/*.c` 与
+> `examples/tour` 一字未动 ⇒ 既有口径不变（rt 32353、IFBC 180/180、C11 12512、产物 200700）。
+> **文档数字欠账（本轮刻意不改，不是漏账）**：`README.md`、`docs/status.md`、`docs/coverage.md` 正被
+> **F14 班在途改写**（未提交，见下面那段取代说明的第 ③ 点），它们现称 **580**。三种写法没有一种是真的：
+> 本笔提交自己的树 = **579**（HEAD 576 + 3），工作树 = **583**（含在途 F14 的 +4），改任一总数都得同时改写
+> 那一班正在写的句子。⇒ 这三处本轮**一字未动**，收口责任随 F14 交付：`btrack` 行 **31 → 34**、
+> 总数按其实际交付数、逐模块相加与 `-- --list` 必须同数。`scripts/check-doc-numbers.py` 现测 **FAIL**
+> （`coverage table btrack=31 but binary has 34`、`sums to 580 but the binary lists 583`、
+> `status.md claims 580 but the binary lists 583`），三条差异全部归因到这一段。
+> **本轮新增的常驻面（下一轮直接用）**：① 表的版本忠实性只有一个入口 =
+> `cap_opmap::opcode_contract(lang, minor)` + `CapTable::check_version_contract()`，装载即校验三个方向
+> （必有名缺席 / 外来名 / 未知数值键），**契约不许写进 TOML**（写进表 = 自我声明，G32 要封的就是这类）；
+> ② 数值键规范式 = `0x%02x`，装载时归一 `0xHEX`，同一 opcode 两种拼法给两个值 ⇒ 解析期拒绝；
+> ③ `E-0712` 与 `E-0713` 的分界从此有了实现：**"这条指令不支持" → 0712（出路 = 扩表/改写），
+> "这张表描述的不是它声明的 minor" → 0713（出路 = 重生成/改声明）**，不许再互相挪用。
+> **措辞红线（本轮加两条）**：不许写"3.13 的 B 轨摄取已验证"（本机没有 3.13 解释器，端到端一次都没跑过；
+> 能证的只有 `opcode_row(0x05,"BINARY_SUBSCR") == Some("idx.get")` 这条机读判据）；
+> 不许写"`x[i]`、`with`、`assert` 全部修好" —— 只有 `x[i]` 变了（从未映射 → `idx.get`），`with`/`assert`
+> 仍是显式 `"-"`，只是从"表里没这行"变成"表声明不支持"，差额 = F60。既有红线不变：覆盖 83/2300 ⇒
+> 不得声称「INFY v2.0 兼容」；"两侧装载期校验等价"不许讲（F26 / D-42 (a)-(e)）；派生代码的类型标注不可信（F49）；
+> `[u32; 后声明的 const]` 仍只是显式拒绝（F52②）；`return v;` 收尾仍无条件 `E-0053`（F55）。
+> **下一轮 = ①** 现算欠账补推（本笔两提交）+ 回查覆盖本轮交付树的那条 run —— 步 7 应打 **579 passed / 0 failed**
+> （**推送只带 `57f6a0d` 这一笔，不含在途 F14 的 4 项**；这同时是"583 写进文档就是假数"的独立证据），
+> 步 8 告警 **0**，步 10 rt **32353**，步 11 两条 IFBC **180/180** + `cmp`，步 12 tour 六条 +
+> `--verify-reproducible` + `artifact info --nodes` 全 exit 0；`cancelled` 既不是红也不是绿；一次交付只推一笔。
+> **②** §1 第一个 `[ ]` = **F14**（构造器模式的绑定没有进入作用域 ⇒ `Q::Y(n)` 在臂体里 `E-0101`；
+> 落点 = `sema::check_match` 在检查臂体前把 `bind_pat` 的绑定压进局部表，配套 `E-1001` 与穷尽性的成对测试）。
+> **那一班已有在途半成品（`src/{sema,codegen,parser,borrow}.rs`、三份文档、`scripts/*-f14.*`），
+> 按 §0 第 2 条谁在写谁负责收敛：接手前先读它的半成品与 `scripts/f14-mutation-probe.ps1`，别 `git checkout --` 掉它。**
+> **③** 顺手收的卫生欠账不变：全仓 `while !at(…) && !at_end()` 形状仍缺前进守卫清点（F53 只数了语料命中的那一处）。
+
+> **登记轮（2026-10-18，项目所有者指定的两项任务落地；这不是生产轮，没有做账意义上的基线数字）—— 本段已被上面那段取代** ——
 > **① 排产变更**：§1 取活顺序本轮起为 **F58 → F14 → 其余 F → 阶段 G**。理由写清：F58 是
 > **假红方向**的规范级缺陷（合法 Python 被判成不支持，且现有测试一条都不会红），改的是
 > `capabilities/IFBC-CAP-py-3.13.toml` 这份数据表，与在途的 F14 前端改动**零文件重叠**，插到队首不制造冲突。
