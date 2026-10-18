@@ -311,7 +311,7 @@ impl EventRec {
 
 /// `.inf sum` row (§5.8): `package@version` plus its dirhash, so the runtime self-check has the
 /// manifest it needs without a network lookup.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SumRec {
     pub package: String,
     pub version: String,
@@ -483,6 +483,21 @@ impl<'a> Artifact<'a> {
                     0xFFFF_FFFF => None,
                     v => Some(v),
                 },
+            })
+            .collect()
+    }
+    /// `.inf sum` rows decoded back from the blob (§5.8's dependency dirhash list — the read side
+    /// of what stage [9] wrote from `lock.dirh`). A trailing short chunk is dropped, not guessed
+    /// at: `infy artifact verify` compares the row count against the region length and refuses the
+    /// container when the two disagree.
+    pub fn sums(&self) -> Vec<SumRec> {
+        self.region_bytes(self.meta.sum)
+            .chunks(SUM_REC_BYTES)
+            .filter(|c| c.len() == SUM_REC_BYTES)
+            .map(|c| SumRec {
+                package: self.pool_string(rd_u32(&c[0..4])),
+                version: self.pool_string(rd_u32(&c[4..8])),
+                dirhash: self.pool_string(rd_u32(&c[8..12])),
             })
             .collect()
     }

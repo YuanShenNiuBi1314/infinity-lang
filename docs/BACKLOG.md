@@ -1252,12 +1252,33 @@
       `macro_expand` 35→40 · `sema` 37→40 · `codegen` 34→37 · `parser` 14→15 · `cli` 47→48），
       `cargo check --offline --lib` 0 error / 0 warning，tour 与 C 侧数字一字未动（详见 `docs/coverage.md` **P40**）。
 
-- [ ] F16 **阶段 [10]（产物签名/校验段写入 → dirhash + lock 比对，§5.8/§7.1）未做**（C3 轮落地 [9] 时确认）：
-      `artifact.rs` 只把 `MODULE.infy.lock` 的 `dirh` 三元组抄进 `.inf sum`（12 字节/行 = `package_pool, version_pool, dirhash_pool`），
-      **没有任何一侧拿它去比对**，`infy_rt.c` 读 meta 后也不校验 sum 区。tour 无依赖 → 该路径在现有一切实例上是**空集**，
-      所以 [9] 的绿不代表 [10] 通。
-      验收：`infy artifact verify <产物>`（或 `artifact info` 的一档 `--check-sum`）逐条把 `.inf sum` 与 lock/sumdb 比对，
-      不一致 → 用已有的 §5.8 族码（`E-0580`/`E-0583`）并 exit 7；`.inf sum` 为空时明确打"0 条依赖，无可校验"，不假装通过。
+- [x] F16 **阶段 [10] 的 lock 比对有入口了**（C3 轮落地 [9] 时确认；F16 轮 2026-10-19 落地，裁定 = 偏差 **D-59(a)–(g)**）：
+      原状：`cli.rs::stage9` 只把 `MODULE.infy.lock` 的 `dirh` 三元组抄进 `.inf sum`（12 字节/行 =
+      `package_pool, version_pool, dirhash_pool`），**没有任何一侧拿它去比对**，`infy_rt.c` 读 meta 后也不校验
+      sum 区；tour 无依赖 → 该路径在现有一切实例上是**空集**，所以 [9] 的绿不代表 [10] 通。
+      落地 = 三处，每处都有锁点：**`artifact::Artifact::sums()`** = `.inf sum` 的读侧解码器（与 `nodes()` 同形，
+      12 字节 = 三个池索引；短尾 chunk **丢弃不猜**，"区长度不是 12 的整数倍"由调用方用 region 长度否掉）；
+      **`cli::dirhash_shape`** = §5.8 第 1 项的形态门禁（`h1:` + 标准 base64 + 解出来必须 32 字节）；
+      **`cli::sum_verify_text` + `artifact_cmd` 的 `verify` 分支** = **双向**逐条比对（产物里每行去 lock 找、
+      lock 里每行回来在产物找），不符 ⇒ `E-0560` + exit 7。
+      **验收（实测，命令级 17 条探针全 PASS = `bash scripts/f16-artifact-verify-demo.sh --apply`）**：
+      `examples/tour` 的 scratch 副本 + 一份两条 `dirh` 的 `MODULE.infy.lock` ⇒ `infy build` exit 0（产物
+      200863 字节）⇒ `infy artifact verify <产物> <lock>` **exit 0** 且打「逐条一致」，不给 lock 参数时按产物
+      路径向上找到同一份 lock、仍 **exit 0**；换掉 lock 里的 hash ⇒ **exit 7 + `error[E-0560]`**；删掉 lock 的
+      `dirh` 行 ⇒ **exit 7 +「比 lock 多」**；真 tour 产物（`examples/tour` 从来没有 lock）⇒ **exit 1** 并明说
+      不放行；`runtime/fixtures/artifact_rust_writer.bin` 里那行 `h1:AAAA` ⇒ **exit 7 +「读不了」且不带 E-0560**。
+      空集那一格按验收原文打「**0 条依赖，无可校验**」并写明"不声称校验过任何依赖完整性"（exit 0 只表示
+      两侧都没有记录，不代表通过）。七处变异各自实测能红（`python scripts/f16-mutation-probe.py --apply`，
+      复原后按字节 + sha256 复验）。
+      **码数这一笔要更正**：本项原验收行写的「已有的 §5.8 族码 `E-0580`/`E-0583`」是**假账** —— 这两个码在
+      `spec/infinity_lang_spec.md` 的 §9.7 与 `src/codes.rs` 里都不存在（05xx 到 `E-0570` 为止），规范定义的
+      §5.8 族是 `E-0560`/`E-0561`/`E-0562` ⇒ 本轮落 `E-0560`（不新增码、不挪用它码），假账本身登记为 **F68**。
+      数字：`cargo test --offline --lib -j 1` **606 → 613 passed / 0 failed**（+7 全在 `cli` 48→**55**），
+      `cargo check --offline --lib -j 1` 0 error / 0 warning，tour 七连与 C 侧数字一字未动（产物仍 200700、
+      rt 32353/0、两条 IFBC 180/180 + `cmp` 无差异、`conformance --report` 仍 83 = 77/0/6 ⇒ exit 1）。
+      **剩余面（不许读成「§5.8 校验已通」）**：见 **F69**（运行时自校验：C 侧把 `off_sum`/`len_sum` 读进
+      `InfyMetaFixed` 之后没人碰）与 **G21/G27**（sumdb 记录与 inclusion proof、`INFY_NOSUMDB`/`[net] nosumdb`
+      的消费者），`E-0561`/`E-0562` **至今零发射点**；比对范围也只到 `dirh`，`dirh-m` 不在 `.inf sum` 里。
 
 - [ ] F17 **容器里的 `ResourceKeys` 与 `EnvOffsets` 是空集**（C3 轮确认）：冻结的 208 字节 `.inf meta` 没有 `EnvOffsets` 槽位，
       `ResourceKeys` 连名字都没被前端收集（`std.chain.lock("db")` 的键名在 `sema`/`hir` 里没有出口），
@@ -1888,6 +1909,30 @@
       `sema::tests::codes_across_packages` 那份双包夹具），`pub(crate)`/`pub(<path>)` 各补一档；
       做完之前**不许**在任何文档里写"§5.5 可见性已实现"。
 
+- [ ] F68 **本 BACKLOG 自己写过不存在的诊断码，且 §9.7 缺「dirhash 形态不合法」那一档码**（F16 轮实测）：
+      F16 的旧验收行原文是「不一致 → 用已有的 §5.8 族码（`E-0580`/`E-0583`）」，而这两个码**全仓零命中**：
+      `spec/infinity_lang_spec.md` 的 §9.7 那张 05xx 表（1436–1452）到 `E-0570` 为止，`src/codes.rs` 的 05xx
+      段也只到 `E-0570`（`codes.rs:1050`）—— 唯一的命中处就是这一行本身。F16 轮按规范落 `E-0560`，
+      并把这行改写成实际码（见上）。**这条没关**的两个理由：① 同一份文件里还有没有别的"引用的码不存在"，
+      本轮只核了自己踩到的这一处，需要一次全量回核（把 §1 每一行出现的 `E-xxxx`/`W-xxxx`/`R-xxxx` 拿去
+      `codes.rs` 查存在性，写成脚本，不是抽查）；② 真缺陷仍在 —— `infy artifact verify` 遇到
+      `h2:…`/`h1:` 后面不是合法 base64/解出来不是 32 字节的 dirhash 时**只能不带码地硬阻断**（G28 要求
+      "形态不合法"与"校验和不匹配"分两条，而 §9.7 没有前者那一档；本轮不挪用 `E-0560` 去凑，也不新增码，
+      因为新增要连动 `codes.rs:2054 table_is_complete` 的 210/146 两条合计，且规范没给语义）。
+      验收：① 一条脚本/测试把 §1 与 `docs/RUNLOG.md` 里引用的每个码号回核到 `codes.rs`；② §9.7 的 05xx
+      补一档"dirhash 形态不合法"并把 `sum_verify_text` 的那三条无码消息换成它（须先记偏差）。
+
+- [ ] F69 **`.inf sum` 的运行时自校验没有落点：C 侧把 sum 区读进 meta 之后没人碰**（F16 轮量到，未改）：
+      `runtime/infy_rt.c` 的 `parse_meta_record`（:3034-3035）与 `infy_art_parse_trailer`（:2988）都取了
+      `off_sum`/`len_sum`，`infy_art_read_file`（:3102-3111）也做了越界检查，但 `infy_runtime_start`（:3664-3680）
+      只把 meta 交给 `infy_set_profile_from_meta`，**没有任何代码读 sum 区的 12 字节行**。§7.4 明写
+      `.inf sum` 是"运行时自校验用"，§5.8 第 2 项的"每次比对"因此只覆盖了 CLI 这一侧（`infy artifact verify`，
+      F16 轮）；产物被换包后直接执行，运行时不会发现。`runtime/test_rt.c:1470-1599` 那份 `test_artifact`
+      也**一条都没断言** `off_sum`/`len_sum` 的内容。
+      验收：C 侧有一条真读 sum 的入口（逐行取三个池串，与进程内记录的期望依赖集比对，不符 ⇒ §9.2 形态的
+      拒绝 + 非 0 退出），并且 `test_rt.c` 有正例（一致）与反例（改一行 hash ⇒ 红）成对锁点；
+      做完之前**不许**在任何文档里写"产物有运行时自校验"。
+
 ### 阶段 G：竞品对标 —— 竞品的优点逐个超越，竞品的已知缺陷逐个封死
 
 > 来源：2026-10-18 对项目所有者点名的竞品（rustc/cargo、Go、Zig/Nim、CPython/Lua/JS/TS、JVM/.NET/Swift、
@@ -2296,7 +2341,54 @@
 
 ## 2. 当前指针
 
-> **F15 轮收尾（2026-10-19，cron-40）：F15 勾 `[x]`，顺带关掉本轮踩出来的 F63/F64，新登记 F65/F66/F67 未修；本段取代上面 F14 轮那段的"下一轮"** ——
+> **F16 轮收尾（2026-10-19，cron-41）：F16 勾 `[x]`，新登记 F68/F69 未修；本段取代上面 F15 轮那段的"下一轮"** ——
+> 交付 = **阶段 [10] 的 `.inf sum` ↔ `MODULE.infy.lock` 逐条比对**（裁定 = 偏差 **D-59(a)–(g)**）：
+> `artifact::Artifact::sums()`（读侧解码器第一次存在）+ `cli::dirhash_shape`（§5.8 第 1 项形态门禁）+
+> `cli::sum_verify_text`（**双向**逐条）+ `artifact_cmd` 的 `verify` 分支 ⇒ `infy artifact verify <产物>
+> [<MODULE.infy.lock>]`。**F16 的验收行本身是假账**：它写「用已有的 §5.8 族码 `E-0580`/`E-0583`」，这两个码
+> 在 §9.7 与 `codes.rs` 里**都不存在**（05xx 止于 `E-0570`）⇒ 本轮按规范落 `E-0560`，假账登记为 **F68**。
+> **基线（本机 `-j 1`）**：开工 `cargo test --offline --lib -j 1` **606 passed / 0 failed** ⇒ 收尾 **613 / 0**
+> （+7 全在 `cli` 48→**55**）、`cargo check --offline --lib -j 1` **0 error / 0 warning**、
+> `cargo build --offline --release -j 1` exit **0**、`python scripts/check-doc-numbers.py` **exit 0 / PASS**
+> （613、23 模块、表 23 行、status 相加 23 项）。命令级 **17 条探针全 PASS**
+> （`bash scripts/f16-artifact-verify-demo.sh --apply`）：带两条 `dirh` 的 scratch tour 副本 `infy build` exit 0
+> （产物 200863）⇒ `artifact verify` **exit 0 +「逐条一致」**，不给 lock 参数走"按产物路径往上找"同一条路也
+> **exit 0**；换 hash ⇒ **exit 7 + `error[E-0560]`**；删 lock 的 `dirh` ⇒ **exit 7 +「比 lock 多」**；真 tour 产物
+> （没有 lock）⇒ **exit 1**；`artifact_rust_writer.bin` 那行 `h1:AAAA` ⇒ **exit 7 +「读不了」且不带 E-0560**。
+> **`python scripts/f16-mutation-probe.py --apply` 七处变异各自实测能红**（反向比对摘掉 / hash 比对短路 /
+> `h1:` 门禁摘掉 / 整除守卫摘掉 / 空集写成假成功 / 无 lock 返回 0 / 第三格读成第二格），复原后按字节 +
+> sha256 + 行尾复验。C 侧零改动仍复跑：两份 `-c` 各 stderr **0 字节**、rt **32353/0**、两条 IFBC **180/180** +
+> `cmp` 无差异；tour 七连全 exit **0** 且产物 **200700** 字节一字未动；`infy conformance --report` 仍
+> **83 = 77/0/6 ⇒ exit 1**（92.8%）。开工现算欠账 = **0**（远端 `toolchain` == 本地 HEAD == `090ef7c`），
+> 覆盖 F15 交付树那条 run **39168720186** 步 1–12 全 `success`。
+> **措辞红线（本轮新增，别踩）**：① 不许写"§5.8 校验已通"或"产物有运行时自校验"—— 本轮只做了 **CLI 侧对
+> lock 的比对**；sumdb 那一面**一次都没比对**（无客户端、无 inclusion-proof 验证器 = **G21**；
+> `INFY_NOSUMDB`/`[net] nosumdb` 无消费者 = **G27**），`E-0561`/`E-0562` **至今零发射点**，而 C 侧读了
+> `off_sum`/`len_sum` 之后没人碰（= **F69**）；② 不许把"空 sum 那格 exit 0"读成通过 —— 它只表示两侧都没有
+> 记录，文本自己打「0 条依赖，无可校验」；③ 不许写"dirhash 不符会拿到一个码" —— 形态不合法（`h2:`、base64
+> 解不开、长度不是 32 字节）走的是**不带码**的硬阻断（G28 的两条分离），补码要连动 `codes.rs` 的 210/146 合计
+> （= **F68**）；④ 比对范围只到 `dirh`，`dirh-m` 不在 `.inf sum` 里（阶段 [9] 只抄 `dirh`）。
+> 既有红线不变：覆盖 83/2300 ⇒ 不得声称「INFY v2.0 兼容」；"两侧装载期校验等价"不许讲（F26 / D-42 (a)–(e)）；
+> 派生代码的类型标注不可信（F49）；`return v;` 收尾仍无条件 `E-0053`（F55）；带载荷的用户变体仍造不出来（F62）；
+> `fmt` 的 §10.11 trait 面只对实参是标量时成立（F65/F35）。
+> **下一轮 = ①** 现算欠账补推（本轮交付树若还没推，欠账 = 本轮那一笔）+ 回查**覆盖本轮交付树**的那条 run：
+> 步 7 应打 **613 passed / 0 failed**、步 8 告警 0、步 10 rt **32353**、步 11 两条 IFBC **180/180** + `cmp`、
+> 步 12 tour 七条全 exit 0；`cancelled` 既不是红也不是绿。**②** §1 第一个 `[ ]` = **F17**（容器里的
+> `ResourceKeys` 与 `EnvOffsets` 是空集，§4.6/§10 的 11 个偏移 + `std.chain.lock` 键名）—— **注意它的落点会
+> 同时动 `src/artifact.rs`（写侧）、前端收集面（`sema`/`hir`）与 `runtime/infy_rt.c`**，而且一旦 `write()` 的
+> 字节输出变了，`runtime/fixtures/artifact_rust_writer.bin`（730 字节）与 `test_rt.c:1561-1595` 那条跨语言锁点
+> 就必须一起重生成：开关是 `INFY_REGENERATE_FIXTURE`，**绝不能在 CI 里设**
+> （`conformance::tests::the_ci_workflow_never_sets_the_regeneration_switches` 禁），本机重生成后要把两份产物
+> 一起提交；顺带 tour 的**产物字节数会变**（现值 200700）⇒ `docs/coverage.md`/`docs/status.md`/`README.md`
+> 里凡是写这个数的格子都要跟着改，别只改一处。**③** 卫生欠账不变：全仓 `while !at(…) && !at_end()` 形状仍缺
+> 前进守卫清点（F53 只数了语料命中的那一处）；"返回 `(树, 消耗数)`"的 helper 仍只核过 `delimited_group`
+> （F63 的形状）；**新增一条**：F68 要求把 §1 每行引用的码号回核到 `codes.rs`（脚本化，不是抽查）。
+> **④** 本轮留下的两个脚本可以直接复用：`scripts/f16-artifact-verify-demo.sh`（命令级探针，默认干跑，
+> 写只在 `target/scratch/f16/`）、`scripts/f16-mutation-probe.py`（变异探针，要求**指定那条测试**变红而不是
+> 只看总数，`finally` 里按字节复原 + sha256 复验），`scripts/sync-doc-numbers-f16.py` 多了一类 **`LINE:` 整行
+> 改写规则**（表行尾巴带着已经过期的声称时，逐段替换会留两截，连行一起换）。
+
+> **F15 轮收尾（2026-10-19，cron-40）：F15 勾 `[x]`，顺带关掉本轮踩出来的 F63/F64，新登记 F65/F66/F67 未修；本段已被上面 F16 轮那段取代，其"下一轮"不再有效** ——
 > 交付 = **`fmt!` 的三段 lowering 路径**（裁定 = 偏差 **D-58(a)–(h)**）：`src/fmtstr.rs`（新模块 = 格式串的唯一解析者，
 > 阶段 [4] 与阶段 [8] 共用同一份实现）+ `macro_expand::lower_builtin_fmt`（阶段 [2] 把**无同名定义**的 `fmt!(…)` 改写成
 > §2.5 的 `fmt(…)` 调用形态，且改写发生在**取调用点之前**，所以 `fmt!` 实参里嵌套的用户宏仍被展开）+

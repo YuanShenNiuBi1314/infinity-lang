@@ -8,7 +8,8 @@
 //! module, stages [7]–[9] (`hir` lowering + C11 codegen + link + the §7.4 container) behind
 //! `infy build`, `infy run` = the same pipeline into a temporary directory plus execution
 //! (§13.4), `infy test` = the §5.9 test build plus the generated `#[test]` harness, plus `init`,
-//! `fmt`, `expand`, `mod tidy`, `toolchain probe|list` and `artifact info|sections`.
+//! `fmt`, `expand`, `mod tidy`, `toolchain probe|list` and `artifact info|sections|verify` (the last one compares the container's `.inf sum` with
+//! `MODULE.infy.lock` — §5.8 item 2 landed at stage [10], F16).
 //! `infy ifbc dump|verify` (§7.8.4) inspects IFBC images — a §7.4 artifact's `.inf ifbc` region or a
 //! bare module image — as the human-readable disassembly, the machine-comparable canonical text both
 //! sides of the cross-check render, or the §7.8.3 load-time verdicts.
@@ -23,7 +24,7 @@ use crate::ast::ParsedFile;
 use crate::diag::{Diagnostic, Handler, LintConfig, Phase};
 use crate::span::Position;
 use crate::span::{FileId, Sources};
-use crate::{artifact, atrack, borrow, codegen, conformance, derive, hir, ifbc, lexer, macro_expand, parser, pkg, sema};
+use crate::{artifact, atrack, base64, borrow, codegen, conformance, derive, hir, ifbc, lexer, macro_expand, parser, pkg, sema};
 
 /// §13.4: the options that take the next token as their value. A value belongs to its option, never
 /// to the positional list — `infy check --target <triple> <mod>` used to read `<triple>` as the
@@ -131,7 +132,7 @@ pub fn run(args: &[String]) -> i32 {
                  such subcommand (it is `infy test --bench`), \
                  `doc`/`lib`/`lsp`/… = see docs/status.md. Commands \
                 that do work: check, build, run, test, fmt, expand, init, mod tidy, toolchain, target, \
-                 artifact info, ifbc dump|verify, conformance."
+                 artifact info|verify, ifbc dump|verify, conformance."
             );
             exit::GENERIC
         }
@@ -160,7 +161,7 @@ fn usage() -> String {
         ("mod tidy|why|verify|upgrade|vendor", "dependency resolution, MVS (§5.7)"),
         ("toolchain probe|list|add|remove", "A-track compilers + B-track bytecode toolchains (§7.6.2)"),
         ("target list|add <triple>", "target triples (§7.2)"),
-        ("artifact info|sections <file> [--nodes]", ".inf meta and segment layout (§7.4)"),
+        ("artifact info|sections|verify <file> [<lock>] [--nodes]", ".inf meta and segment layout (§7.4); verify compares `.inf sum` with `MODULE.infy.lock` (§5.8)"),
         ("ifbc dump|verify <file> [--canonical] [--all-errors]", "IFBC image / `.inf ifbc` inspection: disassembly + §7.8.3 load-time checks (§7.8.4/§12.3)"),
         ("conformance [cases/] [--category X] [--report]", "§12 suite: run every case through `infy check`'s own chain and print per-category pass rates (§12.5); `--update-golden` is refused (§12.4, D-48(e))"),
         ("lib pack|verify|dump|diff", ".infib containers (§13.2) — not implemented yet"),
@@ -1984,21 +1985,147 @@ fn target_cmd(positional: &[String]) -> i32 {
     }
 }
 
-/// §13.4 `infy artifact info|sections <artifact>`: read the §7.4 container back. §9.7's 06xx table
+/// §5.8 item 1's shape for a dirhash: `h1:` + standard base64 of the raw 32-byte Merkle root
+/// (`sha256::merkle_dirhash` is what produces it). `Err` carries why the string is **undecidable**,
+/// which is deliberately not an `E-0560` mismatch — a hash this tool cannot read and a package that
+/// was replaced must not print the same line (BACKLOG G28).
+fn dirhash_shape(h: &str) -> Result<(), String> {
+    let raw = h.strip_prefix("h1:").ok_or_else(|| "前缀不是 `h1:`（§5.8 第 1 项只定义这一种）".to_string())?;
+    let bytes = base64::decode(raw).map_err(|e| format!("`h1:` 后面不是合法的标准 base64：{e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("`h1:` 解出来是 {} 字节，§5.8 的 Merkle 根是 SHA-256 = 32 字节", bytes.len()));
+    }
+    Ok(())
+}
+
+/// Which `MODULE.infy.lock` an artifact's `.inf sum` gets compared against: the explicit third
+/// positional, else the lock of the module the artifact file lives under (§5.1's walk-up), else
+/// the one in the current directory. `None` means there is nothing to compare with — and
+/// `artifact verify` refuses that instead of calling it a pass.
+fn resolve_lock_path(explicit: Option<&String>, artifact_path: &Path) -> Option<PathBuf> {
+    if let Some(p) = explicit {
+        return Some(PathBuf::from(p));
+    }
+    if let Some(s) = artifact_path.to_str() {
+        if let Some(root) = find_module_root(Some(s)) {
+            let p = root.join(pkg::LOCK_NAME);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    let cwd = PathBuf::from(pkg::LOCK_NAME);
+    if cwd.is_file() {
+        Some(cwd)
+    } else {
+        None
+    }
+}
+
+/// §5.8 item 2 at stage [10]: every `.inf sum` row is compared against the lock's `dirh` record for
+/// the same `package@version`, **and** every lock `dirh` row is looked for in the artifact — one
+/// direction alone cannot catch an under-declared dependency set. Returns the report text plus
+/// §13.4's exit code (7 = the checksum family; 0 = every row matched, or there was nothing to
+/// match, which the text says out loud instead of leaving to the exit code).
+///
+/// BACKLOG F16's acceptance line names `E-0580`/`E-0583`; §9.7 has no such rows (grep the spec and
+/// `codes.rs` — the `05xx` table stops at `E-0570`). The §5.8 family is `E-0560`/`E-0561`/`E-0562`
+/// (`spec/infinity_lang_spec.md:1449-1451`), and “产物记的 dirhash ≠ `MODULE.infy.lock`” is exactly
+/// what `E-0560` states, so that is what gets emitted. `E-0561`/`E-0562` are the sumdb half and stay
+/// un-emitted on purpose — the note appended below says why that is not a pass.
+fn sum_verify_text(rows: &[artifact::SumRec], region_len: u32, lock: &pkg::Lock, lock_src: &Path) -> (String, i32) {
+    const REC: usize = artifact::SUM_REC_BYTES;
+    let mut out = String::new();
+    let mut fails: Vec<String> = Vec::new();
+    if region_len as usize % REC != 0 {
+        out.push_str(&format!(
+            "error: `.inf sum` 区 {region_len} 字节不是 {REC} 的整数倍 —— 容器里的依赖清单本身坏了，逐行比对没法开始\n  \
+             = note: §7.4 定死一行 = `package_pool, version_pool, dirhash_pool` 三个 u32 = {REC} 字节。这是**容器完整性**\
+             问题，不计进 E-0560 的“dirhash 不符”，两条别混\n"
+        ));
+        return (out, exit::CHECKSUM);
+    }
+    out.push_str(&format!(
+        "artifact verify — 产物 `.inf sum` {} 行 vs {} 的 `dirh` {} 条\n",
+        rows.len(),
+        lock_src.display(),
+        lock.dirh.len()
+    ));
+    for r in rows {
+        if let Err(why) = dirhash_shape(&r.dirhash) {
+            fails.push(format!(
+                "error: {}@{} 的 dirhash `{}` 读不了：{why} —— 本命令**判不了**它，因此也不放行。\n  \
+                 = note: 这**不是** E-0560 的“不符”：拿一个比不了的串去报“校验和不匹配”，会把语法错伪装成换包\
+                 （BACKLOG G28 要求的两条分离）。§9.7 的 05xx 也没有“dirhash 形态不合法”那一档码，所以这里只能不带码\
+                 地硬阻断（登记 F68）\n",
+                r.package, r.version, r.dirhash
+            ));
+            continue;
+        }
+        match lock.checksum_of(&r.package, &r.version) {
+            None => fails.push(format!(
+                "error[E-0560]: 产物记了 {}@{} `{}`，{} 里没有对应的 `dirh` 行 —— 依赖清单比 lock 多\n",
+                r.package, r.version, r.dirhash, lock_src.display()
+            )),
+            Some(h) if h != r.dirhash => fails.push(format!(
+                "error[E-0560]: {}@{} 校验和不匹配 —— 产物 `.inf sum` 记 `{}`，{} 记 `{}`\n  \
+                 = note: §5.8 第 2 项硬阻断，没有 `--force`；只有人工编辑 lock 再走 `infy mod accept-changes` 二次确认\
+                 这一条路\n",
+                r.package, r.version, r.dirhash, lock_src.display(), h
+            )),
+            Some(_) => out.push_str(&format!("  ok   {}@{} {}\n", r.package, r.version, r.dirhash)),
+        }
+    }
+    for (m, v, h) in &lock.dirh {
+        if !rows.iter().any(|r| r.package == *m && r.version == *v) {
+            fails.push(format!(
+                "error[E-0560]: {} 记了 `dirh {m}@{v} {h}`，产物 `.inf sum` 里却没有这一行 —— 依赖清单比 lock 少\n",
+                lock_src.display()
+            ));
+        }
+    }
+    if rows.is_empty() && lock.dirh.is_empty() {
+        out.push_str(
+            "  .inf sum 为空、lock 也没有 `dirh` 记录：**0 条依赖，无可校验**\n  \
+             = note: 本命令**不声称**校验过任何依赖完整性。阶段 [9] 只在 `MODULE.infy.lock` 存在时才抄出这些行，\
+             读不到 lock 时是 `unwrap_or_default()` ⇒ 静默 0 条，所以“空”既可能是真没依赖，也可能是 lock 没生成\
+             （BACKLOG F16 说的 tour 空集就是这一格）\n",
+        );
+    } else if fails.is_empty() {
+        out.push_str(&format!("  产物 `.inf sum` 与 lock 的 `dirh` 逐条一致（{} 行）\n", rows.len()));
+    }
+    out.push_str(
+        "  = note: **sumdb 那一面没有比对**：本工具链没有 sumdb 客户端，也没有 §5.8 第 3 项的 inclusion-proof \
+         验证器（`lock.sumdb` 的 `tree_head`/`inset`/`proof` 只被 `pkg.rs` 解析、无人校验 = BACKLOG G21），\
+         `INFY_NOSUMDB` 与 `[net] nosumdb` 也还没有消费者（G27）。所以 E-0561/E-0562 在这条命令上**永远不会报**——\
+         那是“本轮没做”，不是“校验通过”\n",
+    );
+    for f in &fails {
+        out.push_str(f);
+    }
+    if fails.is_empty() {
+        (out, exit::OK)
+    } else {
+        (out, exit::CHECKSUM)
+    }
+}
+
+/// §13.4 `infy artifact info|sections|verify <artifact>`: read the §7.4 container back, and (for
+/// `verify`) compare its `.inf sum` against `MODULE.infy.lock`. §9.7's 06xx table
 /// has no dedicated code for "this file is not an INFY artifact", so the container refusals borrow
 /// `E-0605` (ABI/布局不一致) and exit 7 (§13.4 校验和不一致) — recorded as D-32.
 fn artifact_cmd(positional: &[String], rest: &[String]) -> i32 {
     // `positional` already excludes the `artifact` word itself (§13.4 dispatch), so [0] is the
     // subcommand and [1] the file.
     let sub = positional.first().map(|s| s.as_str()).unwrap_or("info");
-    if !matches!(sub, "info" | "sections") {
-        eprintln!("error: infy artifact 子命令不认识 `{sub}`（可用：info | sections）");
+    if !matches!(sub, "info" | "sections" | "verify") {
+        eprintln!("error: infy artifact 子命令不认识 `{sub}`（可用：info | sections | verify）");
         return exit::GENERIC;
     }
     let path = match positional.get(1) {
         Some(p) => PathBuf::from(p),
         None => {
-            eprintln!("error: infy artifact info|sections <file> [--nodes]（§13.4）");
+            eprintln!("error: infy artifact info|sections|verify <file> [<MODULE.infy.lock>] [--nodes]（§13.4）");
             return exit::GENERIC;
         }
     };
@@ -2016,6 +2143,36 @@ fn artifact_cmd(positional: &[String], rest: &[String]) -> i32 {
             return exit::CHECKSUM;
         }
     };
+    if sub == "verify" {
+        let lock_src = match resolve_lock_path(positional.get(2), &path) {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "error: `.inf sum` 要比对的是 `MODULE.infy.lock`（§5.8 第 2 项），产物所在目录往上与当前目录里都没有它。\n  \
+                     = note: 没有 lock 就没得比 —— 这一条**不返回 0**，也不把“容器读回来了”当成校验通过。把 lock 作为\
+                     第三个位置参数传进来即可。\n"
+                );
+                return exit::GENERIC;
+            }
+        };
+        let text = match std::fs::read_to_string(&lock_src) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("error: 无法读取 {}: {e}", lock_src.display());
+                return exit::GENERIC;
+            }
+        };
+        let lock = pkg::Lock::parse(&text);
+        let (report, code) = sum_verify_text(&a.sums(), a.meta.sum.len, &lock, &lock_src);
+        print!("{report}");
+        println!(
+            "  = note: 上面报的是**依赖清单与 lock 的一致性**（§5.8）；容器自身那套（INFYART2 段尾魔数/追加区唯一性、\
+             trailer_crc、hdr_ver={}、ifabi={}、区段范围、INFYMETA 记录）是另一件事，读回时已经过了\n",
+            artifact::HDR_VER,
+            crate::VERSION.ifabi
+        );
+        return code;
+    }
     match sub {
         "info" => {
             print!("{}", artifact::dump_info(&a));
@@ -3066,6 +3223,222 @@ mod tests {
             artifact_cmd(&["info".to_string(), missing.to_string_lossy().to_string()], &[]),
             exit::GENERIC,
             "读不到文件是通用失败，不是校验失败"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------------------------------------------------------- §5.8 阶段 [10]：.inf sum ↔ lock
+
+    /// §5.8 item 1's shape: `h1:` + standard base64 of the raw 32-byte Merkle root. `seed` only has
+    /// to make two hashes differ, so a repeated byte is enough — this is not a crypto fixture.
+    fn dirhash(seed: u8) -> String {
+        format!("h1:{}", base64::encode_standard(&[seed; 32]))
+    }
+
+    /// Stage [10]'s fixture: a container whose `.inf sum` holds exactly `rows`, assembled by the
+    /// production writer — so `infy artifact verify` decodes real bytes rather than a hand-made
+    /// struct, and the pool-index triples are the ones under test.
+    fn container_with_sums(rows: &[artifact::SumRec]) -> Vec<u8> {
+        let content = artifact::Content {
+            host_image: b"MZ\0\0\0\0",
+            ifabi: crate::VERSION.ifabi,
+            opt_level: 2,
+            overflow: artifact::OV_PANIC,
+            panic_radius: artifact::RADIUS_FOCUS,
+            usize_bits: 64,
+            fast_math: false,
+            lto: 1,
+            stack_bytes: 8 * 1024 * 1024,
+            focus_stack_bytes: 256 * 1024,
+            focus_quota: 1,
+            iter_guard_steps: 1 << 32,
+            target_triple: "x86_64-pc-windows-gnu",
+            build_id: [0xAC; 32],
+            platform: "windows",
+            lang_version: "2.0",
+            source_toolchain: "gcc 14.2.0",
+            unreproducible: false,
+            ifbc: &[],
+            n_ifbc_modules: 0,
+            chains: vec![],
+            events: vec![],
+            nodes: vec![],
+            sums: rows.to_vec(),
+            resource_keys: vec![],
+            entry: None,
+        };
+        artifact::write(&content).expect("容器写入应成功")
+    }
+
+    /// The mapping stage [9] applies to `lock.dirh` (`cli.rs::stage9`); the fixture goes through the
+    /// same three lines so a rename on one side cannot silently break the other.
+    fn sums_of(lock: &pkg::Lock) -> Vec<artifact::SumRec> {
+        lock.dirh
+            .iter()
+            .map(|(m, v, d)| artifact::SumRec { package: m.clone(), version: v.clone(), dirhash: d.clone() })
+            .collect()
+    }
+
+    /// `dirh` rows for two packages, in the order §5.8's lock keeps them.
+    fn two_dirh() -> Vec<(String, String, String)> {
+        vec![
+            ("github.com/user/mathx".to_string(), "1.5.0".to_string(), dirhash(1)),
+            ("github.com/user/units".to_string(), "0.2.1".to_string(), dirhash(2)),
+        ]
+    }
+
+    /// F16's data path end to end, with no `cc` involved: lock text → `Lock::parse` → stage [9]'s
+    /// mapping → the §7.4 writer → `artifact::read` → `sums()` → the comparison. The middle step is
+    /// the one that used to be a write-only dead end — nothing ever read those rows back.
+    #[test]
+    fn the_dirh_rows_a_lock_renders_are_the_rows_verify_reads_out_of_the_container() {
+        let lock = pkg::Lock { dirh: two_dirh(), ..Default::default() };
+        let text = lock.render();
+        let parsed = pkg::Lock::parse(&text);
+        assert_eq!(parsed.dirh.len(), 2, "lock 往返后仍要有两条 dirh");
+        let rows = sums_of(&parsed);
+        let bytes = container_with_sums(&rows);
+        let a = artifact::read(&bytes, crate::VERSION.ifabi).expect("容器读回");
+        assert_eq!(a.meta.sum.len as usize, 2 * artifact::SUM_REC_BYTES, "区长度 = 行数 × 12");
+        assert_eq!(a.sums(), rows, "三个池索引的三元组必须原样读回");
+
+        let exe = scratch_file("cli-f16-pass.exe", &bytes);
+        let lk = scratch_file("cli-f16-pass.lock", text.as_bytes());
+        assert_eq!(artifact_cmd(&["verify".to_string(), exe.clone(), lk.clone()], &[]), exit::OK);
+        let (report, code) = sum_verify_text(&rows, a.meta.sum.len, &parsed, Path::new(&lk));
+        assert_eq!(code, exit::OK);
+        assert_eq!(report.matches("  ok   ").count(), 2, "{report}");
+        assert!(!report.contains("error[E-0560]"), "{report}");
+        assert!(report.contains("逐条一致"), "{report}");
+        assert!(report.contains("G21"), "sumdb 那一面没比对必须说出来：{report}");
+        let _ = std::fs::remove_file(&exe);
+        let _ = std::fs::remove_file(&lk);
+    }
+
+    /// §5.8 item 2 的硬阻断本体：同一个 `package@version`，lock 与产物的 dirhash 不同 ⇒ `E-0560` +
+    /// exit 7（§13.4 的校验和档），且给出「只有人工编辑 lock + accept-changes」那条路。
+    #[test]
+    fn verify_reports_E_0560_when_the_lock_and_the_container_disagree_on_a_dirhash() {
+        let lock = pkg::Lock { dirh: two_dirh(), ..Default::default() };
+        let mut rows = sums_of(&lock);
+        rows[1].dirhash = dirhash(9);
+        let bytes = container_with_sums(&rows);
+        let exe = scratch_file("cli-f16-bad.exe", &bytes);
+        let lk = scratch_file("cli-f16-bad.lock", lock.render().as_bytes());
+        assert_eq!(artifact_cmd(&["verify".to_string(), exe.clone(), lk.clone()], &[]), exit::CHECKSUM);
+        let (report, code) = sum_verify_text(&rows, 2 * artifact::SUM_REC_BYTES as u32, &lock, Path::new(&lk));
+        assert_eq!(code, exit::CHECKSUM);
+        assert!(report.contains("error[E-0560]"), "{report}");
+        assert!(report.contains("校验和不匹配"), "{report}");
+        assert!(report.contains("accept-changes"), "{report}");
+        assert_eq!(report.matches("  ok   ").count(), 1, "另一条仍然对得上：{report}");
+        let _ = std::fs::remove_file(&exe);
+        let _ = std::fs::remove_file(&lk);
+    }
+
+    /// 两个方向都要查，只查一个方向会漏掉「产物少报依赖」。第二格正是 tour 那一类的空集：`.inf sum`
+    /// 一条没有，而 lock 记了两条 —— 这时候报的是不一致，不是「0 条依赖，无可校验」。
+    #[test]
+    fn verify_compares_both_directions_between_the_sum_rows_and_the_lock() {
+        let lock = pkg::Lock { dirh: two_dirh(), ..Default::default() };
+        let extra = artifact::SumRec {
+            package: "github.com/user/ghost".to_string(),
+            version: "9.9.9".to_string(),
+            dirhash: dirhash(3),
+        };
+        let (report, code) = sum_verify_text(&[extra], artifact::SUM_REC_BYTES as u32, &lock, Path::new("MODULE.infy.lock"));
+        assert_eq!(code, exit::CHECKSUM);
+        assert!(report.contains("比 lock 多"), "{report}");
+        assert_eq!(report.matches("比 lock 少").count(), 2, "lock 的两条都没被产物记录：{report}");
+
+        let (report, code) = sum_verify_text(&[], 0, &lock, Path::new("MODULE.infy.lock"));
+        assert_eq!(code, exit::CHECKSUM, "空 sum + 非空 lock 是不一致，不是无可校验");
+        assert!(!report.contains("0 条依赖"), "{report}");
+        assert_eq!(report.matches("比 lock 少").count(), 2, "{report}");
+    }
+
+    /// 空集那一格要说人话（BACKLOG 的验收原文就是「0 条依赖，无可校验」）。exit 0 只表示「比对做完且
+    /// 没有不一致」，文本必须自己说清这次什么都没比对 —— 照 `ifbc_empty_region_text` 那条先例办。
+    #[test]
+    fn an_empty_sum_against_an_empty_lock_says_out_loud_that_nothing_was_verified() {
+        let lock = pkg::Lock::default();
+        let bytes = container_with_sums(&[]);
+        let a = artifact::read(&bytes, crate::VERSION.ifabi).expect("容器读回");
+        assert_eq!(a.meta.sum.len, 0);
+        let exe = scratch_file("cli-f16-empty.exe", &bytes);
+        let lk = scratch_file("cli-f16-empty.lock", lock.render().as_bytes());
+        assert_eq!(artifact_cmd(&["verify".to_string(), exe.clone(), lk.clone()], &[]), exit::OK);
+        let (report, code) = sum_verify_text(&[], a.meta.sum.len, &lock, Path::new(&lk));
+        assert_eq!(code, exit::OK);
+        assert!(report.contains("0 条依赖，无可校验"), "{report}");
+        assert!(report.contains("不声称"), "{report}");
+        assert!(!report.contains("逐条一致"), "空集不能写成一致：{report}");
+        let _ = std::fs::remove_file(&exe);
+        let _ = std::fs::remove_file(&lk);
+    }
+
+    /// 读不懂的 dirhash ≠ 校验和不匹配（G28 要求的两条分离）。§9.7 的 05xx 也没有「形态不合法」这一档
+    /// 码，所以这两条都是不带码的硬阻断，登记成 F68 而不是挪用 E-0560。
+    #[test]
+    fn an_undecidable_dirhash_is_refused_without_being_called_E_0560() {
+        let lock = pkg::Lock { dirh: vec![("github.com/user/x".to_string(), "1.0.0".to_string(), dirhash(1))], ..Default::default() };
+        for (bad, why) in [
+            ("h2:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(), "前缀"),
+            (format!("h1:{}", base64::encode_standard(&[4u8; 31])), "解出来是 31 字节"),
+            ("h1:not base64!!".to_string(), "不是合法的标准 base64"),
+        ] {
+            let rows = vec![artifact::SumRec {
+                package: "github.com/user/x".to_string(),
+                version: "1.0.0".to_string(),
+                dirhash: bad.to_string(),
+            }];
+            let (report, code) = sum_verify_text(&rows, artifact::SUM_REC_BYTES as u32, &lock, Path::new("MODULE.infy.lock"));
+            assert_eq!(code, exit::CHECKSUM, "{bad} 不该放行");
+            assert!(report.contains("判不了"), "{bad}: {report}");
+            assert!(report.contains(why), "{bad} 的理由该是「{why}」：{report}");
+            // 盯发射形态 `error[E-0560]:` 而不是裸码：这三条自己的免责声明里就写着 E-0560 这个名，
+            // 拿子串断言会把「没有误报成校验和不匹配」读成失败。
+            assert!(!report.contains("error[E-0560]"), "{bad} 不能被报成校验和不匹配：{report}");
+        }
+    }
+
+    /// `.inf sum` 区长度不是 12 的整数倍 = 容器坏了，跟 lock 比对还没开始。`sums()` 会把短尾丢掉，
+    /// 所以这里必须由区长度自己否掉 —— 否则「少了一行」会被读成「lock 少记了一行」。
+    #[test]
+    fn a_ragged_sum_region_is_refused_as_container_damage() {
+        let lock = pkg::Lock { dirh: two_dirh(), ..Default::default() };
+        let rows = sums_of(&lock);
+        let (report, code) = sum_verify_text(&rows, 2 * artifact::SUM_REC_BYTES as u32 + 1, &lock, Path::new("MODULE.infy.lock"));
+        assert_eq!(code, exit::CHECKSUM);
+        assert!(report.contains("不是 12 的整数倍"), "{report}");
+        assert!(report.contains("容器完整性"), "{report}");
+        assert!(!report.contains("error[E-0560]"), "{report}");
+        assert!(!report.contains("  ok "), "{report}");
+    }
+
+    /// 没有 lock 可比 = 通用失败（exit 1），不是校验通过：§13.4 把 7 留给「不一致」，而这里连比对都
+    /// 没开始。显式给了路径却读不到，同样是 1。
+    #[test]
+    fn verify_refuses_when_there_is_no_lock_to_compare_against() {
+        let rows = sums_of(&pkg::Lock { dirh: two_dirh(), ..Default::default() });
+        let bytes = container_with_sums(&rows);
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("scratch")
+            .join("cli-f16-nolock");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let exe = dir.join("art.exe");
+        std::fs::write(&exe, &bytes).expect("写产物");
+        assert_eq!(
+            artifact_cmd(&["verify".to_string(), exe.to_string_lossy().to_string()], &[]),
+            exit::GENERIC,
+            "找不到 lock 不能返回 0"
+        );
+        let missing = dir.join("MODULE.infy.lock");
+        assert_eq!(
+            artifact_cmd(&["verify".to_string(), exe.to_string_lossy().to_string(), missing.to_string_lossy().to_string()], &[]),
+            exit::GENERIC,
+            "显式的 lock 路径读不到也不该是 7"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
