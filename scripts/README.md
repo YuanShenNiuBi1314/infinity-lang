@@ -29,7 +29,8 @@
 | 脚本 | 用途 | 干跑 |
 | --- | --- | --- |
 | `cleanup.ps1` | 清理 `.infy-build/`、`target/scratch*`、一次性测试二进制 | 是（默认） |
-| `push-branch.ps1` | 带重试把 HEAD 推到受控分支，并回查远端算欠账（`main`/`master` 硬拒、绝不 force） | 有 `-DryRun`；推送是加法，正常调用即推 |
+| `push-branch.ps1` | 带重试把 HEAD 推到受控分支，并回查远端算欠账（`main`/`master` 硬拒、绝不 force；远端是 `git@` 走 SSH 密钥，https 无凭据时用环境里的 `GITHUB_TOKEN` 现拼一次性 URL，日志中一律脱敏） | 有 `-DryRun`；推送是加法，正常调用即推 |
+| `cron-lock.ps1` | **跨任务锁**（BACKLOG §0.0.1）：项目根 `cron.lock`，`acquire`/`check`/`release`/`status`。别人持锁且未过 TTL ⇒ **退出码 10 = 本轮静默放弃**；超 TTL 才允许抢占并记 `STEAL` | 是（`check`/`status` 纯只读；`release` 只放自己名下的锁） |
 | `untrack-artifacts.ps1` | 把仍在跟踪的一次性产物**只从索引摘掉**（`git rm --cached`，文件留磁盘），封闭白名单 + 回滚命令进日志 | 是（默认） |
 | `canonicalize-tour.ps1` | 把 `examples/tour` 写成 §9.5 的格式化不动点（F6/D-17 的执行入口）：范围只放开 `examples/tour/**/*.infy`，写完立刻回核 `fmt --check`，越界即还原 | 是（默认；`-Apply` 才写盘） |
 

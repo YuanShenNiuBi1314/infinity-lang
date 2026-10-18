@@ -53,6 +53,20 @@ try {
   $urlRes = Run-Native 'git' @('config','--get',"remote.$Remote.url")
   if ($urlRes.rc -ne 0 -or -not $urlRes.text.Trim()) { Log 'REFUSED: 没有可用远端'; Write-Error "no remote $Remote"; exit 2 }
   $url = $urlRes.text.Trim()
+  # 凭据两条路都支持：远端是 ssh 形式就用 ssh 密钥；https 形式若 URL 里没带凭据，则用环境里的
+  # GITHUB_TOKEN 现拼一个**一次性** URL（只存在于本进程内存，绝不写进 git 配置、绝不落日志）。
+  $via = 'url-creds'
+  if ($url -match '^git@') { $via = 'ssh' }
+  elseif ($url -notmatch '://[^/@]+@') {
+    if ($env:GITHUB_TOKEN) {
+      $u = [uri]$url
+      $url = "$($u.Scheme)://x-access-token:$($env:GITHUB_TOKEN)@$($u.Host)$($u.PathAndQuery)"
+      $via = 'env-token'
+    } else { Log 'REFUSED: https 远端无凭据且 GITHUB_TOKEN 未设置'; Write-Error 'no credentials available'; exit 2 }
+  }
+  # 任何要落盘的东西先脱敏，防止一次性 URL 把 token 带进日志
+  function Scrub([string]$s) { if ($s) { return ($s -replace '://[^@/\s]+@','://***@') } return '' }
+  Log "START branch=$Branch via=$via head=$head"
 
   # 幂等：远端已经等于我们就直接成功
   $api = "repos/YuanShenNiuBi1314/infinity-lang/git/refs/heads/$Branch"
@@ -66,7 +80,7 @@ try {
     $a = @($extra) + @('-c','credential.helper=','push','--quiet',$url,"HEAD:$Branch")
     $r = Run-Native 'git' $a
     $rc = $r.rc
-    foreach ($line in ($r.text -split "\r?\n")) { if ($line.Trim()) { Log "  out: $line" } }
+    foreach ($line in ($r.text -split "\r?\n")) { if ($line.Trim()) { Log "  out: $(Scrub $line)" } }
     if ($rc -eq 0) { break }
     Start-Sleep -Seconds 8
     if ($attempts -ge 2) { break }   # 两次即停，不循环轰炸

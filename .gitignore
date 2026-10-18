@@ -26,3 +26,5 @@ logs/
 /chunk.txt
 # Qoder 本地会话/用量数据（含提示词原文），不入库
 .qoder-credits/
+# 跨定时任务锁（BACKLOG §0.0.1）：本机进程间用的信号文件，入库会让每个班次都误报脏树
+cron.lock

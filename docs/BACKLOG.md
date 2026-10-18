@@ -18,7 +18,19 @@
 > （见经验库 restore-system-changes）。
 > **脚本只是免掉确认弹窗，不是扩大权限范围**：仍然禁止强推、禁止动 `main`、禁止删除仓库外的用户文件、
 > 禁止 `rm -rf` 仓库与 `target/` 以外的路径。用脚本做这些事属于违规，不做比做错好。
+>
+> **§0.0.1 跨任务锁（`cron.lock`，项目所有者指定）**：「先在项目根创建 lock 文件，其余定时任务见到 lock 静默放弃」。
+> 本仓库有多个班次（生产循环、每日推送……）**共用同一个工作树**，并发写会互相踩 —— 已经发生过一次
+> "A 班次 `git add -A` 把 B 班次的半成品一起提交"。四条规则：
+> ① 任何班次**开工第一件事**是抢锁：
+> `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/cron-lock.ps1 -Action acquire -Job <班次名>`（TTL 默认 45 分钟）。
+> ② 该命令退出码 **10 = 别的班次持有锁 ⇒ 本轮彻底静默放弃**：不读不写任何文件、不 `commit`、不跑 `cargo`、
+> 不往 `docs/RUNLOG.md` 追加、**不删别人的锁**，只回一句"检测到 `cron.lock`，本班次让路"就结束。
+> ③ 收尾**必须** `-Action release -Job <班次名>` 并用 `-Action status` 复验锁已释放；失败路径也要释放（脚本内 `finally`）。
+> ④ 只有"超过 TTL"这一条允许抢锁，抢时把 `STEAL` 记进 `logs/cron-lock.log`；不许凭感觉判断"上一个应该早死了"。
+> `cron.lock` 与 `logs/` 同级，**不入库**（见 `.gitignore`）。
 
+0. **上锁**：开工第一件事执行 §0.0.1 的 `acquire`；退出码 **10** ⇒ 本轮零写入直接让路结束，连 `docs/RUNLOG.md` 都不追加。
 1. **读**：`docs/BACKLOG.md`（本文件）、`docs/RUNLOG.md` 末尾 20 行、经验库
    `C:\Users\zhang\.qoder-cn\projects\F--infinity---INFY-DELIVERY-v0-1-0\memory\MEMORY.md` 及其索引到的条目。
 2. **取活**：执行 §1 里**第一个未打勾**（`[ ]`）的任务，即"最近的地方"。不跳号、不挑肥拣瘦；
@@ -32,11 +44,16 @@
    `…/memory/<kebab-case>.md`（front-matter 用 `type: project` 或 `feedback`），并在
    `…/memory/MEMORY.md` 加一条 ≤150 字符的索引行。**只写索引不写文件，或只写文件不更新索引，都算没做**。
    写之前先 grep 索引，能更新旧条目就别开新条目。
-6. **交**：`git add -A && git commit`（一个增量一个提交，信息写清"改了什么/证据是什么"），
-   `git push origin HEAD:toolchain`。**不动 `main`，不 rebase 别人的历史，不强推，不打 tag，不发布。**
+6. **交**：**只 `git add` 自己本轮改过的具体路径**，然后 `git commit`（一个增量一个提交，信息写清"改了什么/证据是什么"）。
+   **禁止 `git add -A` / `git add .`**：本工作树是共享的，`-A` 会把别的班次未收敛的半成品一起提交进去（已发生过，
+   见 §0.0.1）。`git add` 之后必须跑一次 `git status --porcelain`，逐条确认暂存区里**只有**自己的文件。
+   推送走脚本 `scripts/push-branch.ps1`（本机没有 `pwsh`，用 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File` 调）。
+   **不动 `main`，不 rebase 别人的历史，不强推，不打 tag，不发布。**
    `github.com:443` 经常连不上（`api.github.com` 通），推送失败不重试轰炸：记进 RUNLOG，下一轮再推。
 7. **禁**：向人提问（无人值守）、加第三方依赖（crates.io 被策略拦，工具链是 std-only 硬约束）、
    删除或覆写 `src/` 下别人正在写的文件、伪造测试结果、为过测试而放宽断言。
+8. **放锁**：`cron-lock.ps1 -Action release -Job <班次名>`，再 `-Action status` 复验输出 `lock: none`。
+   忘了放锁 = 给下一个班次挖了一条 45 分钟的死路，属于把树弄坏那一类。
 
 ## 1. 任务清单（自上而下执行，`[x]` 必须附证据）
 
