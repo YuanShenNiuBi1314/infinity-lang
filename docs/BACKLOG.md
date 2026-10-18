@@ -22,8 +22,10 @@
 > **§0.0.1 跨任务锁（`cron.lock`，项目所有者指定）**：「先在项目根创建 lock 文件，其余定时任务见到 lock 静默放弃」。
 > 本仓库有多个班次（生产循环、每日推送……）**共用同一个工作树**，并发写会互相踩 —— 已经发生过一次
 > "A 班次 `git add -A` 把 B 班次的半成品一起提交"。四条规则：
-> ① 任何班次**开工第一件事**是抢锁：
-> `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/cron-lock.ps1 -Action acquire -Job <班次名>`（TTL 默认 45 分钟）。
+> ① 任何班次**开工第一件事**是抢锁，且 **班次名一轮一个**（`prod-loop-<轮次>`、`daily-push-<序号>`，与 RUNLOG 的 `cron-NN` 同号）：
+> `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/cron-lock.ps1 -Action acquire -Job prod-loop-38`（TTL 默认 45 分钟）。
+> 固定名会让同名调用**互相认领与释放** —— 2026-10-18 手测复用 `daily-push` 就把真推送班的锁放掉了，
+> 而脚本**不按 pid 判活**（`acquire` 是短命令，记下的 pid 在班次干活时必然已退出 ⇒ 那条判据永远不会真，比没有更坏）。
 > ② 该命令退出码 **10 = 别的班次持有锁 ⇒ 本轮彻底静默放弃**：不读不写任何文件、不 `commit`、不跑 `cargo`、
 > 不往 `docs/RUNLOG.md` 追加、**不删别人的锁**，只回一句"检测到 `cron.lock`，本班次让路"就结束。
 > ③ 收尾**必须** `-Action release -Job <班次名>` 并用 `-Action status` 复验锁已释放；失败路径也要释放（脚本内 `finally`）。
@@ -52,7 +54,7 @@
    `github.com:443` 经常连不上（`api.github.com` 通），推送失败不重试轰炸：记进 RUNLOG，下一轮再推。
 7. **禁**：向人提问（无人值守）、加第三方依赖（crates.io 被策略拦，工具链是 std-only 硬约束）、
    删除或覆写 `src/` 下别人正在写的文件、伪造测试结果、为过测试而放宽断言。
-8. **放锁**：`cron-lock.ps1 -Action release -Job <班次名>`，再 `-Action status` 复验输出 `lock: none`。
+8. **放锁**：`cron-lock.ps1 -Action release -Job <本轮那个唯一名>`，再 `-Action status` 复验输出 `lock: none`。
    忘了放锁 = 给下一个班次挖了一条 45 分钟的死路，属于把树弄坏那一类。
 
 ## 1. 任务清单（自上而下执行，`[x]` 必须附证据）

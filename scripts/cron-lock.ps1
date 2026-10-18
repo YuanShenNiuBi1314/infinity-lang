@@ -16,12 +16,14 @@
   release —— 放锁：只有 job 名匹配才删（避免把别人的锁删掉）。
   status  —— 打印当前锁状态，永不失败。
 .PARAMETER Job
-  任务名，写进锁文件用于认领与放行，如 daily-push / prod-loop。
+  **一班一个唯一名字**，形如 prod-loop-38 / daily-push-03；release 只认同名。
+  固定名（prod-loop）会让同名调用互相认领与释放，手测时复用生产名就会吃掉真班次的锁（2026-10-18 实测踩过）。
 .PARAMETER TtlMinutes
   锁的存活时长，超过即视为死锁可抢占。缺省 45。
 .EXAMPLE
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/cron-lock.ps1 -Action acquire -Job daily-push
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/cron-lock.ps1 -Action release -Job daily-push
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/cron-lock.ps1 -Action acquire -Job daily-push-03
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/cron-lock.ps1 -Action release -Job daily-push-03
+  # 手测请用独立名字（如 locktest-1），不要用生产班次名。
 #>
 [CmdletBinding()]
 param(
@@ -59,7 +61,8 @@ function Read-Lock {
 function Held-BySomeoneElse {
   param($h)
   if (-not $h) { return $false }
-  # 自己的旧锁不算被占（同一 job 重入：直接刷新）
+  # **不按 pid 判活**：acquire 是短命令，写完就退，记下的 pid 在班次干活时早就没了 ⇒ "进程还活着"
+  # 这条判据永远不会真（比没有更坏，它会骗人）。独占性靠"一班一个唯一 job 名"（见 §0.0.1 与 .PARAMETER Job）。
   $age = Lock-AgeMinutes $h
   $ttl = $TtlMinutes
   if ($h['ttl'] -and $h['ttl'] -match '^\d+$') { $ttl = [int]$h['ttl'] }
@@ -91,6 +94,7 @@ switch ($Action) {
       exit 10
     }
     if ($h -and $h['job'] -ne $Job) { Log "STEAL  旧锁已过期（$($h['job']) @ $($h['taken'])），抢占" }
+    if ($h -and $h['job'] -eq $Job) { Log "RENEW  同一班次重入刷新（taken=$($h['taken'])）" }
     @( "job=$Job", "pid=$PID", "taken=$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))", "ttl=$TtlMinutes" ) |
       Set-Content -LiteralPath $lock -Encoding UTF8
     Log "TAKE   锁已获取 ttl=${TtlMinutes}min"
