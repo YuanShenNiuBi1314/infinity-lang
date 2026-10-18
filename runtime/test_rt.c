@@ -280,6 +280,16 @@ static void defer_x(void* p) { (void)p; rec("[x]"); }
 static void defer_y(void* p) { (void)p; rec("[y]"); }
 static void drop_panic(void* p) { (void)p; infy_panic(R_UNWRAP_NONE, "panic inside Drop", LOC(50, 1, 0)); }
 
+/* The §4.7.1 cases need a Drop that really frees, so a double free shows up as a crash or as a
+ * live-object count that went negative instead of a silent text mismatch. */
+static void free_holder(void* p) { rec("(free)"); infy_free(*(char**)p); }
+static int g_must_drop_slot;
+static void e_cancel_must_drop(void) {
+    infy_cleanup_push(drop_a, &g_must_drop_slot, 0);
+    infy_cleanup_mark_must_drop();
+    infy_cleanup_cancel(&g_must_drop_slot); /* R-0730, exactly as infy_cleanup_pop_noop() does */
+}
+
 static void e_double_panic(void) {
     infy_scope_mark();
     infy_cleanup_push(drop_panic, 0, 0);
@@ -329,6 +339,47 @@ static void test_drop_order(void) {
     infy_cleanup_pop_noop();
     CK_STR(g_order, "");
 
+    /* §4.7.1: `let d = s;` / `take(s)` / `return s` all move a value whose entry is already
+     * registered at the *source* address, which is never the top of the deque. One heap buffer,
+     * two bindings, one Drop: the cancelled side must not run (§4.7.4 — the new owner drops it). */
+    g_order[0] = 0;
+    char* heap = (char*)infy_alloc(16, 8);
+    char* src_slot = heap;   /* the binding the source expression names */
+    char* dst_slot = heap;   /* the destination binding, same pointer value */
+    long long live = (long long)infy_mem_stats().live_objs;
+    CK(live >= 1);
+    infy_cleanup_push(free_holder, &src_slot, 0);
+    infy_cleanup_push(free_holder, &dst_slot, 0);
+    CK_EQ(infy_cleanup_cancel(&src_slot), 1);   /* removes a non-top entry, runs nothing */
+    CK_STR(g_order, "");
+    infy_cleanup_pop_run();                     /* the destination's entry */
+    CK_STR(g_order, "(free)");                  /* not "(free)(free)" */
+    CK_EQ((long long)infy_mem_stats().live_objs, live - 1);
+    CK_EQ(infy_cleanup_cancel(&src_slot), 0);   /* the cancelled entry is gone, not left behind */
+
+    /* the address is the key: an unknown one cancels nothing, and the 0 payload is a sentinel
+     * rather than a wildcard (codegen always registers `&local`) */
+    g_order[0] = 0;
+    int known = 0, other = 0;
+    infy_cleanup_push(drop_a, &known, 0);
+    CK_EQ(infy_cleanup_cancel(&other), 0);
+    CK_EQ(infy_cleanup_cancel(0), 0);
+    infy_cleanup_pop_run();
+    CK_STR(g_order, "(a)");
+
+    /* a scope marker must never be the entry that gets removed: §3.13 brackets stay balanced */
+    g_order[0] = 0;
+    int outer_slot = 0, inner_slot = 0;
+    infy_scope_mark();
+    infy_cleanup_push(drop_a, &outer_slot, 0);
+    infy_scope_mark();
+    infy_cleanup_push(drop_b, &inner_slot, 0);
+    CK_EQ(infy_cleanup_cancel(&outer_slot), 1);
+    infy_scope_end();
+    CK_STR(g_order, "(b)");
+    infy_scope_end();
+    CK_STR(g_order, "(b)");
+
     /* unwind drain is LIFO, drops then defers */
     g_order[0] = 0;
     infy_cleanup_push(defer_x, 0, 1);
@@ -336,6 +387,13 @@ static void test_drop_order(void) {
     infy_cleanup_push(drop_b, 0, 0);
     infy_cleanup_drain();
     CK_STR(g_order, "(b)(a)[x]");
+
+    /* §9.7: cancel is a removal-without-running just like pop_noop, so moving out a `#[must_drop]`
+     * value reports R-0730 instead of silently skipping its Drop. */
+    g_order[0] = 0;
+    expect_panic("cancel of a #[must_drop] entry", R_MUST_DROP, e_cancel_must_drop);
+    infy_cleanup_drain();   /* the panicking entry is still queued: flush it here */
+    g_order[0] = 0;
 
     /* §4.16: a panic raised while a Drop runs is a double panic -> R-0011 + process radius.
      * The exit hook captures exit(3) so the harness survives it. */

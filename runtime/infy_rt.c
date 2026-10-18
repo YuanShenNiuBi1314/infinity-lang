@@ -360,6 +360,26 @@ void infy_cleanup_pop_noop(void) {
     free(e);   /* ownership moved out (§4.7.4) — deliberately not run */
 }
 
+uint8_t infy_cleanup_cancel(void* obj) {
+    /* §4.7.1: `obj` is always the address of a codegen-emitted local, so a null argument could only
+     * ever match a hand-written entry whose payload is the 0 sentinel — refuse it rather than let
+     * one call cancel an arbitrary entry. */
+    if (!obj) return 0;
+    for (InfyCleanup** link = &infy_tls_cleanup; *link; link = &(*link)->next) {
+        InfyCleanup* e = *link;
+        if (e->is_scope || e->obj != obj) continue;
+        if (e->must_drop) {
+            /* §9.7 R-0730: moving out a must-drop value drops it without running its Drop. */
+            e->must_drop = 0;
+            infy_panic(R_MUST_DROP, "cancel of a #[must_drop] value without drop", infy_current_node_loc());
+        }
+        *link = e->next;
+        free(e);
+        return 1;
+    }
+    return 0;
+}
+
 void infy_rt_cleanup_drain_scope(InfyCleanup** head, uint8_t run_defers) {
     InfyCleanup* e = *head;
     *head = 0;

@@ -115,6 +115,11 @@ typedef void (*InfyDeferFn)(void* env);
 void   infy_cleanup_push(InfyDropFn fn, void* obj, uint8_t is_defer);
 void   infy_cleanup_pop_run(void);    /* normal scope exit: run the top entry, then pop   */
 void   infy_cleanup_pop_noop(void);   /* #[no_drop]: pop without running (§4.7.4)          */
+/* §4.7.1: a moved value is dropped by its *new* owner in that owner's scope (§4.7.4), so the entry
+ * registered for the source address must leave the deque without running. Removes the innermost
+ * non-scope entry whose obj == `obj`; returns 1 when one was removed, 0 when nothing matched.
+ * A `#[must_drop]` entry reports R-0730 here exactly as infy_cleanup_pop_noop() does. */
+uint8_t infy_cleanup_cancel(void* obj);
 void   infy_cleanup_drain(void);      /* unwind: drain LIFO (§4.7.4 drop order)            */
 typedef struct { uint64_t live_bytes; uint64_t live_objs; uint64_t total_allocs; uint64_t arena_bytes; } InfyMemStats;
 InfyMemStats infy_mem_stats(void);

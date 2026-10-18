@@ -188,6 +188,29 @@ fn declarator(cty: &str, name: &str) -> String {
     format!("{cty} {name}")
 }
 
+/// Does the emitted C text read `name` **by value**? An identifier-boundary match whose left
+/// neighbour is `&` is the address of that binding — a borrow, which leaves ownership in place.
+fn mentions_by_value(text: &str, name: &str) -> bool {
+    let bytes = text.as_bytes();
+    let is_cont = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut from = 0usize;
+    while let Some(off) = text[from..].find(name) {
+        let start = from + off;
+        let end = start + name.len();
+        from = end;
+        let left_free = start == 0 || !is_cont(bytes[start - 1]);
+        let right_free = end >= bytes.len() || !is_cont(bytes[end]);
+        if !(left_free && right_free) {
+            continue;
+        }
+        if text[..start].trim_end().ends_with('&') {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
 struct TypeNode {
     /// Definition text; `None` while still being computed.
     def: Option<String>,
@@ -200,9 +223,11 @@ struct Binding {
     infy: String,
     cvar: String,
     ty: Ty,
-    /// A cleanup entry was pushed for this binding (§4.7.4), so moving it out of the scope needs a
-    /// pop-without-run that the runtime's deque cannot express.
+    /// A cleanup entry was pushed for this binding (§4.7.4), so it owes one `pop_run` at scope end.
+    /// `pop` is that owed line's slot: a §4.7.1 move cancels the entry by address and clears the
+    /// slot in the same step, which is what keeps the deque and the emitted pops one-for-one.
     cleanup: bool,
+    pop: Option<(usize, usize)>,
 }
 
 /// Where `goto` / `start` targets resolve inside the chain currently being emitted.
@@ -262,8 +287,10 @@ struct Cg<'a> {
     /// The node number being emitted, so `goto(+n)` can resolve relative targets at compile time.
     cur_node_idx: Option<u32>,
     scopes: Vec<Vec<Binding>>,
-    /// Cleanup pops that must run for each currently open scope before a `return` (§4.7.4).
-    pops: Vec<Vec<String>>,
+    /// Cleanup pops that each currently open scope owes before it is left (§4.7.4). A slot goes to
+    /// `None` when its binding is moved out, so "one entry pushed = one pop emitted" survives
+    /// §4.7.1's three move forms.
+    pops: Vec<Vec<Option<String>>>,
     errors: Vec<CgError>,
     tmp: u32,
     ret_ty: Option<Ty>,
@@ -436,12 +463,18 @@ impl<'a> Cg<'a> {
             return Ok(());
         }
         let shim = self.drop_shim(ty)?;
-        if let Some(i) = self.pops.len().checked_sub(1) {
-            self.pops[i].push("infy_cleanup_pop_run();".to_string());
-        }
+        let slot = match self.pops.len().checked_sub(1) {
+            Some(i) => {
+                let pi = self.pops[i].len();
+                self.pops[i].push(Some("infy_cleanup_pop_run();".to_string()));
+                Some((i, pi))
+            }
+            None => None,
+        };
         for sc in self.scopes.iter_mut().rev() {
             if let Some(b) = sc.iter_mut().find(|b| b.cvar == cvar) {
                 b.cleanup = true;
+                b.pop = slot;
                 break;
             }
         }
@@ -1308,6 +1341,7 @@ impl<'a> Cg<'a> {
                 cvar: name.clone(),
                 ty: p.ty.clone(),
                 cleanup: false,
+                pop: None,
             });
             // The cleanup entry belongs to the function's own scope, so it is pushed *inside* the
             // body — registering it before the signature would put it in the previous item's buffer.
@@ -1358,7 +1392,7 @@ impl<'a> Cg<'a> {
         match (&body.tail, want_owned.as_ref()) {
             (Some(t), Some(_)) if fn_body => {
                 let v = self.expr(t, want_owned.as_ref())?;
-                self.refuse_moved_return(t, &v)?;
+                self.cancel_moved_return(&v)?;
                 self.drain_pops();
                 self.b(&format!("return {};", v.text));
                 Ok(())
@@ -1366,7 +1400,7 @@ impl<'a> Cg<'a> {
             (Some(t), _) => {
                 let v = self.expr(t, if fn_body { want_owned.as_ref() } else { None })?;
                 if fn_body {
-                    self.refuse_moved_return(t, &v)?;
+                    self.cancel_moved_return(&v)?;
                     self.drain_pops();
                     self.b(&format!("return {};", v.text));
                 } else {
@@ -1389,57 +1423,87 @@ impl<'a> Cg<'a> {
         }
     }
 
-    /// §4.7.1 + §4.7.4: a move re-seats an owned value, but the cleanup entry the back end already
-    /// pushed points at the *old* address, and the deque only pops its top (`infy_rt.h:116`). Two
-    /// entries for one buffer would be a double free, so the move is refused until the runtime gets
-    /// an address-taking pop (registered as `docs/BACKLOG.md` F12).
-    fn refuse_move_of_owned(&mut self, e: &Expr, ty: &Ty) -> Result<(), CgError> {
+    /// The binding a §4.7.1 move names: `s`, or the explicit `move s`. A field, a call result or a
+    /// literal produces a value rather than transferring an owned binding.
+    fn moved_binding(e: &Expr) -> Option<&str> {
+        match &e.kind {
+            ExprKind::Ident(n) => Some(n.as_str()),
+            ExprKind::Move { expr } => match &expr.kind {
+                ExprKind::Ident(n) => Some(n.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// §4.7.1 + §4.7.4: hand the buffer to the destination. `infy_cleanup_cancel` removes the entry
+    /// registered at the **source** address without running it, and the `pop_run` line this back end
+    /// owed for that entry is cleared in the same step — one entry per pop is the invariant
+    /// `close_scope` / `drain_pops` rely on, so the two halves must always move together.
+    fn cancel_cleanup_of(&mut self, cvar: &str, name: &str) {
+        let slot = self
+            .scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.iter().rev().find(|b| b.cvar == cvar && b.cleanup))
+            .and_then(|b| b.pop);
+        let Some((si, pi)) = slot else { return };
+        for sc in self.scopes.iter_mut().rev() {
+            if let Some(b) = sc.iter_mut().find(|b| b.cvar == cvar && b.cleanup) {
+                b.cleanup = false;
+                b.pop = None;
+                break;
+            }
+        }
+        if let Some(v) = self.pops.get_mut(si) {
+            if pi < v.len() {
+                v[pi] = None;
+            }
+        }
+        self.b(&format!(
+            "/* §4.7.1 移动：`{name}` 交出所有权，清理项按地址取消，由新所有者在其作用域释放（§4.7.4）*/"
+        ));
+        self.b(&format!("infy_cleanup_cancel(&{cvar});"));
+    }
+
+    /// §4.7.1: `let d: String = s;` and an owned by-value argument both re-seat the buffer, so the
+    /// source's entry must leave the deque. A binding that never registered one has nothing to
+    /// cancel, and a chain frame slot cannot hold a drop-bearing type (`emit_chain` refuses it).
+    fn cancel_owned_move(&mut self, e: &Expr, ty: &Ty) -> Result<(), CgError> {
         if !self.needs_drop(ty)? {
             return Ok(());
         }
-        let name = match &e.kind {
-            ExprKind::Ident(n) => n,
-            ExprKind::Move { expr } => match &expr.kind {
-                ExprKind::Ident(n) => n,
-                _ => return Ok(()),
-            },
-            _ => return Ok(()),
-        };
-        let owned = self.lookup(name).map(|b| b.cleanup).unwrap_or(false);
-        if owned {
-            return Err(CgError::new(
-                "§4.7.1 / §4.7.4",
-                format!("codegen: 移动 `{name}` 会把已登记的清理项留在旧地址上（双层释放），未实现（见 docs/BACKLOG.md F12）"),
-            ));
+        let Some(name) = Self::moved_binding(e) else { return Ok(()) };
+        let hit = self
+            .scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.iter().rev().find(|b| b.infy == name && b.cleanup))
+            .map(|b| b.cvar.clone());
+        if let Some(cvar) = hit {
+            self.cancel_cleanup_of(&cvar, name);
         }
         Ok(())
     }
 
-    /// §4.7.4: a value that is *moved out* by a `return` must not run its drop, but the runtime's
-    /// cleanup deque only supports popping the top entry (`infy_rt.h:116`). Refuse the case instead
-    /// of emitting a use-after-free.
-    fn refuse_moved_return(&mut self, t: &Expr, v: &Val) -> Result<(), CgError> {
+    /// §4.7.4: a value that leaves through `return` is dropped by its new owner, so every cleanup
+    /// entry its C text still carries by value must be cancelled — **before** `drain_pops()` emits
+    /// what the deque owes. `&s` is a borrow, not a move, so `mentions_by_value` skips it:
+    /// cancelling there would leak the buffer instead of double-freeing it.
+    fn cancel_moved_return(&mut self, v: &Val) -> Result<(), CgError> {
         if !self.needs_drop(&v.ty)? {
             return Ok(());
         }
-        // Textual on purpose: `return Pair { s }` moves the binding too, and the only thing that
-        // must not happen is emitting a `pop_run` for a value that leaves the scope.
-        let owned = self
+        let hits: Vec<(String, String)> = self
             .scopes
             .iter()
+            .rev()
             .flatten()
-            .filter(|b| b.cleanup)
-            .map(|b| b.cvar.clone())
-            .collect::<Vec<_>>();
-        if let Some(hit) = owned.iter().find(|cvar| v.text.contains(cvar.as_str())) {
-            let name = match &t.kind {
-                ExprKind::Ident(n) => n.clone(),
-                _ => hit.clone(),
-            };
-            return Err(CgError::new(
-                "§4.7.4",
-                format!("codegen: `return {name}` 移出了带清理项的绑定 `{hit}`，运行时队列只能弹栈顶，未实现（拒绝而不是留下悬垂引用）"),
-            ));
+            .filter(|b| b.cleanup && mentions_by_value(&v.text, &b.cvar))
+            .map(|b| (b.cvar.clone(), b.infy.clone()))
+            .collect();
+        for (cvar, name) in hits {
+            self.cancel_cleanup_of(&cvar, &name);
         }
         Ok(())
     }
@@ -1454,7 +1518,7 @@ impl<'a> Cg<'a> {
     fn close_scope(&mut self) {
         if let Some(p) = self.pops.last_mut() {
             let entries = std::mem::take(p);
-            for s in entries {
+            for s in entries.into_iter().flatten() {
                 self.b(&s);
             }
         }
@@ -1470,7 +1534,7 @@ impl<'a> Cg<'a> {
         for mut p in all.into_iter().rev() {
             let entries = std::mem::take(&mut p);
             kept.push(p);
-            for s in entries {
+            for s in entries.into_iter().flatten() {
                 self.b(&s);
             }
         }
@@ -1584,7 +1648,7 @@ impl<'a> Cg<'a> {
                 match value {
                     Some(v) => {
                         let val = self.expr(v, want.as_ref())?;
-                        self.refuse_moved_return(v, &val)?;
+                        self.cancel_moved_return(&val)?;
                         self.drain_pops();
                         self.b(&format!("return {};", val.text));
                     }
@@ -1667,10 +1731,10 @@ impl<'a> Cg<'a> {
                 ))
             }
         };
-        if let Some(init) = init {
-            self.refuse_move_of_owned(init, &ty)?;
-        }
         if from_frame {
+            // §8.4 rule 1 + ABI §5: this `let` assigns a chain frame slot. A slot can never hold a
+            // drop-bearing type — `emit_chain` refuses the whole chain before emitting its body —
+            // so there is no cleanup entry here to move or cancel.
             let slot = self.lookup(name).map(|b| b.cvar.clone()).unwrap_or_default();
             match &v {
                 Some(x) => self.b(&format!("{slot} = {};", x.text)),
@@ -1686,9 +1750,14 @@ impl<'a> Cg<'a> {
             None => self.b(&format!("{} = {{0}};", declarator(&cty, &cvar))),
         }
         if let Some(top) = self.scopes.last_mut() {
-            top.push(Binding { infy: name.to_string(), cvar: cvar.clone(), ty: ty.clone(), cleanup: false });
+            top.push(Binding { infy: name.to_string(), cvar: cvar.clone(), ty: ty.clone(), cleanup: false, pop: None });
         }
         self.register_drop(&cvar, &ty)?;
+        // §4.7.1: cancel the source only after the destination holds the buffer *and* owns an entry
+        // of its own, so no point of the emitted sequence leaves the value unowned.
+        if let Some(init) = init {
+            self.cancel_owned_move(init, &ty)?;
+        }
         Ok(())
     }
 
@@ -1867,6 +1936,7 @@ impl<'a> Cg<'a> {
                     cvar: format!("f->{}", c_ident(&l.name)),
                     ty: l.ty.clone(),
                     cleanup: false,
+                    pop: None,
                 });
             }
             self.ret_ty = None;
@@ -2848,7 +2918,10 @@ impl<'a> Cg<'a> {
                     format!("codegen: `{name}` 缺少第 {} 个实参 `{}`（默认参数发射未实现）", idx + 1, p.name),
                 )
             })?;
-            self.refuse_move_of_owned(e, &p.ty)?;
+            // An A-track callee needs no special case: §7.6.4's table has no row that carries an
+            // owned value across the boundary (`String`/`Vec` are `Forbidden` → `E-0723` at stage
+            // [4], measured with `infy check`), so a move never reaches this call site.
+            self.cancel_owned_move(e, &p.ty)?;
             let v = self.expr(e, Some(&p.ty))?;
             argv.push(v.text);
         }
@@ -3790,7 +3863,7 @@ impl<'a> Cg<'a> {
                 let init = if *by_ref { format!("(&{})", sv.text) } else { sv.text.clone() };
                 self.b(&format!("{} = {};", declarator(&ct, &cvar), init));
                 if let Some(top) = self.scopes.last_mut() {
-                    top.push(Binding { infy: name.clone(), cvar, ty, cleanup: false });
+                    top.push(Binding { infy: name.clone(), cvar, ty, cleanup: false, pop: None });
                 }
                 if let Some(s) = sub {
                     self.pat_bind(s, sv)?;
@@ -4321,23 +4394,90 @@ mod tests {
         assert!(t.contains("infy_cleanup_pop_run();"), "{t}");
     }
 
-    /// §4.7.1: moving an owned binding leaves the pushed cleanup entry at the old address, and the
-    /// deque only pops its top, so the three move forms are refused instead of emitting a double
-    /// free. The gap is `docs/BACKLOG.md` F12.
+    /// §4.7.1 + §4.7.4: the invariant that makes a move safe. Every cleanup entry a function pushes
+    /// must be answered by exactly one `pop_run` / `pop_noop` / `cancel` — a second answer is a
+    /// double free, a missing one leaks the buffer. Counting both sides is what a textual
+    /// `contains` assertion cannot do.
+    fn cleanup_ledger(text: &str) -> (usize, usize) {
+        let pushed = text.matches("infy_cleanup_push(").count();
+        let answered = text.matches("infy_cleanup_pop_run();").count()
+            + text.matches("infy_cleanup_pop_noop();").count()
+            + text.matches("infy_cleanup_cancel(").count();
+        (pushed, answered)
+    }
+
+    /// §4.7.1 `let d: String = s;`: the entry registered at the **source** address leaves the deque
+    /// without running, and the destination answers the buffer at scope end (F12).
     #[test]
-    fn moving_an_owned_binding_is_refused() {
-        let cases = [
-            "fn f(s: String) { let d: String = s; }",
-            "fn take(s: String) { }\nfn f(s: String) { take(s); }",
-            "fn f(s: String) -> String { s }",
-        ];
-        for src in cases {
-            let e = emit_try(src).unwrap_err();
-            assert!(
-                e.iter().any(|x| x.contains("§4.7.1") || x.contains("§4.7.4")),
-                "move in `{src}` must be refused, got {e:?}"
-            );
-        }
+    fn a_let_move_cancels_the_source_entry_and_keeps_the_destination_pop() {
+        let t = emit_of("fn f(s: String) { let d: String = s; }");
+        assert!(t.contains("infy_cleanup_cancel(&s_"), "{t}");
+        assert!(t.contains("infy_cleanup_push(infy_drop_String, &d_"), "{t}");
+        assert!(!t.contains("infy_cleanup_cancel(&d_"), "the destination owns the buffer: {t}");
+        assert_eq!(t.matches("infy_cleanup_pop_run();").count(), 1, "only the destination pops: {t}");
+        assert_eq!(cleanup_ledger(&t), (2, 2), "{t}");
+    }
+
+    /// §4.7.1 by-value argument: the callee registers its own entry for the same buffer, so the
+    /// caller's entry must be the one cancelled.
+    #[test]
+    fn an_owned_byvalue_argument_cancels_the_callers_entry() {
+        let t = emit_of("fn take(s: String) { }\nfn f(s: String) { take(s); }");
+        assert!(t.contains("infy_cleanup_cancel(&s_"), "{t}");
+        assert_eq!(t.matches("infy_cleanup_pop_run();").count(), 1, "the callee pops its own entry: {t}");
+        assert_eq!(cleanup_ledger(&t), (2, 2), "{t}");
+    }
+
+    /// §4.7.4: a value that leaves through `return` is dropped by its new owner, so nothing pops it
+    /// here — the entry is cancelled and the function ends with zero `pop_run`.
+    #[test]
+    fn a_returned_owned_binding_cancels_its_entry() {
+        let t = emit_of("fn f(s: String) -> String { s }");
+        assert!(t.contains("infy_cleanup_cancel(&s_"), "{t}");
+        assert_eq!(t.matches("infy_cleanup_pop_run();").count(), 0, "the caller owns it now: {t}");
+        assert_eq!(cleanup_ledger(&t), (1, 1), "{t}");
+    }
+
+    /// §4.7.1: `return P { s }` moves the binding too — the cancellation keys on the binding being
+    /// read **by value** in the emitted text, not on the tail expression's shape.
+    #[test]
+    fn a_return_that_carries_the_binding_in_a_literal_cancels_its_entry() {
+        let t = emit_of("struct P { pub s: String }\nfn f(s: String) -> P { P { s } }");
+        assert!(t.contains("infy_cleanup_cancel(&s_"), "{t}");
+        assert!(t.contains(".s = s_"), "{t}");
+        assert_eq!(cleanup_ledger(&t), (1, 1), "{t}");
+    }
+
+    /// §4.7.1 + §3.9: `&s` is a borrow, ownership stays with the callee's caller, so the entry must
+    /// still be popped. Cancelling on a borrow would leak the buffer — the failure mode is the
+    /// opposite of the one `cancel_moved_return` exists to prevent.
+    #[test]
+    fn a_borrow_leaves_the_cleanup_entry_in_place() {
+        let t = emit_of("fn take(r: &String) { }\nfn f(s: String) -> u32 { take(&s); 1u32 }");
+        assert!(!t.contains("infy_cleanup_cancel("), "a borrow is not a move: {t}");
+        assert!(t.contains("infy_cleanup_pop_run();"), "{t}");
+        assert_eq!(cleanup_ledger(&t), (1, 1), "{t}");
+    }
+
+    /// Negative control: a value that never registered an entry has nothing to cancel, so the move
+    /// paths must not emit a `cancel` that matches nothing.
+    #[test]
+    fn moving_a_value_that_never_registered_an_entry_emits_no_cancel() {
+        let t = emit_of("fn f(n: u32) -> u32 { n }");
+        assert!(!t.contains("infy_cleanup_cancel("), "{t}");
+        assert_eq!(cleanup_ledger(&t), (0, 0), "{t}");
+    }
+
+    /// §4.7.4 + ABI §5: a chain frame is released by the scheduler (`infy_free(f->frame)`), so a
+    /// drop-bearing frame local is refused where the frame is laid out. That refusal — not a
+    /// move-specific one — is what keeps owned values out of frames (measured while landing F12).
+    #[test]
+    fn a_chain_frame_local_with_a_destructor_is_refused_by_name() {
+        let e = emit_try("chain C {\n    let a: String = \"abc\";\n}").unwrap_err();
+        assert!(
+            e.iter().any(|x| x.contains("帧局部") && x.contains("析构器")),
+            "the frame-local refusal must be named, got {e:?}"
+        );
     }
 
     // ------------------------------------------------------------ refusals must be named

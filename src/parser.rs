@@ -877,9 +877,35 @@ impl<'a> P<'a> {
                 let mut stmts = Vec::new();
                 if self.eat_p(Punct::LBrace) {
                     while !self.at_p(Punct::RBrace) && !self.at_end() {
-                        if let Some(s) = self.stmt() {
+                        let before = self.pos;
+                        // §8.1 + UB-011: `goto`/`start`/`start_flag` are linkage statements and only
+                        // attach to a chain host statement's `{ … }` block, so at chain top level
+                        // they are `E-0300`. Consuming the whole construct here is also the only way
+                        // this loop advances: `stmt()` cannot start an expression with these
+                        // keywords, returned `None` and left `pos` where it was — the loop then
+                        // appended one diagnostic per turn until the process died allocating.
+                        if matches!(self.peek().kind, Kind::Keyword(Kw::Goto | Kw::Start | Kw::StartFlag)) {
+                            let t = self.peek().clone();
+                            let _ = self.linkage_stmt();
+                            self.err_at(
+                                &t,
+                                "E-0300",
+                                "连携语句独立出现（UB-011）".to_string(),
+                                "连携语句只能挂在宿主语句的 `{ … }` 连携块里，链体顶层只有普通语句",
+                                Some("包进宿主语句的 `{ … }` 连携块（§8.1）".to_string()),
+                            );
+                        } else if let Some(s) = self.stmt() {
                             stmts.push(s);
                         }
+                        if self.pos == before {
+                            let t = self.peek().clone();
+                            self.syntax_err(&t, "语句");
+                            self.synchronize();
+                            if self.pos == before {
+                                self.bump();
+                            }
+                        }
+                        while self.eat_p(Punct::Semi) {}
                     }
                     self.expect_p(Punct::RBrace);
                 }
@@ -2877,6 +2903,40 @@ mod tests {
     fn missing_semicolon_is_e0053() {
         let (_, codes) = parse_str("package main\n\nfn f() { let a = 1\n }\n");
         assert!(codes.iter().any(|c| c == "E-0053"), "{codes:?}");
+    }
+
+    /// §8.1 + UB-011: `goto` / `start` / `start_flag` are linkage statements, so at chain top level
+    /// each is `E-0300`. All three also have to *terminate*: `stmt()` refuses to start an expression
+    /// with these keywords and returns `None` without consuming, which spun this loop until the
+    /// process died allocating diagnostics (`target/scratch/f12/g_bare_zerop`, measured at rc 124).
+    #[test]
+    fn a_linkage_statement_at_chain_top_level_is_e0300_and_terminates() {
+        for src in [
+            "package main\n\nchain C {\n    goto(+0);\n}\n",
+            "package main\n\nchain C {\n    start(chain = C, node = 0);\n}\n",
+            "package main\n\nchain C {\n    start_flag;\n}\n",
+        ] {
+            let (_, codes) = parse_str(src);
+            assert!(codes.iter().any(|c| c == "E-0300"), "E-0300 expected for `{src}`, got {codes:?}");
+        }
+    }
+
+    /// The chain body loop cannot hand every token to `stmt()`, so it needs its own progress guard.
+    /// A token that starts no statement is reported once and skipped rather than re-tried forever.
+    #[test]
+    fn junk_at_chain_top_level_reports_once_and_advances() {
+        let (ast, codes) = parse_str("package main\n\nchain C {\n    )\n    step();\n}\n");
+        assert!(codes.iter().any(|c| c == "E-0053"), "{codes:?}");
+        assert_eq!(ast.items.len(), 1, "{codes:?}");
+    }
+
+    /// §8.1: mounted on a host statement the same `goto` is legal and produces no `E-0300` — the
+    /// pair assertion that keeps the new diagnostic from being a blanket refusal of the keyword.
+    #[test]
+    fn a_goto_mounted_on_a_host_statement_is_not_e0300() {
+        let (ast, codes) = parse_str("package main\n\nchain C {\n    step();\n    { goto(+1); }\n    finalize();\n}\n");
+        assert!(!codes.iter().any(|c| c == "E-0300"), "{codes:?}");
+        assert_eq!(ast.items.len(), 1, "{codes:?}");
     }
 
     #[test]
