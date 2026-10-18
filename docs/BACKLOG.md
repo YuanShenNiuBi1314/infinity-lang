@@ -1199,13 +1199,30 @@
       超 `i64` 的十进制无后缀字面量报完 `E-0042` 仍返回 `IntLit` ⇒ 与新增规则对同一根因报两条（D-55(f)，
       外部用例 `2.8-literals-0011` 当场逮住）。范围规则没覆盖到的四类位置登记为 **F55/F56/F57**。
 
-- [ ] F14 **构造器模式的绑定没有进入作用域**（C2 轮写测试时确认，未改实现）：
+- [x] F14 **构造器模式的绑定没有进入作用域**（C2 轮写测试时确认，未改实现）：
       `fn g(q: Q) -> u32 { match (q) { Q::X => 0, Q::Y(n) => n } }` 报 `E-0101 · 未声明的标识符 n`，
       即 §3.12 的绑定形如 `Variant(b)` 在臂体里不可用（同函数里 `Q::X => 0` 正常）。
       后果：codegen 的绑定发射（`pat_bind`）在真实程序上无法被端到端验证，目前只有构造器**条件**部分被 tour 之外的
       合成测试覆盖（`codegen::tests::enums_elide_the_union_when_no_variant_carries_a_payload` 因此改用
       `Q::Y(n) => 1` 的"绑定不使用"形式）。
       验收：`sema` 在检查臂体前把模式绑定压入局部表，令上例通过；补 `E-1001`（移动后使用）与穷尽性的成对测试。
+      **F14 轮（2026-10-19）勾 `[x]`，裁定 = 偏差 D-56(a)–(g)，新登记 F61/F62 未修。**
+      根因 = `bind_pat` 把 `PatKind::Constructor` 的 `path.last()` 当**枚举名**查，而 `Q::Y(n)` 的最后一段是
+      **变体名** ⇒ 两支（结构体模式 / 变体模式）共用一个 `name` 时其中一支必然查空；臂作用域本来就在，缺的只是
+      往局部表**声明**这一步。落地 = `sema::ctor_payload(path, ty)` 按 owner（除最后一段以外的全部段）解析变体，
+      内建 `Some`/`None`/`Ok`/`Err` 按 scrutinee 自己的载荷解析；`Option`/`Result` 从此是**闭集**（列全即穷尽，
+      不需要 `_` ⇒ `covers_named_variants`）；`parser::BUILTIN_CTOR_PAT` 让裸 `None` 是单元构造器而不是新绑定
+      （绑定臂在 codegen 是恒真形状，会把同 `match` 后面的臂整条吞掉而 `check` 全绿）。
+      实测：`cargo test --offline --lib -j 1` **583 passed / 0 failed**（+4 = `sema` 35→**37**、`codegen` 33→**34**、
+      `borrow` 22→**23**；本笔开工基线亦 583，其间 F58 轮 +3 全在 `btrack`）、check **0/0**、
+      `scripts/f14-mutation-probe.ps1 -Apply` = control 583/0 且 M1–M5 各自红（3/1/3/3/1 条，脚本 exit 0）、
+      release 二进制实跑 `target/scratch/f14e2e/{a_ctor_bind,c_option,e_chain}` check **exit 0**、
+      `{b_leak,c2_nonexhaustive,d_move}` 各 **exit 2** 并分别打 `E-0101`/`E-0070`/`E-1001`，`e_chain` 的
+      `build` 与 `run` 各 **exit 0**（生成的 C 里 `uint32_t v_3 = o_1.val;` 紧跟 `mres_2 = v_3;`）。
+      **剩余面（不许读成"构造器模式全部打通"）**：F62 = 带载荷的用户变体**无法构造**（`Q::Y(7u32)` 报
+      `E-0101 · 调用未声明的函数 Y`，而 `Q::X` 与 `Some(1u32)` 都 `check ok`）⇒ 用户枚举那一半仍到不了运行期，
+      端到端只借 `Option`/`Result` 跑通；F61 = owner/变体与 scrutinee 不符时只由臂体的 `E-0101` 暴露，
+      §3.12 的 `007x` 家族没有"模式与 scrutinee 不符"这一档码。
 
 - [ ] F15 **`fmt!` 没有 lowering 路径**（C2 轮确认，属 C2 验收清单里唯一被上游阻塞的项）：
       §10.11 的 `fmt!("fetch #{}", j.id)` 在 §14.2 是规范样例，但 `macro_expand` 不认 `fmt!`（它是编译器内建而非
@@ -1766,6 +1783,32 @@
       `isolation="process"`"的定向 help，并把它接进 `infy explain`（G1）；③ 无论走哪条，
       `capabilities/*.toml` 的对应行必须从 `"-"` 改成真映射，且有 3.13 语料的端到端红/绿对照。
 
+- [ ] F61 **模式与 scrutinee 不符时没有精确诊断，只由臂体的使用暴露 `E-0101`**（F14 轮量到，未改）：
+      `enum Q { X, Y(u32) }` / `enum R { Z(u32) }` 的 `match (q) { R::Z(n) => n, _ => 0 }` **不声明** `n`
+      （owner 不是 scrutinee 自己的类型 ⇒ `sema::ctor_payload` 返回 `None`），于是唯一的可观察结果是臂体里
+      的 `n` 报 `E-0101 · 未声明的标识符`。同族四个形状一样只有 `E-0101`：未知 owner、未知变体名、
+      内建构造器（`Some`/`None`/`Ok`/`Err`）对着非 `Option`/`Result` 的 scrut、`P { a }` 的 owner 不是结构体。
+      根因在规范侧：§3.12 的 `007x` 家族只有 `E-0070`（不穷尽）/`E-0071`（不可达臂）/`E-0072`（或模式绑定集）/
+      `E-0073`（深度）/`E-0074`（`defer`），**没有**"模式与 scrutinee 类型不符"这一档；§4.2 的 `E-0110` 判的是
+      "类型不符"而非"这个名字不在这里"，`E-0101` 判的是"标识符未声明"。⇒ 借用任何一条都要新裁定。
+      验收：定一条码（候选 = 在 `007x` 段内新开 `E-0075`，需先确认它与 §9 的 `R-0007`/`W-007x` 无冲突）并在
+      上述五个形状各发一条，成对锁 = 形状**存在且匹配**时不发、形状不匹配时不发 `E-0101`（现在的
+      `constructor_pattern_bindings_reach_the_arm_body` 里那条 `R::Z(n)` 断言要随之改写）。
+      现状锁点：`sema::tests::constructor_pattern_bindings_reach_the_arm_body` 的"foreign owner must not bind"
+      一支 + `docs/spec-deviations.md` **D-56(d)**。**不许**为了让臂体绿而放宽 `ctor_payload` 的判据。
+
+- [ ] F62 **带载荷的用户枚举变体无法构造 ⇒ F14 打开的那一半在真实程序里仍到不了运行期**（F14 轮实测，未改）：
+      `enum Q { X, Y(u32) }` 的 `let q = Q::Y(7u32);` 在阶段 [4] 报 `E-0101 · 调用未声明的函数 Y`
+      （`infy check target/scratch/f14ctor/qualified` **exit 2**），而同一份源码的单元变体 `Q::X` 与内建构造器
+      `Some(1u32)` 都 `check ok`（**exit 0**）。⇒ 用户枚举的**带载荷值造不出来**，模式绑定只能借
+      `Option`/`Result` 的形状端到端跑通（`target/scratch/f14e2e/e_chain` 的 `check|build|run` 全 exit 0 用的正是
+      `Some(7u32)`）。认法：这是"构造器既是模式又是表达式"这一族里**只有模式侧接了线**的形状 ——
+      `sema` 认得 `Q::Y(..)` 的载荷，`check_expr` 的路径解析只把 `::` 链上的最后一段当函数/单元变体查。
+      验收：`Q::Y(7u32)` 在阶段 [4] 定型为 `Ty::Adt("Q")`、阶段 [7] 落进 `HirCrate` 的 tag+payload、阶段 [8] 发射
+      联合初始化（`docs/internals/runtime-abi.md` §1 的 `InfyAdt` 形状），端到端 = 一条真实链节点里
+      `match (Q::Y(7u32)) { Q::Y(n) => n, Q::X => 0 }` 的 `infy run` exit 0；成对锁 = 载荷类型不符要报
+      `E-0110` 而不是静默接受。做完这一条才能写"用户枚举的构造与解构已打通"。
+
 ### 阶段 G：竞品对标 —— 竞品的优点逐个超越，竞品的已知缺陷逐个封死
 
 > 来源：2026-10-18 对项目所有者点名的竞品（rustc/cargo、Go、Zig/Nim、CPython/Lua/JS/TS、JVM/.NET/Swift、
@@ -2174,7 +2217,47 @@
 
 ## 2. 当前指针
 
-> **F58 轮收尾（2026-10-19，cron-38）：F58 勾 `[x]`，新登记 F59/F60 未修，F28 只关掉 py-3.13 那一半** ——
+> **F14 轮收尾（2026-10-19，cron-39）：F14 勾 `[x]`，新登记 F61/F62 未修；本段取代下面 F58 轮那段的"下一轮"** ——
+> 交付 = **收敛另一班留下的在途半成品**（不是重写）：`src/{sema,parser,borrow,codegen}.rs` + 三份文档 +
+> `scripts/{f14-mutation-probe.ps1,sync-doc-numbers-f14.py}` 在开工时就是脏的（写于 2026-10-18 19:38–19:55，
+> 无提交）。判"没人还在写"的三条证据：`cron-lock.log` 里 23:49 之后除本班外没有第二次 `TAKE`、那批文件的
+> mtime 到开工已 **6 小时**未动、会话表里唯一活着的那班（`全栈开发与GitHub提交`）状态 `cold` 且
+> `pendingInteractionCount=0`。⇒ 按"优先收敛而不是重写"接手，`git checkout --` 一次没用过。
+> **本轮自己补的三件**（其余是在途成品，逐条核过才收）：① `ctor_payload` 的注释里那条 **"F58" 引用是悬空的**
+> （它写于 F58 立项之前，指的是"这些形状还缺精确拒绝"）⇒ 改成 **F61** 并真的把这一条登进 §1；
+> ② `docs/spec-deviations.md` 里**根本没有 D-56**，而三份文档 6 处写着"裁定 = 偏差 **D-56**"⇒ 本轮补写成
+> **D-56(a)–(g)**（owner 由除最后一段以外的全部段回答 / `BUILTIN_CTOR_PAT` 这份名单规范没给 / `Option`+`Result`
+> 闭集穷尽 / 不符时只由臂体 `E-0101` 暴露 / 模式绑定是普通拥有者 / 结构体与变体共用一个 `Constructor` 形状 /
+> owner 仍按简单名比）；③ 在途文档把总数写成 **580 = 576 + 4**，那是"F14 直接落在 F13 上"的假设，而 **F58 的 +3
+> 先到** ⇒ `btrack` 表行仍 31、三份文档的总数与逐模块相加式全部落后 ⇒ 给 `sync-doc-numbers-f14.py` 加了
+> **stage 2**（10 条规则，全或无、字节 I/O、幂等、干跑默认）改到 **583 / `btrack` 34**，顺带修掉 `README.md`
+> 运行时那一格还写着 **F8 轮的 rt 32340**（同一份文件另一处已是 32353 = [[infy-doc-claims-vs-evidence]] 的 (h) 形态）。
+> **基线（本机 `-j 1`）**：`cargo test --offline --lib -j 1` **583 passed / 0 failed**（开工 583 ⇒ 本轮 Rust 侧
+> 零新增断言，改动只有注释一处 + 文档；探针 control 也是 583 ⇒ 同一棵树第三次跑出同数）、
+> `cargo check --offline --lib` **0 error / 0 warning**、`cargo build --offline --release` exit **0**、
+> `python scripts/check-doc-numbers.py` **exit 0 / PASS**、`scripts/f14-mutation-probe.ps1 -Apply` **exit 0**
+> （control 583/0，M1 3 红 / M2 1 红 / M3 3 红 / M4 3 红 / M5 1 红）、tour 的
+> `fmt --check|check|build|run|test|build --verify-reproducible|artifact info --nodes` 全 exit **0** 且
+> **C11 12512 / 产物 200700 / build-id `d7c4408e…370015` / 节点表 7-8-9-10-16-20** 一字未动、
+> 四条 C 链（C 侧零改动）两份 `-c` 各 stderr **0 字节**、rt **32353/0**、两条 IFBC **180/180** + `cmp` 无差异、
+> `infy conformance --report` 仍 **83 = 77/0/6 ⇒ exit 1**（92.8%）。
+> **措辞红线（本轮三条新的，别踩）**：① 不许写"构造器模式已全部打通"或"用户枚举能解构了" ——
+> **F62** = `Q::Y(7u32)` 这类带载荷的用户变体**根本造不出来**（实测 `E-0101 · 调用未声明的函数 Y` exit 2），
+> 端到端那一半是借 `Some(7u32)` 跑通的；② 不许写"模式与 scrutinee 不符会报错" —— 现在只有臂体的 `E-0101`，
+> §3.12 的 `007x` 没有那一档码（= **F61**，本轮没有挪用 `E-0110` 去凑）；③ 不许写"`infy check` 对 `None` 的
+> 处理已验证过运行期嵌套语义"之类 —— 本轮只验到 `check|build|run` 三个 exit 码与一份生成的 C。
+> 既有红线不变：覆盖 83/2300 ⇒ 不得声称「INFY v2.0 兼容」；"两侧装载期校验等价"不许讲（F26 / D-42 (a)–(e)）；
+> 派生代码的类型标注不可信（F49）；`[u32; 后声明的 const]` 仍只是显式拒绝（F52②）；`return v;` 收尾仍无条件
+> `E-0053`（F55）。
+> **下一轮 = ①** 现算欠账补推 + 回查**覆盖本轮交付树**的那条 run —— 本轮把 cron-38 欠的 3 笔与自己这笔合成
+> **一次**推送，所以那条 run 的步 7 应打 **583 passed / 0 failed**、步 8 告警 0、步 10 rt **32353**、
+> 步 11 两条 IFBC **180/180** + `cmp`、步 12 tour 六条 + `--verify-reproducible` + `artifact info --nodes` 全 exit 0；
+> `cancelled` 既不是红也不是绿。**②** §1 第一个 `[ ]` = **F15**（`fmt!` 没有 lowering 路径，§10.11 + §14.2 样例；
+> 落点 = `macro_expand` 不认 `fmt!` ⇒ `sema.rs` 对残留 `MacroCall` 发 `E-0402`，运行时侧 `InfyFmtSpec`/`InfyFmtArg`/
+> `infy_fmt_run` 的接口是齐的）。**注意 F15 会动 `src/sema.rs` 与 `src/codegen.rs`**，开工前先看工作树是否又被
+> 别的班次弄脏。**③** 卫生欠账不变：全仓 `while !at(…) && !at_end()` 形状仍缺前进守卫清点（F53 只数了语料命中的那一处）。
+
+> **F58 轮收尾（2026-10-19，cron-38）：F58 勾 `[x]`，新登记 F59/F60 未修，F28 只关掉 py-3.13 那一半（本段已被上面那段取代）** ——
 > 交付提交 **`57f6a0d`**（`capabilities/IFBC-CAP-py-3.13.toml` 重建 = 数值行 0 → 150；`src/cap_opmap.rs`（新）
 > = 每代 opmap 契约，与表**不同源**；`src/btrack.rs` = `check_version_contract()` 接进 `load()`、
 > 新 `IngestErr::CapVersionMismatch` → `E-0713`、`numeric_key` 归一成 E.3 的 `0x%02x`；

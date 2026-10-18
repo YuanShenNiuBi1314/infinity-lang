@@ -805,6 +805,19 @@ mod tests {
         format!("package p\n\n{text}")
     }
 
+    /// §3.12 + §4.7.1: a constructor pattern's binding is an ordinary owner — a second move of it
+    /// is `E-1001`, and a `Copy` payload stays clean (the pair that keeps this from being a
+    /// blanket rejection of move-only payloads).
+    #[test]
+    fn pattern_bindings_take_part_in_move_tracking() {
+        let c = codes(&annotated("enum S { A, B(Vec<u8>) }\nfn take(v: Vec<u8>) { }\nfn f(s: S) { match (s) { S::A => { }, S::B(v) => { take(v); take(v); } } }"));
+        assert!(c.contains(&"E-1001".to_string()), "{c:?}");
+        let c = codes(&annotated("fn take(v: Vec<u8>) { }\nfn f(o: Option<Vec<u8>>) { match (o) { None => { }, Some(v) => { take(v); take(v); } } }"));
+        assert!(c.contains(&"E-1001".to_string()), "{c:?}");
+        let c = codes(&annotated("enum S { A, B(u32) }\nfn take(v: u32) { }\nfn f(s: S) { match (s) { S::A => { }, S::B(v) => { take(v); take(v); } } }"));
+        assert!(!c.contains(&"E-1001".to_string()), "{c:?}");
+    }
+
     #[test]
     fn use_after_move_is_e1001() {
         let c = codes(&annotated("fn take(v: Vec<u8>) -> Vec<u8> { v }\nfn f(v: Vec<u8>) { let a = take(v); take(a); take(a); }"));

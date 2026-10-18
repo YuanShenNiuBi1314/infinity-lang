@@ -1546,6 +1546,62 @@ check 带 build 全绿、值直接进产物**。一条规则两半都漏：该�
 
 ---
 
+## D-56 F14 的构造器模式绑定：§3.12 给了文法，却没给"变体模式属于谁"的解析规则、没给内建构造器的名单、也没给"模式与 scrutinee 不符"的码 —— 七处定死
+
+**现场**：`fn g(q: Q) -> u32 { match (q) { Q::X => 0, Q::Y(n) => n } }` 在阶段 [4] 对自己的 `n` 报
+`E-0101 · 未声明的标识符`。`sema::bind_pat` 把 `PatKind::Constructor` 的 `path.last()` 当**枚举名**去查，
+而 `Q::Y(n)` 的最后一段是**变体名** ⇒ 查不到任何枚举，于是这个绑定从未被声明过。臂体的作用域
+（`push_scope` / `pop_scope`）本来就在，缺的只是往里声明这一步。
+
+**(a) 归属由除最后一段以外的全部段回答。** 变体模式是 `Enum::Variant(pat_list)`，owner = `path[..n-1]`，
+变体 = `path[n-1]`。规范的产生式 `trait_path "::" ident ( "(" pat_list? ")" | "{" pat_field... "}" )?`
+只描述形态，没有说实现该拿哪一段去找枚举 ⇒ 按产生式的字面顺序定死。
+
+**(b) 单个非保留字段是绑定，除四个内建构造器名之外。** `Some`/`None`/`Ok`/`Err` 是 §4.1 里唯一
+**不写 `::` 也能拼出来**的变体名，所以 §3.12 那句"若与已知单元变体同名，变体优先（见下消歧）"对它们
+必须生效，否则裸 `None` 是一个**新绑定**，而 `codegen` 把绑定臂读成恒真（`if ((1))`）⇒ 写在它后面的臂
+整条静默失效，而 `check` 全绿。规范没列这份名单，名单由 §4.1 的类型表导出（`Option<T> = Some(T) | None`、
+`Result<T,E> = Ok(T) | Err(E)`）⇒ 真值源 = `parser::BUILTIN_CTOR_PAT`，只有这一处。
+
+**(c) `Option`/`Result` 是闭集，列全即穷尽，不需要 `_` 臂。** §3.12 的穷尽算法只点了 `bool`、小整数与
+**用户枚举**（"按变体与 range 的并集做覆盖判定"），没把内建构造器写进去；§4.1 又明说这两个类型就是
+那两组变体。⇒ 按 §4.1 判：`Some`+`None`（`Ok`+`Err`）齐了即穷尽，缺一个 ⇒ `E-0070`。
+复用同一条"每个变体都要被某个无守卫的臂点名"的规则（`covers_named_variants`），不另造第二套判定。
+
+**(d) 变体名不属于 scrutinee 自己的类型 ⇒ 不绑定，而不是"借别人的载荷"。** `R::Z(n)` 用在 `q: Q` 上
+不声明 `n`；唯一的可观察结果是臂体里的 `n` 报 `E-0101`。规范 §3.12 的 `007x` 家族只有
+`E-0070`（不穷尽）/`E-0071`（不可达臂）/`E-0072`（或模式绑定集）/`E-0073`（深度）/`E-0074`（`defer`），
+**没有**"模式与 scrutinee 类型不符"这一档，而 §4.2 的 `E-0110` 判的是"类型不符"不是"这个名字不在这里" ⇒
+借用哪一条都要另开一次裁定。本轮**不放宽也不挪用**，登记为 **F61**。同族形状：未知 owner、未知变体名、
+内建构造器对着非 `Option`/`Result` 的 scrut、`fields` 非空而 owner 不是结构体。
+
+**(e) 模式绑定是普通拥有者。** 阶段 [5] 对 `Q::B(v) => { take(v); take(v); }` 的第二次 `take(v)` 报
+`E-1001`，`S::B(v)` 的载荷是 `u32`（`Copy`）时不成对报错 —— §4.7.1 只说"移动后源绑定失效"，没说模式绑定
+算不算"源绑定"；按 §3.12 的"绑定"二字与 `bind_pat` 的既有语义（`PatKind::Binding` 一直是拥有者）定死。
+成对断言在 `borrow::tests::pattern_bindings_take_part_in_move_tracking`。
+
+**(f) 结构体模式与变体模式共用一个 AST 形状，以 `fields` 是否为空区分。** `PatKind::Constructor` 同时承载
+`P { a }` 与 `Q::Y(a)`；`fields` 非空 ⇒ 走"按字段名查结构体"这一支并**立即返回**，`args` 那一支不再执行。
+这是 (a) 之所以此前能"看起来对"的原因：两支共用一个 `name = path.last()`。
+
+**(g) owner 比对仍用简单名。** `Ty::Adt(name)`/`Ty::Named(name)` 与 `path[..n-1].join("::")` 逐字比较，
+跨 package 重名会选错（同 F2 轮那条已知面），本轮没有扩大判据、也没有顺手改。
+
+**实测**：`cargo test --offline --lib -j 1` **583 passed / 0 failed**（F14 的 +4 = `sema` 35→**37**、
+`codegen` 33→**34**、`borrow` 22→**23**）；`cargo check --offline --lib` 0 error / 0 warning；变异探针
+`scripts/f14-mutation-probe.ps1 -Apply` = control 583/0 且 **M1–M5 各自红**（M1 3 条、M2 1 条、M3 3 条、
+M4 3 条、M5 1 条，脚本 exit 0）；release 二进制实跑 `target/scratch/f14e2e/` = `a_ctor_bind`/`c_option`/
+`e_chain` 的 `check` **exit 0**、`b_leak` `E-0101` **exit 2**、`c2_nonexhaustive` `E-0070` **exit 2**、
+`d_move` `E-1001` **exit 2**，`e_chain` 另跑 `build` 与 `run` 各 **exit 0** 且生成的 C 里
+`uint32_t v_3 = o_1.val;` 紧跟 `mres_2 = v_3;`（绑定被装载再被臂体读）。
+
+**F62**（本轮量到、未修）= **带载荷的变体无法构造**：`enum Q { X, Y(u32) }` 的 `Q::Y(7u32)` 在阶段 [4] 报
+`E-0101 · 调用未声明的函数 Y`，而单元变体 `Q::X` 与内建构造器 `Some(1u32)` 都 `check ok`。后果：F14 打开的
+**用户枚举**那一半在真实程序里仍然到不了运行期（端到端只能借 `Option`/`Result` 的形状跑通），本轮没有为此
+放宽 (a)–(g) 任何一条。
+
+---
+
 ## D-57 F58 的能力表版本忠实性：规范只说"数值键 = 该 minor 的 `dis.opmap` 值"，没说什么算该 minor 的
 opmap、没给"表描述错了版本"这一类错误的码、也没说契约该由谁来持有 —— 七处定死
 

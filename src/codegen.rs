@@ -4361,6 +4361,22 @@ mod tests {
         assert!(t.contains("q_1.v.Y.a0"), "tuple payload is addressed as a0 (D-24): {t}");
     }
 
+    /// §3.12: a constructor binding is emitted as a local that the arm body then reads. F14 kept
+    /// this shape unreachable — `sema` rejected the arm body's own binding with `E-0101`, so only
+    /// the unused form `Q::Y(n) => 1` ever reached the back end. The `None` half is the guard on
+    /// the parser's "a bare `None` is the unit constructor" rule: read as a fresh binding it is
+    /// codegen's always-true arm, and the arm that follows would never run.
+    #[test]
+    fn constructor_bindings_are_loaded_and_then_read() {
+        let t = emit_of("enum Q { X, Y(u32) }\nfn g(q: Q) -> u32 { match (q) { Q::X => 0, Q::Y(n) => n } }");
+        assert!(t.contains("uint32_t n_3 = q_1.v.Y.a0;"), "the payload load: {t}");
+        assert!(t.contains("mres_2 = n_3;"), "the arm body reads the binding: {t}");
+        let t = emit_of("fn g(o: Option<u32>) -> u32 { match (o) { None => 0, Some(v) => v } }");
+        assert!(t.contains("if ((o_1.some == 0u)) {"), "`None` is a tag test: {t}");
+        assert!(!t.contains("if ((1)) {"), "a binding arm is exactly that: {t}");
+        assert!(t.contains("uint32_t v_3 = o_1.val;"), "{t}");
+    }
+
     // ------------------------------------------------------------ §4.11 `?`
 
     /// §4.11: `expr?` is exactly `match expr { Ok(v) => v, Err(e) => return Err(e.into()) }`. The

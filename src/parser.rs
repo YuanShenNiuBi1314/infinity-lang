@@ -2262,7 +2262,7 @@ impl<'a> P<'a> {
                     self.expect_p(Punct::RBrace);
                     return Pat { kind: PatKind::Constructor { path: segs, args: Vec::new(), fields, has_rest }, span: Span::new(self.file, start, self.prev_end()) };
                 }
-                if segs.len() == 1 && !Kw::is_reserved(&segs[0]) {
+                if segs.len() == 1 && !Kw::is_reserved(&segs[0]) && !BUILTIN_CTOR_PAT.contains(&segs[0].as_str()) {
                     let sub = if self.eat_p(Punct::At) { Some(Box::new(self.pat_unary())) } else { None };
                     return Pat { kind: PatKind::Binding { name: segs[0].clone(), by_ref: false, mutable: false, sub }, span: Span::new(self.file, start, self.prev_end()) };
                 }
@@ -2754,6 +2754,12 @@ fn lifetime_name(t: &Tok) -> String {
         String::new()
     }
 }
+
+/// §3.12's disambiguation — "若与已知单元变体同名，变体优先" — over the §4.1 built-in
+/// constructors, the only variant names a pattern can spell without `::`. A bare one is therefore a
+/// path pattern, never a binding: a binding arm is codegen's always-true shape, so reading `None`
+/// as a binding silently swallows every later arm of the same `match`.
+const BUILTIN_CTOR_PAT: &[&str] = &["Some", "None", "Ok", "Err"];
 
 fn single_pat(segs: &[String], span: Span) -> Pat {
     if segs.len() == 1 {

@@ -1411,12 +1411,18 @@ impl<'a> Checker<'a> {
         let exhaustive = match scrut {
             Ty::Bool => covers_bool(arms),
             Ty::Adt(name) | Ty::Named(name) => covers_enum(arms, name, &self.prog) || has_wild,
+            // §4.1: `Option`/`Result` are the built-in variants of a closed set, so listing
+            // `Some`+`None` (or `Ok`+`Err`) is exhaustive without a `_` arm.
+            Ty::Option { .. } => covers_named_variants(arms, &["Some", "None"]) || has_wild,
+            Ty::Result { .. } => covers_named_variants(arms, &["Ok", "Err"]) || has_wild,
             Ty::Prim(p) => covers_int_range(arms, *p) || has_wild,
             _ => has_wild,
         };
         if !exhaustive {
             let missing = match scrut {
                 Ty::Adt(name) | Ty::Named(name) => format!("枚举 {name} 有未覆盖的变体"),
+                Ty::Option { .. } => "Option 有未覆盖的构造器".to_string(),
+                Ty::Result { .. } => "Result 有未覆盖的构造器".to_string(),
                 Ty::Bool => "缺少 `false` 或 `true` 臂".to_string(),
                 _ => "存在未覆盖的取值".to_string(),
             };
@@ -1437,20 +1443,26 @@ impl<'a> Checker<'a> {
                 }
             }
             PatKind::Constructor { path, args, fields, .. } => {
-                // Enum variant payload or struct destructuring
-                let name = path.last().cloned().unwrap_or_default();
-                if let Some(ei) = self.prog.enum_by_name(&name) {
-                    let payload: Vec<Ty> = self.prog.enums[ei].variants.iter().find(|(v, _, _)| v == &name || path.len() > 1).map(|(_, p, _)| p.clone()).unwrap_or_default();
-                    if !payload.is_empty() || path.len() > 1 {
-                        for (sub, t) in args.iter().zip(payload.iter()) {
-                            self.bind_pat(sub, t.clone());
+                // §3.12: a struct pattern is `ident { pat_field }`, so its *last* segment is the
+                // struct name and fields bind by name.
+                if !fields.is_empty() {
+                    if let Some(si) = path.last().and_then(|n| self.prog.struct_by_name(n)) {
+                        for (fname, sub) in fields {
+                            let t = self.prog.structs[si].fields.iter().find(|(n, _, _)| n == fname).map(|(_, ty, _)| ty.clone()).unwrap_or(Ty::Invalid);
+                            self.bind_pat(sub, t);
                         }
                     }
-                } else if let Some(si) = self.prog.struct_by_name(&name) {
-                    for (fname, sub) in fields {
-                        let t = self.prog.structs[si].fields.iter().find(|(n, _, _)| n == fname).map(|(_, ty, _)| ty.clone()).unwrap_or(Ty::Invalid);
-                        self.bind_pat(sub, t);
-                    }
+                    return;
+                }
+                // A variant pattern is `Enum::Variant(pat_list)` — every segment but the last is
+                // the *owner*, the last is the *variant*. Resolving `path.last()` as an enum name
+                // instead matched nothing at all, so no constructor binding was ever declared and
+                // its own arm body reported `E-0101` on it (F14).
+                let Some(payload) = self.ctor_payload(path, &ty) else {
+                    return;
+                };
+                for (sub, t) in args.iter().zip(payload.iter()) {
+                    self.bind_pat(sub, t.clone());
                 }
             }
             PatKind::Slice(v, rest) => {
@@ -1472,6 +1484,34 @@ impl<'a> Checker<'a> {
                 self.bind_pat(hi, ty.clone());
             }
             _ => {}
+        }
+    }
+
+    /// §3.12 + §4.1: the payload types a constructor pattern binds against, in the order its
+    /// sub-patterns consume them. `None` = stage [4] has no slot for this shape — unknown owner
+    /// or variant, a built-in constructor against a non-`Option`/`Result` scrut, or an owner that
+    /// is not the scrut's own type — which leaves the sub-pattern unbound and its use reporting
+    /// `E-0101` (the precise refusal these shapes still lack is F61; §3.12's `007x` family has no
+    /// "pattern does not match the scrutinee" code to borrow).
+    fn ctor_payload(&self, path: &[String], ty: &Ty) -> Option<Vec<Ty>> {
+        let last = path.last()?;
+        if path.len() >= 2 {
+            let owner = path[..path.len() - 1].join("::");
+            let expected = match ty {
+                Ty::Adt(n) | Ty::Named(n) => Some(n.as_str()),
+                _ => None,
+            };
+            if expected.is_some() && expected != Some(owner.as_str()) {
+                return None;
+            }
+            let ei = self.prog.enum_by_name(&owner)?;
+            return self.prog.enums[ei].variants.iter().find(|(v, _, _)| v == last).map(|(_, p, _)| p.clone());
+        }
+        match (ty, last.as_str()) {
+            (Ty::Option { inner }, "Some") => Some(vec![(**inner).clone()]),
+            (Ty::Result { ok, .. }, "Ok") => Some(vec![(**ok).clone()]),
+            (Ty::Result { err, .. }, "Err") => Some(vec![(**err).clone()]),
+            _ => None,
         }
     }
 
@@ -2634,6 +2674,12 @@ fn covers_enum(arms: &[MatchArm], enum_name: &str, prog: &Program) -> bool {
     })
 }
 
+/// §4.1 + §3.12: `Option`/`Result` are closed built-in enums, so their variant set is fixed and
+/// needs no `Program` lookup — the same "every variant named by a guard-free arm" rule applies.
+fn covers_named_variants(arms: &[MatchArm], variants: &[&str]) -> bool {
+    variants.iter().all(|v| arms.iter().any(|a| a.guard.is_none() && arm_names_variant(&a.pat, v)))
+}
+
 fn arm_names_variant(p: &Pat, variant: &str) -> bool {
     match &p.kind {
         PatKind::Path(path) => path.last().map(|x| x == variant).unwrap_or(false),
@@ -3134,5 +3180,41 @@ mod tests {
         assert!(got("fn g() -> u8 { -0xFFu8 }", "E-0043"));
         assert!(got("fn g() -> u32 { -0xFFFFFFFF }", "E-0042"), "§2.8 defaulted this literal to u32");
         assert!(got("fn g() -> i8 { -129i8 }", "E-0043"), "the exception reaches one value, not past it");
+    }
+
+    /// §3.12: a constructor pattern's bindings belong to its arm body's scope. `sema` resolved
+    /// `path.last()` as an *enum* name, and for `Q::Y(n)` the last segment is the *variant* — so
+    /// nothing was ever declared and every arm that used its own binding reported `E-0101` (F14).
+    #[test]
+    fn constructor_pattern_bindings_reach_the_arm_body() {
+        clean("enum Q { X, Y(u32) }\nfn g(q: Q) -> u32 { match (q) { Q::X => 0, Q::Y(n) => n } }");
+        clean("enum Q { X, Y(u32) }\nfn g(q: Q) -> u32 { match (q) { Q::Y(n) => n, Q::X => 0 } }");
+        clean("enum T { A, B(u32, i32) }\nfn g(t: T) -> u32 { match (t) { T::A => 0, T::B(a, _b) => a } }");
+        clean("enum Q { X, Y(Option<u32>) }\nfn g(q: Q) -> u32 { match (q) { Q::X => 0, Q::Y(Some(v)) => v, Q::Y(None) => 0 } }");
+        clean("enum Q { X, Y(u32) }\nfn g(q: Q) -> u32 { match (q) { Q::X => 0, Q::Y(n) => { let m = n; m } } }");
+        // §4.1: the built-in constructors bind the same way, against the scrut's own payload.
+        clean("fn g(o: Option<u32>) -> u32 { match (o) { Some(v) => v, None => 0 } }");
+        clean("struct E { pub c: u32 }\nfn g(r: Result<u32, E>) -> u32 { match (r) { Ok(v) => v, Err(e) => e.c } }");
+        // …and a binding stays inside the arm: the arm scope is what makes the pair below a pair.
+        assert!(got("enum Q { X, Y(u32) }\nfn g(q: Q) -> u32 { let z = match (q) { Q::X => 0u32, Q::Y(n) => n }; n }", "E-0101"), "the arm binding must not leak");
+        clean("enum Q { X, Y(u32) }\nfn g(q: Q) -> u32 { let z = match (q) { Q::X => 0u32, Q::Y(n) => n }; z }");
+        // The owner has to be the scrut's own type: a foreign variant pattern binds nothing, so the
+        // arm body's use of `n` stays an `E-0101` rather than silently borrowing `R`'s payload.
+        assert!(got("enum Q { X, Y(u32) }\nenum R { Z(u32) }\nfn g(q: Q) -> u32 { match (q) { R::Z(n) => n, _ => 0 } }", "E-0101"), "a foreign owner must not bind");
+    }
+
+    /// §3.12 + §4.1: listing `Some`+`None` (or `Ok`+`Err`) is exhaustive without a `_` arm, and a
+    /// bare `None` is the *unit constructor*, not a catch-all binding — codegen reads a binding arm
+    /// as always-true, so `None => 0` first would have swallowed every later arm while `check` stayed green.
+    #[test]
+    fn builtin_option_and_result_arms_are_closed_sets() {
+        clean("fn g(o: Option<u32>) -> u32 { match (o) { None => 0, Some(v) => v } }");
+        clean("fn g(r: Result<u32, u32>) -> u32 { match (r) { Err(e) => e, Ok(v) => v } }");
+        assert!(got("fn g(o: Option<u32>) -> u32 { match (o) { Some(v) => v } }", "E-0070"), "no `None` arm");
+        assert!(got("fn g(r: Result<u32, u32>) -> u32 { match (r) { Ok(v) => v } }", "E-0070"), "no `Err` arm");
+        // A `None` arm after `_` is unreachable — proof it is not read as a fresh binding.
+        assert!(got("fn g(o: Option<u32>) -> u32 { match (o) { _ => 0, None => 1 } }", "E-0071"));
+        // Or-patterns keep §3.12's binding-set rule: `None` binds nothing, so `Some(v)` may not share its arm.
+        assert!(got("fn g(o: Option<u32>) -> u32 { match (o) { None | Some(v) => v, Some(0) => 0 } }", "E-0072"));
     }
 }
