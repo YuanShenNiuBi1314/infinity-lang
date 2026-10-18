@@ -17,7 +17,8 @@
 //! | [9] link `infyl` | [`artifact`] |
 //! | [10] signature / checksum segments | [`artifact`], [`pkg`] |
 //!
-//! Cross-cutting: [`diag`] (§9), [`codes`] (§9.3), [`fmt`] (§9.5), [`ifbc`] (§7.8 + appendix D),
+//! Cross-cutting: [`diag`] (§9), [`codes`] (§9.3), [`fmt`] (§9.5), [`fmtstr`] (§10.11, the compile-time
+//! format-string parser used by stages [4] and [8]), [`ifbc`] (§7.8 + appendix D),
 //! [`host`] (§11), [`stdlib`] (§10), [`conformance`] (§12), [`cli`] (§13.4).
 //!
 //! The crate has **no external dependencies**: a compiler is a trust boundary, and §5.8's
@@ -39,6 +40,7 @@ pub mod derive;
 pub mod diag;
 pub mod doc;
 pub mod fmt;
+pub mod fmtstr;
 pub mod hir;
 pub mod host;
 pub mod ifbc;

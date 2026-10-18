@@ -2782,6 +2782,30 @@ mod tests {
         );
     }
 
+    /// F15 acceptance (§14.2 + §10.11): the `describe` sample — `fmt!` in three match arms, `String`
+    /// return — has to survive `infy check` **and** `infy build`, the stage that hands the generated C
+    /// to the host `cc`. The three spec tables are the proof that all three arms were lowered; a
+    /// parser that swallowed the arms after a macro-call body (F63) used to make this sample report
+    /// `E-0070` with no fmt involved at all.
+    #[test]
+    fn the_14_2_describe_sample_checks_and_builds() {
+        let src = "#![infy_version = \"2.0\"]\n\npackage embed\n\n\
+             enum Phase { Fetch, Compile, Link, Publish }\n\n\
+             struct Job { id: u32, phase: Phase }\n\n\
+             fn describe(j: &Job) -> String {\n    match (j.phase) {\n        Phase::Fetch => fmt!(\"fetch #{}\", j.id),\n        Phase::Compile => fmt!(\"compile #{}\", j.id),\n        Phase::Link | Phase::Publish => fmt!(\"late #{}\", j.id),\n    }\n}\n\n\
+             fn main() { }\n";
+        let dir = scratch_module("cli-fmt-describe", "opt_level = 2\n", src);
+        let p = dir.to_string_lossy().to_string();
+        assert_eq!(run(&argv(&["check", &p])), exit::OK, "§14.2 的 describe 必须过 infy check");
+        assert_eq!(run(&argv(&["build", &p])), exit::OK, "并且必须过 infy build（含宿主 cc）");
+        let ci = std::fs::read_to_string(dir.join(".infy-build").join(host_triple()).join("embed.c"))
+            .expect("generated C");
+        assert_eq!(ci.matches("static const InfyFmtSpec").count(), 3, "每条臂一张表：{ci}");
+        assert_eq!(ci.matches("infy_fmt_run(infy_fmt_spec").count(), 3, "{ci}");
+        assert!(ci.contains(".kind = FA_U64"), "{ci}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// §7.6.3 项 1/2/4：绑定头与包装 TU 是**编译器产出**，落在 `<build>/a_track/`（§7.6.1 点名的路径），
     /// 且头文件里的包装原型必须与 `ci.c` 调用的符号逐字符相同 —— 不一致是**链接期**错误，
     /// 任何一侧的单测都看不见（`docs/spec-deviations.md` D-46(a)）。

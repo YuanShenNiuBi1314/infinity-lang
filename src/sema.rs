@@ -117,6 +117,9 @@ impl Ty {
 pub struct StructInfo {
     pub name: String,
     pub module: String,
+    /// The package (directory, §5.1) that declared it — §5.5's privacy boundary is the package, not
+    /// the module, so a field check cannot compare against `module` or against the type's own name.
+    pub package: String,
     pub vis: Visibility,
     pub fields: Vec<(String, Ty, Visibility)>,
     pub repr_c: bool,
@@ -633,7 +636,8 @@ impl<'a> Checker<'a> {
                 let repr_c = it.attrs.iter().any(|a| a.name() == "repr" && a.has_ident("C"));
                 let idx = self.prog.structs.len();
                 self.prog.structs.push(StructInfo {
-                    name: name.clone(), module: self.manifest_module.clone(), vis: it.vis.clone(), fields: fs,
+                    name: name.clone(), module: self.manifest_module.clone(), package: package.to_string(),
+                    vis: it.vis.clone(), fields: fs,
                     repr_c, is_copy: false, has_drop: false, align: it.attr("align").and_then(|a| a.args.first()).and_then(|a| match a.value { Some(AttrValue::Int(i)) => Some(i as u32), _ => None }),
                     span,
                 });
@@ -786,7 +790,7 @@ impl<'a> Checker<'a> {
             }
             ItemKind::Union { name, .. } => {
                 let idx = self.prog.structs.len();
-                self.prog.structs.push(StructInfo { name: name.clone(), module: self.manifest_module.clone(), vis: it.vis.clone(), fields: Vec::new(), repr_c: true, is_copy: true, has_drop: false, align: None, span });
+                self.prog.structs.push(StructInfo { name: name.clone(), module: self.manifest_module.clone(), package: package.to_string(), vis: it.vis.clone(), fields: Vec::new(), repr_c: true, is_copy: true, has_drop: false, align: None, span });
                 self.prog.by_path.insert((package.to_string(), name.clone()), ResolvedItem::Struct(idx));
             }
             ItemKind::MacroRules { .. } | ItemKind::Mod { .. } => {}
@@ -1754,12 +1758,16 @@ impl<'a> Checker<'a> {
                     FieldName::Named(f) => {
                         let tn = base_of(&bt);
                         if let Some(si) = self.prog.struct_by_name(&tn) {
+                            let owner = self.prog.structs[si].package.clone();
                             let fld = self.prog.structs[si].fields.iter().find(|(n, _, _)| n == f).map(|(_, t, v)| (t.clone(), v.clone()));
                             return match fld {
                                 Some((ty, vis)) => {
-                                    // §5.5: field visibility is independent of the type's visibility.
-                                    if matches!(vis, Visibility::Private) && tn != self.package_type_owner(&tn) {
-                                        self.emit("E-0210", e.span, "访问 package 私有字段", format!("{tn}.{f}"), Some("§5.5：跨 package 引用私有项".into()), Some("加 `pub` 或改 API".into()));
+                                    // §5.5: field visibility is independent of the type's visibility,
+                                    // and the boundary is the **declaring package** — the judge used to
+                                    // compare the type name against a package path, so every private
+                                    // field in the type's own package was an `E-0210`.
+                                    if matches!(vis, Visibility::Private) && owner != self.package {
+                                        self.emit("E-0210", e.span, "访问 package 私有字段", format!("{tn}.{f}"), Some(format!("§5.5：`{tn}` 声明于 `{owner}`，引用点在 `{}`，跨 package 引用私有项", self.package)), Some("加 `pub` 或改 API".into()));
                                     }
                                     ty.clone()
                                 }
@@ -2174,6 +2182,61 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// §10.11: the builtin `fmt`. The format string is parsed **here**, at compile time, because this
+    /// is the only stage that knows both the placeholders and the argument names: a non-literal is
+    /// `E-0181`, a placeholder/argument mismatch is `E-0180`, and the expression types as `String`.
+    /// Stage [8] re-derives the same rows from the same two inputs through `crate::fmtstr::plan`, so
+    /// what was validated and what is emitted cannot disagree.
+    fn check_builtin_fmt(&mut self, call: &Expr, args: &[CallArg]) -> Ty {
+        let Some(first) = args.first() else {
+            self.emit(
+                "E-0180",
+                call.span,
+                "fmt 缺少格式串实参",
+                "fmt()",
+                Some("§10.11：`fmt(fmt_str: &str, args: &[Args]) -> String`，第一个实参就是格式串".into()),
+                Some("给出字面量格式串（§10.11）".into()),
+            );
+            // The arity error is already on record; calling the type invalid would make every
+            // enclosing match/return report a second, unrelated diagnosis (F36's family).
+            return Ty::String;
+        };
+        let lit = match &first.expr.kind {
+            ExprKind::Lit(Lit::Str(s)) | ExprKind::Lit(Lit::Cord(s)) => Some(s.clone()),
+            _ => {
+                self.check_expr(&first.expr);
+                self.emit(
+                    "E-0181",
+                    first.expr.span,
+                    "格式串非常量",
+                    "fmt 的第一个实参不是字符串字面量",
+                    Some("§10.11：格式串在编译期解析，非字面量要显式改用 `fmt_dynamic`".into()),
+                    Some("改字面量，或显式 `fmt_dynamic`（放弃编译期校验）".into()),
+                );
+                None
+            }
+        };
+        // The value arguments are typed even when the string was refused: a move or a borrow inside
+        // one of them still has to reach stage [5].
+        for a in args.iter().skip(1) {
+            self.check_expr(&a.expr);
+        }
+        if let Some(lit) = lit {
+            let names: Vec<Option<String>> = args.iter().skip(1).map(|a| a.name.clone()).collect();
+            if let Err(bad) = crate::fmtstr::plan(&lit, &names) {
+                self.emit(
+                    "E-0180",
+                    first.expr.span,
+                    bad.message(),
+                    format!("格式串 `{lit}`"),
+                    Some("§10.11：位置索引越界 / 实参未用尽 / 具名占位符只接受具名实参".into()),
+                    Some("对齐占位符与实参（§10.11）".into()),
+                );
+            }
+        }
+        Ty::String
+    }
+
     fn check_call(&mut self, call: &Expr, callee: &Expr, args: &[CallArg]) -> Ty {
         let name = match &callee.kind {
             ExprKind::Ident(n) => n.clone(),
@@ -2186,6 +2249,16 @@ impl<'a> Checker<'a> {
         // resolved before the function table and typed from their argument.
         if let Some(t) = self.ctor_ty(&name, args) {
             return t;
+        }
+        // §10.11: `fmt` is a compiler builtin — both the §2.5 call spelling and the §14.2 `fmt!` form
+        // (stage [2] rewrites the macro spelling into this call). It resolves **after** the function
+        // table, so a user `fn fmt` keeps its meaning.
+        if name == "fmt"
+            && matches!(&callee.kind, ExprKind::Ident(_))
+            && self.prog.lookup_fn(&self.package, "fmt").is_none()
+            && !self.prog.fns.iter().any(|f| f.name == "fmt")
+        {
+            return self.check_builtin_fmt(call, args);
         }
         // §4.6: assigning to env is E-0140; calling it is simply unresolvable.
         let Some(fi) = self.prog.lookup_fn(&self.package, &name).or_else(|| self.prog.fns.iter().position(|f| f.name == name)) else {
@@ -2328,15 +2401,6 @@ impl<'a> Checker<'a> {
             }
         }
         owners.len() <= 1
-    }
-
-    fn package_type_owner(&self, ty_name: &str) -> String {
-        self.prog
-            .structs
-            .iter()
-            .find(|s| s.name == ty_name)
-            .map(|_| self.package.clone())
-            .unwrap_or_default()
     }
 
     fn check_embed_expr(&mut self, e: &EmbedBlock, span: Span) {
@@ -3216,5 +3280,93 @@ mod tests {
         assert!(got("fn g(o: Option<u32>) -> u32 { match (o) { _ => 0, None => 1 } }", "E-0071"));
         // Or-patterns keep §3.12's binding-set rule: `None` binds nothing, so `Some(v)` may not share its arm.
         assert!(got("fn g(o: Option<u32>) -> u32 { match (o) { None | Some(v) => v, Some(0) => 0 } }", "E-0072"));
+    }
+
+    // ------------------------------------------------------------- §10.11 builtin `fmt`
+
+    /// §10.11: `fmt` is a compiler builtin, so the format string is parsed at compile time and the
+    /// only diagnostics it can produce are `E-0180` (holes and arguments do not agree) and `E-0181`
+    /// (not a literal). This harness runs stages [1] and [4] only — no expansion — so it drives the
+    /// §2.5 call spelling, which is exactly the node stage [2] turns `fmt!(…)` into (`cli` and
+    /// `macro_expand` cover the macro spelling end to end).
+    #[test]
+    fn builtin_fmt_types_as_string_and_validates_at_compile_time() {
+        clean("fn g(x: u32) -> String { fmt(\"fetch #{}\", x) }");
+        clean("fn g() -> String { fmt(\"no holes at all\") }");
+        clean("fn g(w: u32, h: u32) -> String { fmt(\"{w}x{h}\", w=w, h=h) }");
+        clean("fn g(a: u32, b: u32) -> String { fmt(\"{}-{}\", a, b) }");
+        assert!(got("fn g() -> String { fmt(\"{}\") }", "E-0180"), "a hole with no argument");
+        assert!(got("fn g(x: u32) -> String { fmt(\"{1}\", x) }", "E-0180"), "index 1 with one argument");
+        assert!(got("fn g(x: u32) -> String { fmt(\"plain\", x) }", "E-0180"), "argument left unused");
+        assert!(got("fn g(x: u32) -> String { fmt(\"{w}\", x) }", "E-0180"), "named hole, positional argument");
+        assert!(got("fn g() -> String { fmt() }", "E-0180"), "no format string at all");
+        assert!(got("fn g(a: u32) -> String { fmt(\"{}-{}\", a) }", "E-0180"), "two holes, one argument");
+        assert!(
+            got("fn g(s: &str, x: u32) -> String { fmt(s, x) }", "E-0181"),
+            "a non-literal format string must be E-0181, not a silent pass"
+        );
+    }
+
+    /// The builtin resolves **after** the function table: a program that declares `fn fmt` keeps its
+    /// own meaning, and the builtin may not hijack the call.
+    #[test]
+    fn a_user_fn_named_fmt_is_not_shadowed_by_the_builtin() {
+        clean("fn fmt(x: u32) -> String { fmt(x) }\nfn g(a: u32) -> String { fmt(a) }");
+        // …so the builtin's compile-time parse does not apply to the user's function: a non-literal
+        // first argument is a normal typing question here, never `E-0181`/`E-0180`.
+        let c = codes("fn fmt(x: u32) -> String { fmt(x) }\nfn g(s: &str) -> String { fmt(s) }");
+        assert!(!c.contains(&"E-0181".to_string()), "{c:?}");
+        assert!(!c.contains(&"E-0180".to_string()), "{c:?}");
+        assert!(!c.contains(&"E-0101".to_string()), "{c:?}");
+    }
+
+    // ------------------------------------------------------------- §5.5 field visibility
+
+    /// §5.5: an unmarked field is package-private, i.e. visible to **every file in that directory**;
+    /// only a cross-package reference is `E-0210`. The judge used to compare the type's *name*
+    /// against a package path, so every private access inside the declaring package was refused —
+    /// which is what made §14.2's `describe(j.id, j.phase)` uncheckable.
+    #[test]
+    fn private_fields_are_visible_to_the_declaring_package() {
+        clean("struct Job { id: u32, phase: u32 }\nfn g(j: &Job) -> u32 { j.id + j.phase }");
+        clean("struct Job { pub id: u32 }\nfn g(j: &Job) -> u32 { j.id }");
+        // the other half of the rule: another package must still be refused, or the fix is a free pass
+        let c = codes_across_packages(
+            "struct Job { id: u32 }",
+            "use t/p::Job\nfn g(j: &Job) -> u32 { j.id }",
+        );
+        assert!(c.contains(&"E-0210".to_string()), "{c:?}");
+        let c = codes_across_packages(
+            "struct Job { pub id: u32 }",
+            "use t/p::Job\nfn g(j: &Job) -> u32 { j.id }",
+        );
+        assert!(!c.contains(&"E-0210".to_string()), "{c:?}");
+    }
+
+    /// Two packages in one module: `a` declares, `b` references. Only what `b` says is asserted, so
+    /// the helper deliberately ignores diagnostics emitted while checking `a`.
+    fn codes_across_packages(a: &str, b: &str) -> Vec<String> {
+        let mut sources = Sources::default();
+        let fa = sources.add("p/mod.infy".to_string(), format!("package p\n\n{a}\n"));
+        let fb = sources.add("q/mod.infy".to_string(), format!("package q\n\n{b}\n"));
+        let mut h = Handler::default();
+        let pa = {
+            let lexed = lexer::lex_file(&sources, fa, &mut h);
+            parser::parse(&sources, fa, &lexed, &mut h)
+        };
+        let pb = {
+            let lexed = lexer::lex_file(&sources, fb, &mut h);
+            parser::parse(&sources, fb, &lexed, &mut h)
+        };
+        check_files(
+            &sources,
+            &mut h,
+            "t/p",
+            &[(fa, "t/p".to_string(), pa), (fb, "t/q".to_string(), pb)],
+            false,
+            vec![],
+            vec![],
+        );
+        h.diags.iter().map(|d| d.code.clone()).collect()
     }
 }

@@ -2401,6 +2401,37 @@ pub fn build_token_tree(toks: &[Tok]) -> (Vec<Tree>, usize) {
     (top, consumed)
 }
 
+/// The **single** delimited group starting at `toks[0]`, plus how many tokens it took.
+///
+/// [`build_token_tree`] is written for `macro_rules!` bodies, so it keeps scanning past a closed
+/// top-level group until the next unmatched closer. A call site must stop at its own closer: the
+/// parser used to take only the first tree while consuming everything in between, which silently
+/// deleted the rest of a `match` arm list after `name!(…)` (BACKLOG F63).
+pub fn build_call_group(toks: &[Tok]) -> Option<(Delim, Vec<Tree>, usize)> {
+    let (d, _) = open_delim(&toks.first()?.kind)?;
+    let mut depth = 0usize;
+    for (idx, t) in toks.iter().enumerate() {
+        if open_delim(&t.kind).is_some() {
+            depth += 1;
+            continue;
+        }
+        if close_delim(&t.kind).is_some() {
+            if depth == 0 {
+                return None; // a closer that does not match any opener: the group never closed
+            }
+            depth -= 1;
+            if depth == 0 {
+                let (tree, n) = build_token_tree(&toks[..idx + 1]);
+                if n == 0 {
+                    return None;
+                }
+                return Some((d, tree, n));
+            }
+        }
+    }
+    None
+}
+
 // =============================================================================================
 // Conformance seed for §12.1's "词法 96 例": one test per diagnostic the lexer can emit, plus a
 // positive case for every literal form of §2.6/§2.8/§2.9, the whole §2.7 operator table, the §2.4

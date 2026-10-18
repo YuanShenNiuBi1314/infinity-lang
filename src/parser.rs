@@ -2522,7 +2522,17 @@ impl<'a> P<'a> {
                 return None;
             }
         };
-        let (ts, n) = crate::lexer::build_token_tree(&self.toks[self.pos..]);
+        // A call site takes exactly one delimited group. `build_token_tree` is for `macro_rules!`
+        // bodies and keeps scanning past a closed group; taking only its first tree while still
+        // consuming all of it deleted every `match` arm after `name!(…)` (F63).
+        let (ts, n) = match crate::lexer::build_call_group(&self.toks[self.pos..]) {
+            Some((_, ts, n)) => (ts, n),
+            None => {
+                let t = self.peek().clone();
+                self.syntax_err(&t, "宏调用定界符闭合");
+                return None;
+            }
+        };
         if n == 0 {
             return None;
         }
@@ -3103,6 +3113,58 @@ enum E { A = yes }
             "package main\n\nenum P { A, B }\nfn d(p: P) -> u32 { match (p) { P::A => 1, P::B => 2, } }\n",
         );
         assert!(codes.is_empty(), "{codes:?}");
+    }
+
+    /// F63: a macro call in an arm body used to swallow the rest of the arm list — `delimited_group`
+    /// consumed everything up to the next unmatched closer but kept only the first tree, so the
+    /// following arms were deleted with **no** diagnostic. §14.2's `describe` is exactly this shape.
+    #[test]
+    fn a_macro_call_arm_body_does_not_swallow_the_later_arms() {
+        let (ast, codes) = parse_str(
+            "package main\n\nenum P { A, B }\nfn d(p: P) -> u32 { match (p) { P::A => m!(\"a\"), P::B => 2 } }\n",
+        );
+        assert!(codes.is_empty(), "{codes:?}");
+        let arms = match_arms_of_item(&ast, "d");
+        assert_eq!(arms.len(), 2, "the arm after `m!(…)` disappeared: {arms:?}");
+        match &arms[0].body {
+            ArmBody::Expr(e) => match &e.kind {
+                ExprKind::MacroCall { name, tokens, .. } => {
+                    assert_eq!(name, "m");
+                    assert_eq!(tokens.len(), 1, "the call took more than its own group: {tokens:?}");
+                    match &tokens[0] {
+                        crate::token::Tree::Group(crate::token::Delim::Paren, inner, _) => {
+                            assert_eq!(inner.len(), 1, "the group is not just the string: {inner:?}");
+                        }
+                        other => panic!("expected a paren group, got {other:?}"),
+                    }
+                }
+                other => panic!("arm body is not a macro call: {other:?}"),
+            },
+            other => panic!("arm body shape: {other:?}"),
+        }
+    }
+
+    /// The arms of the first `match` found in `fn <name>`, in either statement or tail position.
+    fn match_arms_of_item(pf: &ParsedFile, name: &str) -> Vec<MatchArm> {
+        for it in &pf.items {
+            if let ItemKind::Fn { sig, body, .. } = &it.kind {
+                if sig.name != name {
+                    continue;
+                }
+                let crate::ast::Body::Block(b) = body else { continue };
+                for s in &b.stmts {
+                    if let StmtKind::Match { arms, .. } = &s.kind {
+                        return arms.clone();
+                    }
+                }
+                if let Some(t) = &b.tail {
+                    if let ExprKind::Match { arms, .. } = &t.kind {
+                        return arms.clone();
+                    }
+                }
+            }
+        }
+        Vec::new()
     }
 
     /// §3.5 / §8.2: `chain` is a reserved word (§2.4), so the parameter name in

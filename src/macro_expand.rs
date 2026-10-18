@@ -297,6 +297,10 @@ fn expand_macros(
     };
     result.macro_names = ctx.defs.keys().cloned().collect();
 
+    // §10.11: `fmt!` is a compiler builtin. Lower it before the call sites are snapshotted, so a
+    // `macro_rules!` nested inside its arguments still reaches the expander below.
+    lower_builtin_fmt(files, sources, &ctx.defs);
+
     // Snapshot the call sites first: expansion rewrites the AST, and rewriting while walking is
     // an unstable iteration order (§7.3). Sites are then applied in source order.
     let mut sites: Vec<Site> = Vec::new();
@@ -356,6 +360,43 @@ fn call_input(tokens: &[Tree]) -> Vec<Tree> {
     match tokens.first() {
         Some(Tree::Group(_, children, _)) => children.clone(),
         _ => tokens.to_vec(),
+    }
+}
+
+/// §10.11 + §14.2: `fmt!(…)` is not a `macro_rules!` — it is the builtin spelling of the `fmt`
+/// function §2.5 names. Rewriting the node into that call form here means the **real parser** builds
+/// the arguments (so `fmt("{w}", w=8)` gets a named `CallArg`, and §2.11's no-ASI rules apply), and
+/// stage [4] sees an ordinary call it can type. A user definition named `fmt` wins, because then the
+/// node is a §6.5 macro call like any other; if the rewrite does not parse, the node is left alone and
+/// stage [4] reports the residual `MacroCall` as `E-0402`, which is what it already does.
+fn lower_builtin_fmt(
+    files: &mut BTreeMap<FileId, ParsedFile>,
+    sources: &Sources,
+    defs: &BTreeMap<String, DefEntry>,
+) {
+    if defs.contains_key("fmt") {
+        return;
+    }
+    let mut sites: Vec<Site> = Vec::new();
+    let mut counter = 0u32;
+    for fid in files.keys().cloned().collect::<Vec<_>>() {
+        for (idx, item) in files[&fid].items.iter().enumerate() {
+            collect_item_sites(item, idx, &mut sites, &mut counter);
+        }
+    }
+    sites.sort_by_key(|s| s.order);
+    for site in sites.into_iter().filter(|s| s.name == "fmt") {
+        let mut trees = vec![Tree::Leaf(Tok {
+            kind: Kind::Ident("fmt".to_string()),
+            span: site.call_span,
+            text: "fmt".to_string(),
+        })];
+        trees.push(Tree::Group(Delim::Paren, site.input.clone(), site.call_span));
+        let toks = flatten_trees(&trees);
+        let fid = site.call_span.file;
+        if let Some(frag) = parse_expansion(sources, fid, site.call_span, &toks, site.is_stmt) {
+            apply_fragment(files, &site, &frag);
+        }
     }
 }
 
@@ -2719,6 +2760,173 @@ fn main() {
             names.iter().any(|n| n.starts_with("__infy_m")),
             "rustled `let` missing from body AST: {names:?}"
         );
+    }
+
+    // ---------------------------------------------------------------- §10.11 builtin `fmt!`
+
+    /// The initializer of `fn main`'s first `let`, the expression of its first expression statement,
+    /// or its block tail — the fixture shapes the builtin lowering is checked through (`fn main` with
+    /// a single `fmt!(…);` parses the call as the tail, §2.11 has no automatic semicolon insertion).
+    fn main_first_expr(pf: &ParsedFile) -> Expr {
+        for it in &pf.items {
+            if it.name() != "main" {
+                continue;
+            }
+            if let ItemKind::Fn { body: crate::ast::Body::Block(b), .. } = &it.kind {
+                if let Some(s) = b.stmts.first() {
+                    return match &s.kind {
+                        StmtKind::Let { init: Some(e), .. } => e.clone(),
+                        StmtKind::Expr { expr, .. } => expr.clone(),
+                        other => panic!("fixture shape not covered: {other:?}"),
+                    };
+                }
+                if let Some(t) = &b.tail {
+                    return t.clone();
+                }
+            }
+        }
+        panic!("no `fn main` expression to inspect")
+    }
+
+    /// Every `MacroCall` node left in the file after expansion — stage [4] refuses each of these
+    /// with `E-0402`, so an empty list is the structural proof that the node was rewritten.
+    fn residual_sites(pf: &ParsedFile) -> Vec<String> {
+        let mut sites = Vec::new();
+        let mut counter = 0u32;
+        for (idx, it) in pf.items.iter().enumerate() {
+            collect_item_sites(it, idx, &mut sites, &mut counter);
+        }
+        sites.iter().map(|s| s.name.clone()).collect()
+    }
+
+    #[test]
+    fn fmt_bang_lowers_to_a_call_on_the_builtin() {
+        let text = r#"
+fn main() {
+    let s = fmt!("fetch #{}", 7u32);
+}
+"#;
+        let (src, mut files, mut handler) = harness(&[("m/main.infy", text)]);
+        let r = run(&src, &mut files, &mut handler, &ExpandOptions::default());
+        assert!(codes(&handler).is_empty(), "{:?}", codes(&handler));
+        // a builtin rewrite is not a `macro_rules!` expansion, so it must not be counted as one
+        assert_eq!(r.expansions, 0);
+        assert!(residual_sites(files.values().next().unwrap()).is_empty());
+        match &main_first_expr(files.values().next().unwrap()).kind {
+            ExprKind::Call { callee, args } => {
+                assert!(matches!(&callee.kind, ExprKind::Ident(n) if n == "fmt"), "{:?}", callee.kind);
+                assert_eq!(args.len(), 2, "{args:?}");
+                assert!(
+                    matches!(&args[0].expr.kind, ExprKind::Lit(crate::token::Lit::Str(s)) if s == "fetch #{}"),
+                    "{:?}",
+                    args[0].expr.kind
+                );
+                assert!(args.iter().all(|a| a.name.is_none()), "positional call kept its names");
+            }
+            other => panic!("`fmt!` did not become a call: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fmt_bang_named_arguments_become_named_call_arguments() {
+        // the arguments go through the real parser, which is what gives `{w}` a `CallArg::name`
+        let text = r#"
+fn main() {
+    let s = fmt!("{w}x{h}", w=8, h=2);
+}
+"#;
+        let (src, mut files, mut handler) = harness(&[("m/main.infy", text)]);
+        run(&src, &mut files, &mut handler, &ExpandOptions::default());
+        assert!(codes(&handler).is_empty(), "{:?}", codes(&handler));
+        match &main_first_expr(files.values().next().unwrap()).kind {
+            ExprKind::Call { args, .. } => {
+                assert_eq!(args.len(), 3, "{args:?}");
+                assert_eq!(
+                    args.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+                    vec![None, Some("w".to_string()), Some("h".to_string())]
+                );
+            }
+            other => panic!("`fmt!` did not become a call: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fmt_bang_in_statement_position_lowers_too() {
+        let text = r#"
+fn main() {
+    fmt!("x", 1u32);
+}
+"#;
+        let (src, mut files, mut handler) = harness(&[("m/main.infy", text)]);
+        run(&src, &mut files, &mut handler, &ExpandOptions::default());
+        assert!(codes(&handler).is_empty(), "{:?}", codes(&handler));
+        assert!(residual_sites(files.values().next().unwrap()).is_empty());
+        match &main_first_expr(files.values().next().unwrap()).kind {
+            ExprKind::Call { callee, args } => {
+                assert!(matches!(&callee.kind, ExprKind::Ident(n) if n == "fmt"), "{:?}", callee.kind);
+                assert_eq!(args.len(), 2, "{args:?}");
+            }
+            other => panic!("`fmt!` did not become a call: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_user_macro_named_fmt_wins_over_the_builtin() {
+        let text = r#"
+macro_rules! fmt {
+    ($x:expr) => { [$x] };
+}
+fn main() {
+    let s = fmt!(7u32);
+}
+"#;
+        let (src, mut files, mut handler) = harness(&[("m/main.infy", text)]);
+        let r = run(&src, &mut files, &mut handler, &ExpandOptions::default());
+        assert!(codes(&handler).is_empty(), "{:?}", codes(&handler));
+        assert_eq!(r.expansions, 1, "the user's arm must be the one that expands");
+        assert_eq!(r.sites[0].macro_name, "fmt");
+        let e = main_first_expr(files.values().next().unwrap());
+        assert!(
+            !matches!(&e.kind, ExprKind::Call { callee, .. }
+                if matches!(&callee.kind, ExprKind::Ident(n) if n == "fmt")),
+            "the builtin shadowed the user's `macro_rules! fmt`: {:?}",
+            e.kind
+        );
+    }
+
+    #[test]
+    fn user_macros_nested_in_fmt_arguments_still_expand() {
+        // why the rewrite happens before call-site collection: a `macro_rules!` inside `fmt!`'s
+        // arguments must not be stranded (the outer node is the outermost one, §6.3).
+        let text = r#"
+macro_rules! seven {
+    () => { 7u32 };
+}
+fn main() {
+    let s = fmt!("{}", seven!());
+}
+"#;
+        let (src, mut files, mut handler) = harness(&[("m/main.infy", text)]);
+        let r = run(&src, &mut files, &mut handler, &ExpandOptions::default());
+        assert!(codes(&handler).is_empty(), "{:?}", codes(&handler));
+        assert_eq!(r.expansions, 1);
+        assert!(residual_sites(files.values().next().unwrap()).is_empty());
+        match &main_first_expr(files.values().next().unwrap()).kind {
+            ExprKind::Call { args, .. } => {
+                // `{ 7u32 }` is what a brace-group expander re-parses to in expression position
+                // (§6.1, same as the `vec!` fixtures above) — the point is that it landed *inside*
+                // the builtin call's argument list instead of being stranded.
+                assert_eq!(args.len(), 2, "{args:?}");
+                match &args[1].expr.kind {
+                    ExprKind::Block(b) => assert!(
+                        matches!(&b.tail.as_ref().map(|t| &t.kind), Some(ExprKind::Lit(crate::token::Lit::Int(_)))),
+                        "{b:?}"
+                    ),
+                    other => panic!("the nested user macro was not expanded in place: {other:?}"),
+                }
+            }
+            other => panic!("`fmt!` did not become a call: {other:?}"),
+        }
     }
 
     // ---------------------------------------------------------------- classifiers (§6.2)

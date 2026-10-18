@@ -1224,13 +1224,33 @@
       端到端只借 `Option`/`Result` 跑通；F61 = owner/变体与 scrutinee 不符时只由臂体的 `E-0101` 暴露，
       §3.12 的 `007x` 家族没有"模式与 scrutinee 不符"这一档码。
 
-- [ ] F15 **`fmt!` 没有 lowering 路径**（C2 轮确认，属 C2 验收清单里唯一被上游阻塞的项）：
-      §10.11 的 `fmt!("fetch #{}", j.id)` 在 §14.2 是规范样例，但 `macro_expand` 不认 `fmt!`（它是编译器内建而非
-      `macro_rules!`），`src/sema.rs:1822` 对任何残留 `MacroCall` 发 `E-0402`。因此 `infy check` 就拒绝，
-      codegen 只能在"未展开的宏调用"上报 `CgError`（`codegen::tests::uncovered_constructs_are_refused_by_name` 锁的是后者）。
-      运行时侧的接口是齐的：`infy_rt.h` 的 `InfyFmtSpec`/`InfyFmtArg`/`infy_fmt_run`，§10.11 也规定格式串在编译期解析。
-      验收：阶段 [2] 把 `fmt!` 展开成带 `InfyFmtSpec` 表的构造（或阶段 [4] 直接定型、阶段 [8] 发射 specs 数组 +
-      `infy_fmt_run` 调用），并让 §14.2 的 `describe` 样例（含 `String` 返回）通过 `infy check` + `infy build` + gcc。
+- [x] F15 **`fmt!` 有 lowering 路径了**（C2 轮确认；F15 轮 2026-10-19 落地，裁定 = 偏差 **D-58(a)–(h)**）：
+      原状：§10.11 的 `fmt!("fetch #{}", j.id)` 在 §14.2 是规范样例，但 `macro_expand` 不认 `fmt!`（它是编译器内建而非
+      `macro_rules!`），`src/sema.rs` 对任何残留 `MacroCall` 发 `E-0402`。因此 `infy check` 就拒绝，
+      codegen 只能在"未展开的宏调用"上报 `CgError`。运行时侧的接口一直是齐的：`infy_rt.h` 的
+      `InfyFmtSpec`/`InfyFmtArg`/`infy_fmt_run`，§10.11 也规定格式串在编译期解析。
+      落地 = 四段，每段都有锁点：**`src/fmtstr.rs`（新，10 项）** = 格式串的唯一解析者，阶段 [4] 与阶段 [8]
+      共用同一份实现（`InfyFmtWhich` 的枚举名由 `include_str!("../runtime/infy_rt.h")` 读回头文件比序列，
+      改名/换序就红）；**`macro_expand::lower_builtin_fmt`（+5 项）** = 阶段 [2] 把**无同名定义**的 `fmt!(…)`
+      改写成 §2.5 的 `fmt(…)` 调用形态，改写发生在**取调用点之前**，所以 `fmt!` 实参里嵌套的用户宏仍被展开，
+      而用户 `macro_rules! fmt` 优先（实测 `r.expansions == 1` 且产物是用户的 `[7u32]`）；
+      **`sema::check_builtin_fmt`（+3 项）** = 阶段 [4] 编译期解析：非字面量格式串 ⇒ `E-0181`、
+      占位符与实参不符 ⇒ `E-0180`（数量、`{0}` 越界、`{name}` 无同名具名实参、实参未用尽、`fmt()` 缺格式串），
+      类型取 `String`；内建在函数表**之后**解析，用户 `fn fmt` 不被顶掉；
+      **`codegen::builtin_fmt`/`fmt_arg`（+3 项）** = 阶段 [8] 发 `static const InfyFmtSpec …[]`（designated
+      initializer，逐字段名）+ `(const InfyFmtArg[n]){…}` 复合字面量 + `infy_fmt_run` 调用，尾段用
+      `INFY_FMT_TAIL_ONLY` 哨兵行、无占位符时 `n_args = 0u`；`u128`/`i128`（union 无槽）与 ADT/容器
+      （要 `InfyDebugVt` = F35 的另一半）在阶段 [8] 点名拒绝，不降级成别的 `InfyFmtKind`。
+      **验收（实测）**：§14.2 的 `describe` 样例（`fmt!` 在三条臂里、返回 `String`）`infy check` **exit 0**、
+      `infy build` **exit 0**（宿主 gcc 编过），生成的 C 里 3 张 `InfyFmtSpec` 表 + 3 处 `infy_fmt_run(infy_fmt_spec…)`；
+      这一条由 `cli::tests::the_14_2_describe_sample_checks_and_builds` 常驻复跑。反例两条也是实测的：
+      `fmt!("x", 1u32)` ⇒ **`E-0180` exit 2**、`fmt(s, x)`（`s` 非字面量）⇒ **`E-0181` exit 2** ——
+      这两条码此前全仓零发点。**顺带关掉两条被这条验收踩出来的缺陷**：**F63**（阶段 [1] 的宏调用吞掉它后面的臂）
+      与 **F64**（阶段 [4] 的 `E-0210` 拿类型名比包路径），细节见下面两条。**剩余面（不许读成「`fmt` 全部打通」）**
+      见 **F65**（`write_fmt`/`fmt_dynamic` 无落点）与 **F35**（trait 面只对实参载体成立那一半）。
+      数字：`cargo test --offline --lib -j 1` **583 → 606 passed / 0 failed**（+23 = `fmtstr` 10 新模块 ·
+      `macro_expand` 35→40 · `sema` 37→40 · `codegen` 34→37 · `parser` 14→15 · `cli` 47→48），
+      `cargo check --offline --lib` 0 error / 0 warning，tour 与 C 侧数字一字未动（详见 `docs/coverage.md` **P40**）。
 
 - [ ] F16 **阶段 [10]（产物签名/校验段写入 → dirhash + lock 比对，§5.8/§7.1）未做**（C3 轮落地 [9] 时确认）：
       `artifact.rs` 只把 `MODULE.infy.lock` 的 `dirh` 三元组抄进 `.inf sum`（12 字节/行 = `package_pool, version_pool, dirhash_pool`），
@@ -1809,6 +1829,65 @@
       `match (Q::Y(7u32)) { Q::Y(n) => n, Q::X => 0 }` 的 `infy run` exit 0；成对锁 = 载荷类型不符要报
       `E-0110` 而不是静默接受。做完这一条才能写"用户枚举的构造与解构已打通"。
 
+- [x] F63 **阶段 [1]：宏调用做 `match` 臂体时，把它后面的臂整条吞掉，而且不发任何诊断**（F15 轮实测并修掉）：
+      症状不是解析错误而是**穷尽性假红**：§14.2 的 `describe`（`Phase::Fetch => fmt!("a"), _ => fmt!("c")`）报
+      `E-0070 枚举 Phase 有未覆盖的变体`，而把臂体换成 `1u32` 就 `check ok`；带 `_ =>` 也照报（`_` 那条臂已经
+      不在 AST 里了）。把解析后的 AST 打出来才定死：**阶段 [1] 之后 `arms.len() == 1`** —— 不是 `sema` 的判定问题，
+      也不是阶段 [2] 的改写问题。根因在 `parser::delimited_group()`：它拿 `lexer::build_token_tree(&self.toks[self.pos..])`
+      建记号树，而那份函数是给 `macro_rules!` **体**写的，会一路扫到下一个不配对的闭符；调用点只取
+      `ts.into_iter().next()` 第一棵树，**却把 `n`（被吃掉的记号数）整份前进掉** ⇒ 中间的记号被消费又丢弃，
+      三种定界符（`!(…)`/`![…]`/`!{…}`）与语句位的 `match` 全部同样失效，`E-0053` 一条也不发。
+      修法 = 新增 `lexer::build_call_group()`：按深度扫到**本组自己的**闭符为止，返回 `(Delim, trees, 消耗数)`；
+      未闭合/前置错配闭符 ⇒ 返回 `None`，调用点显式发既有的"宏调用定界符"语法错（不静默）。
+      验收锁点：`parser::tests::a_macro_call_arm_body_does_not_swallow_the_later_arms`（臂数 = 2，且
+      `MacroCall.tokens` 只有一个 `Group(Paren)`、组内只有那个字符串）；`cli::tests::the_14_2_describe_sample_checks_and_builds`
+      从命令层再跑一次同一形状。**这一族的认法**（写进经验库）：*共享 helper 的契约是为另一种用途写的，
+      换个调用点就变成"吞掉兄弟节点"*——凡是"返回 (树, 消耗数)"成对返回的函数，调用点只取第一份而仍前进计数，
+      就是同一种病。
+
+- [x] F64 **阶段 [4] 的 `E-0210` 拿**类型名**去比**包路径** ⇒ 同包内每次读私有字段都红**（F15 轮实测并修掉）：
+      `sema.rs` 的判据是 `matches!(vis, Visibility::Private) && tn != self.package_type_owner(&tn)`，而
+      `package_type_owner()` 在查得到该结构时返回的是 `self.package`（一个包路径），查不到返回空串 ——
+      于是 `"Job" != "github.com/acme/ci/app"` 恒真 ⇒ **任何**私有字段访问都发 `E-0210`，包括声明它的那个包。
+      §14.2 的 `j.id` / `j.phase` 因此全都过不去（这也是 F15 验收的真实上游阻塞之一）。规范侧没有歧义：
+      §5.5「未标注 `pub` 的 … = package 私有：同目录内所有文件可见，跨目录不可见」⇒ 判据必须是**声明包 vs 引用包**。
+      修法 = `StructInfo` 增加 `package` 字段（两处构造点各填 `package.to_string()`），判据换成
+      `owner != self.package`，并把诊断的 note 写成两个路径的对照（`Job` 声明于 X，引用点在 Y），
+      `package_type_owner()` 随之删除。**此前 `E-0210` 在全仓一条测试都没有**（只有发射点），所以假红了很久；
+      现在两侧都有锁点：`sema::tests::private_fields_are_visible_to_the_declaring_package` 同包正例 +
+      跨包反例（新增的 `codes_across_packages()` 双包夹具：私有字段 ⇒ 必发 `E-0210`，加 `pub` ⇒ 必不发）。
+      **仍未做完的那一半**：§5.5 的可见性面只覆盖 struct 字段，`fn`/`struct`/`enum`/`trait`/`const`/`static`/`chain`
+      的跨包私有引用、`pub(crate)`、`pub(<path>)` 定向导出都还没有判据（`E-0508` 的 `internal` 目录规则在
+      `cli.rs` 有发射点，但那只是路径检查）⇒ 登记为 **F67**。
+
+- [ ] F65 **§10.11 的 `write_fmt` 与 `fmt_dynamic` 一个落点都没有，而 `E-0181` 的 help 正指向 `fmt_dynamic`**（F15 轮量到）：
+      §10.11 给了 `write_fmt(w: &mut Writer, ...) -> Result<(), IoErr>`，又说"非字面量格式串 → `E-0181`，
+      必须用 `fmt_dynamic` 且放弃编译期校验"。现状：`stdlib.rs` 的签名表里只有 `std.fmt.fmt` 一行（映射到
+      `infy_fmt_run`），`fmt_dynamic`/`write_fmt` 既无表行、无运行时入口（`infy_rt.h` 也没有对应函数），
+      `E-0181` 的 help 文本因此指向一个不存在的东西。⇒ 现在只能给出显式拒绝，不能给出出路。
+      验收：要么把 `fmt_dynamic` 落成"运行时解析 + 明确放弃编译期校验"的真实入口（需要新的运行时例程与一条
+      `Display` 载体路径 = F35 的一半），要么在 `docs/spec-deviations.md` 记"`E-0181` 的 help 在本实现无对应出路"；
+      两条都行，**唯独不许留着 help 当作已实现**。现状锁点：`sema::tests::builtin_fmt_types_as_string_and_validates_at_compile_time`
+      的 `E-0181` 一支（它只断言诊断存在，不断言 help 可执行）。
+
+- [ ] F66 **`src/btrack.rs` 的 `dump_of` 是 F58 轮留下的未使用 helper**（F15 轮实测）：
+      `cargo test --offline --lib -j 1` 的档案里**唯一**一条告警就是 `function \`dump_of\` is never used`
+      （`src/btrack.rs:4841`），而 `cargo check --offline --lib`（CI 步 8 门禁的那条）是 0 error / 0 warning ——
+      也就是说这条只在 `cfg(test)` 档案里可见，门禁看不见它。`git show HEAD:src/btrack.rs | grep -c dump_of` = 1
+      （只有定义、没有调用点）⇒ 不是 F15 改出来的，是 F58 收尾欠的。
+      验收：删掉它或把它接回某个断言，判据 = `cargo test --offline --lib` 的告警数为 **0**（今天 1）。
+      本轮不动它：F15 的实现面与 `btrack` 零重叠，顺手改会让"本轮改了哪些文件"这条账变浑。
+
+- [ ] F67 **§5.5 的可见性面只实现了 struct 字段那一格**（F15 轮顺手量到，未改）：
+      `E-0210` 的发射点全仓只有 `sema.rs` 的字段读取那一处（F64 修的就是它），而 §5.5 要求的是
+      「未标注 `pub` 的 `event / fn / struct / enum / trait / const / static / chain` = package 私有，
+      跨 package 引用私有项 → `E-0210`」，外加 `pub(crate)` 与 `pub(<path>)` 定向导出。
+      现状：跨包调用一个非 `pub` 的 `fn`、跨包引用非 `pub` 的 `struct`、`pub(crate)`/`pub(<path>)` 的可见集合，
+      **一个判据都没有**（`Visibility` 变体在 AST 里是齐的，只是没人读它做判定）；`E-0508` 那条只按路径查 `internal` 目录。
+      验收：每类 item 各一条"跨包引用 ⇒ `E-0210`、同包引用 ⇒ 不发"的成对锁点（可直接扩
+      `sema::tests::codes_across_packages` 那份双包夹具），`pub(crate)`/`pub(<path>)` 各补一档；
+      做完之前**不许**在任何文档里写"§5.5 可见性已实现"。
+
 ### 阶段 G：竞品对标 —— 竞品的优点逐个超越，竞品的已知缺陷逐个封死
 
 > 来源：2026-10-18 对项目所有者点名的竞品（rustc/cargo、Go、Zig/Nim、CPython/Lua/JS/TS、JVM/.NET/Swift、
@@ -2217,7 +2296,51 @@
 
 ## 2. 当前指针
 
-> **F14 轮收尾（2026-10-19，cron-39）：F14 勾 `[x]`，新登记 F61/F62 未修；本段取代下面 F58 轮那段的"下一轮"** ——
+> **F15 轮收尾（2026-10-19，cron-40）：F15 勾 `[x]`，顺带关掉本轮踩出来的 F63/F64，新登记 F65/F66/F67 未修；本段取代上面 F14 轮那段的"下一轮"** ——
+> 交付 = **`fmt!` 的三段 lowering 路径**（裁定 = 偏差 **D-58(a)–(h)**）：`src/fmtstr.rs`（新模块 = 格式串的唯一解析者，
+> 阶段 [4] 与阶段 [8] 共用同一份实现）+ `macro_expand::lower_builtin_fmt`（阶段 [2] 把**无同名定义**的 `fmt!(…)` 改写成
+> §2.5 的 `fmt(…)` 调用形态，且改写发生在**取调用点之前**，所以 `fmt!` 实参里嵌套的用户宏仍被展开）+
+> `sema::check_builtin_fmt`（阶段 [4] 编译期解析：`E-0181` 非字面量 / `E-0180` 数量·索引·具名·未用尽，类型取 `String`）+
+> `codegen::builtin_fmt`/`fmt_arg`（阶段 [8] 发 `static const InfyFmtSpec …[]` + `(const InfyFmtArg[n]){…}` + `infy_fmt_run`）。
+> **`E-0180`/`E-0181` 由此第一次有发射点**（此前只在码表里躺着）。
+> **两条不是"顺手的修复"而是验收的真上游**：**F63** = 阶段 [1] `delimited_group` 用 `build_token_tree` 建组却把
+> 返回值当"只有一棵树"用 ⇒ 宏调用做臂体时**吞掉后面所有臂且不发诊断**，表现成 `E-0070` 穷尽性假红（AST 打出来才定死：
+> `arms.len() == 1`）；**F64** = 阶段 [4] 的 `E-0210` 判据 `tn != package_type_owner(tn)` 拿**类型名**比**包路径** ⇒
+> 恒真，同包读私有字段每次都红（`E-0210` 全仓一条测试都没有，所以假红了很久）。两条各自有正反锁点。
+> **基线（本机 `-j 1`）**：`cargo test --offline --lib -j 1` **606 passed / 0 failed**（开工 583 ⇒ **+23** =
+> `fmtstr` 10 新模块 · `macro_expand` 35→40 · `sema` 37→40 · `codegen` 34→37 · `parser` 14→15 · `cli` 47→48）、
+> `cargo check --offline --lib -j 1` **0 error / 0 warning**、`cargo build --offline --release -j 1` exit **0**、
+> `python scripts/check-doc-numbers.py` **exit 0 / PASS**（606、23 模块、表 23 行、status 相加 23 项）、
+> tour 的 `fmt --check|check|build|run|test|build --verify-reproducible|artifact info --nodes` 全 exit **0** 且
+> **C11 12512 / 产物 200700 / build-id `d7c4408e…370015` / 节点表 7-8-9-10-16-20** 一字未动、
+> 四条 C 链（C 侧零改动）两份 `-c` 各 stderr **0 字节**、rt **32353/0**、两条 IFBC **180/180** + `cmp` 无差异、
+> `infy conformance --report` 仍 **83 = 77/0/6 ⇒ exit 1**（92.8%）。
+> **验收本体是命令层常驻的**：`cli::tests::the_14_2_describe_sample_checks_and_builds` = §14.2 的 `describe`
+> 样例（`fmt!` 在三条臂里、返回 `String`）走 `infy check` **exit 0** + `infy build` **exit 0**（含宿主 `cc`），
+> 并数生成的 C 里 **3 张 `InfyFmtSpec` 表 + 3 处 `infy_fmt_run(infy_fmt_spec…)`**。
+> **措辞红线（本轮新增，别踩）**：① 不许写"`fmt` 已按 §10.11 全部实现"——§10.11 的 `write_fmt` 与 `fmt_dynamic`
+> **一个落点都没有**，而 `E-0181` 的 help 正指向 `fmt_dynamic`（= **F65**，本轮只做到"显式拒绝"，没有给出出路）；
+> ② 不许写"任何可 `Display` 的值都能格式化"——载体是按 `InfyFmtArg` 的 union 定的：ADT/`Option`/`Result`/容器
+> 要 `InfyDebugVt`（= **F35** 的另一半）、`u128`/`i128` 没有 union 槽，两者在阶段 [8] 被**点名拒绝**，
+> 所以 §10.11 的 `Display`/`Debug`/`LowerHex` trait 面今天**只对实参是标量时成立**；
+> ③ 不许写"§5.5 可见性已实现"——`E-0210` 只有 struct 字段这一格有判据（本轮修的就是它），
+> `fn`/`struct`/`enum`/`trait`/`const`/`static`/`chain` 的跨包私有引用与 `pub(crate)`/`pub(<path>)` **一个判据都没有**（= **F67**）。
+> 既有红线不变：覆盖 83/2300 ⇒ 不得声称「INFY v2.0 兼容」；"两侧装载期校验等价"不许讲（F26 / D-42 (a)–(e)）；
+> 派生代码的类型标注不可信（F49）；`return v;` 收尾仍无条件 `E-0053`（F55）；带载荷的用户变体仍造不出来（F62）。
+> **下一轮 = ①** 现算欠账补推（本轮交付若只推一笔，欠账 = 本轮那一笔 + 之前剩的）+ 回查**覆盖本轮交付树**的那条 run：
+> 步 7 应打 **606 passed / 0 failed**、步 8 告警 0、步 10 rt **32353**、步 11 两条 IFBC **180/180** + `cmp`、
+> 步 12 tour 七条全 exit 0；`cancelled` 既不是红也不是绿。
+> **②** §1 第一个 `[ ]` = **F16**（阶段 [10]：`.inf sum` 与 lock/sumdb 的比对 + `artifact verify`，§5.8/§7.1）——
+> 注意它会同时动 `src/artifact.rs` 与 `runtime/infy_rt.c`（读回侧的校验），**并且需要一条真依赖的产物**：
+> tour 无依赖 ⇒ 该路径在现有一切实例上是空集，所以 F16 得先自备夹具（`target/scratch/` 里造一个有依赖的 module），
+> 不能拿 tour 的绿当它的绿。**③** 卫生欠账不变：全仓 `while !at(…) && !at_end()` 形状仍缺前进守卫清点（F53 只数了
+> 语料命中的那一处）；**新增一条同族欠账**：凡是"返回 `(树, 消耗数)`"的 helper，都要查调用点有没有只取第一份
+> 却前进整份（F63 的形状），本轮只修了 `delimited_group` 这一处。
+> **④** 本轮留下的两个脚本可以直接复用：`scripts/sync-doc-numbers-f15.py`（规则表式文档改数，带 `skip_marker`/
+> `tolerant`，insert 型规则的锚点在插入后仍存在 ⇒ 必须给 skip_marker，否则重跑就重复插行 —— 本轮真踩了，
+> 由 `scripts/dedupe-f15-doc-rows.py` 收干净）、`scripts/check-doc-numbers.py` 每轮跑。
+
+> **F14 轮收尾（2026-10-19，cron-39）：F14 勾 `[x]`，新登记 F61/F62 未修；本段已被上面 F15 轮那段取代，其"下一轮"不再有效** ——
 > 交付 = **收敛另一班留下的在途半成品**（不是重写）：`src/{sema,parser,borrow,codegen}.rs` + 三份文档 +
 > `scripts/{f14-mutation-probe.ps1,sync-doc-numbers-f14.py}` 在开工时就是脏的（写于 2026-10-18 19:38–19:55，
 > 无提交）。判"没人还在写"的三条证据：`cron-lock.log` 里 23:49 之后除本班外没有第二次 `TAKE`、那批文件的

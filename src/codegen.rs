@@ -2459,8 +2459,10 @@ impl<'a> Cg<'a> {
                 ),
             )),
             ExprKind::MacroCall { name, .. } => Err(CgError::new(
-                "§6.5 / §10.11",
-                format!("codegen: 未展开的宏调用 `{name}!`（`fmt!` 在阶段 [2]/[4] 就没有 lowering 路径，见 docs/BACKLOG.md）"),
+                "§6.5",
+                format!(
+                    "codegen: 未展开的宏调用 `{name}!`（`macro_rules!` 的产物在阶段 [2] 就必须是合法 AST 片段；内建的 `fmt!` 已由阶段 [2] 改写，走到这里说明它没被 lowering）",
+                ),
             )),
             ExprKind::Auto => Err(CgError::new("§2.6", "codegen: `auto` 只能出现在具名实参位置")),
             ExprKind::Invalid => Err(CgError::new(
@@ -2773,8 +2775,116 @@ impl<'a> Cg<'a> {
             if let Some(v) = self.ctor(&name, args, want)? {
                 return Ok(v);
             }
+            // §10.11: the builtin behind `fmt!` (stage [2] lowers the macro spelling into this call).
+            // Same judge as stage [4] — `prog.fns` is the table both sides read — so the two stages
+            // cannot disagree about whether a user `fn fmt` shadowed it.
+            if name == "fmt"
+                && matches!(&callee.kind, ExprKind::Ident(_))
+                && !self.prog.fns.iter().any(|f| f.name == "fmt")
+            {
+                return self.builtin_fmt(args);
+            }
         }
         self.user_fn_call(&name, owner.as_deref(), args)
+    }
+
+    /// §10.11: emit `infy_fmt_run(specs, n_specs, args, n_args)`. The rows come from the same
+    /// `fmtstr::plan` call stage [4] validated, and the argument array is a compound literal so the
+    /// call stays an expression. A carrier the runtime cannot hold is refused here rather than
+    /// printed with the wrong `InfyFmtKind`.
+    fn builtin_fmt(&mut self, args: &[crate::ast::CallArg]) -> Result<Val, CgError> {
+        let Some(first) = args.first() else {
+            return Err(CgError::new(
+                "§10.11",
+                "codegen: `fmt` 没有格式串实参（阶段 [4] 的 E-0180 应当先挡住）",
+            ));
+        };
+        let lit = match &first.expr.kind {
+            ExprKind::Lit(Lit::Str(s)) | ExprKind::Lit(Lit::Cord(s)) => s.clone(),
+            other => {
+                return Err(CgError::new(
+                    "§10.11",
+                    format!(
+                        "codegen: `fmt` 的格式串是{}而不是字面量（阶段 [4] 的 E-0181 应当先挡住）",
+                        expr_kind_name(other)
+                    ),
+                ))
+            }
+        };
+        let names: Vec<Option<String>> = args.iter().skip(1).map(|a| a.name.clone()).collect();
+        let specs = crate::fmtstr::plan(&lit, &names).map_err(|b| CgError::new(
+            "§10.11",
+            format!("codegen: 内部错误：阶段 [4] 放行的格式串 `{lit}` 在这里被拒：{}", b.message()),
+        ))?;
+        let sym = self.fresh("infy_fmt_spec");
+        let rows: Vec<String> = specs.iter().map(|s| s.c_initializer()).collect();
+        self.data_defs.insert(
+            sym.clone(),
+            format!("static const InfyFmtSpec {sym}[{}] = {{ {} }};", rows.len(), rows.join(", ")),
+        );
+        // §4.10 rule 3: arguments are lowered left to right, before the call text is built.
+        let mut argv = Vec::new();
+        for a in args.iter().skip(1) {
+            let v = self.expr(&a.expr, None)?;
+            argv.push(self.fmt_arg(&v)?);
+        }
+        let n = argv.len();
+        // C has no zero-length arrays, so a hole-free format string still passes a one-element
+        // array with `n_args = 0u` — the runtime never indexes into it.
+        let arg_arr = if argv.is_empty() {
+            "(const InfyFmtArg[1]){ { .kind = FA_U64, .v = { .u = 0u } } }".to_string()
+        } else {
+            format!("(const InfyFmtArg[{n}]){{ {} }}", argv.join(", "))
+        };
+        let call = format!("infy_fmt_run({sym}, {}u, {arg_arr}, {n}u)", specs.len());
+        let tmp = self.fresh("fmt");
+        self.decl_stmt(&Ty::String, &tmp, Some(&call))?;
+        Ok(Val::of(Ty::String, tmp))
+    }
+
+    /// One `InfyFmtArg` row for a lowered value. The mapping is by **carrier**, which is what the
+    /// runtime's union can actually hold: there is no 128-bit slot (`FA_I128`/`FA_U128` are named in
+    /// the header but have no member — see the note at `infy_rt.c`'s `fmt_arg_into`), and an ADT or
+    /// enum needs an `InfyDebugVt` the derive path does not emit yet (F35). Both are refused.
+    fn fmt_arg(&self, v: &Val) -> Result<String, CgError> {
+        let slot = |kind: &str, init: String| format!("{{ .kind = {kind}, .v = {{ {init} }} }}");
+        match &v.ty {
+            Ty::Prim(p) => match p {
+                Prim::U8 | Prim::U16 | Prim::U32 | Prim::U64 | Prim::Usize => {
+                    Ok(slot("FA_U64", format!(".u = (uint64_t){}", v.text)))
+                }
+                Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 | Prim::Isize => {
+                    Ok(slot("FA_I64", format!(".i = (int64_t){}", v.text)))
+                }
+                Prim::F32 | Prim::F64 => Ok(slot("FA_F64", format!(".f = (double){}", v.text))),
+                Prim::Bool => Ok(slot("FA_BOOL", format!(".b = (uint8_t){}", v.text))),
+                Prim::Char => Ok(slot("FA_CHAR", format!(".c = (uint32_t){}", v.text))),
+                Prim::Str => Ok(slot("FA_STR", format!(".s = {}", v.text))),
+                Prim::U128 | Prim::I128 => Err(CgError::new(
+                    "§10.11",
+                    format!(
+                        "codegen: `{}` 作为格式化实参放不下——`InfyFmtArg` 的 union 没有 128 位槽（`runtime/infy_rt.h`）",
+                        p.text()
+                    ),
+                )),
+                Prim::Unit => Err(CgError::new(
+                    "§10.11",
+                    "codegen: `()` 不能作为格式化实参（§10.11 的参数集合里没有它）",
+                )),
+            },
+            Ty::Bool => Ok(slot("FA_BOOL", format!(".b = (uint8_t){}", v.text))),
+            Ty::String => Ok(slot("FA_STR", format!(".s = infy_string_as_str(&{})", v.text))),
+            Ty::Ref { inner, .. } if matches!(&**inner, Ty::Str | Ty::Prim(Prim::Str)) => {
+                Ok(slot("FA_STR", format!(".s = *{}", v.text)))
+            }
+            other => Err(CgError::new(
+                "§10.11",
+                format!(
+                    "codegen: {} 作为格式化实参需要 `InfyDebugVt`，派生那一半还没接（docs/BACKLOG.md F35）",
+                    other.text()
+                ),
+            )),
+        }
     }
 
     fn ctor(&mut self, name: &str, args: &[crate::ast::CallArg], want: Option<&Ty>) -> Result<Option<Val>, CgError> {
@@ -4539,6 +4649,106 @@ mod tests {
             j2.contains("§10.10") || j2.contains("§3.5") || j2.contains("E-"),
             "`for` must be refused or rejected upstream: {j2}"
         );
+    }
+
+    /// §10.11 (F15): the builtin emits `infy_fmt_run` over a file-scope `InfyFmtSpec` table built
+    /// from the compile-time parse of the literal, plus an `InfyFmtArg` compound literal in
+    /// **argument order**. `emit_with` skips stage [2], so these drive the §2.5 call spelling — which
+    /// is exactly the node stage [2] produces for `fmt!`; `cli` covers that spelling end to end.
+    #[test]
+    fn fmt_emits_a_spec_table_and_an_argument_array() {
+        let t = emit_of("fn f(x: u32) -> String { fmt(\"fetch #{}\", x) }");
+        let row = t
+            .lines()
+            .find(|l| l.contains("static const InfyFmtSpec"))
+            .unwrap_or_else(|| panic!("no spec table in:\n{t}"));
+        assert!(
+            row.contains("[1] = { { .lit = \"fetch #\", .lit_len = 7u, .arg_index = 0u, .which = FY_AUTO, .width = -1, .precision = -1, .fill = 0u, .align = 0u, .alt = 0u, .zero_pad = 0u } }"),
+            "{row}"
+        );
+        let sym = row
+            .split("static const InfyFmtSpec ")
+            .nth(1)
+            .unwrap()
+            .split('[')
+            .next()
+            .unwrap()
+            .trim()
+            .to_string();
+        let call = t.lines().find(|l| l.contains("infy_fmt_run(")).expect("the call");
+        assert!(call.starts_with("    InfyString fmt_"), "{call}");
+        assert!(call.contains(&format!("infy_fmt_run({sym}, 1u, ")), "{call}");
+        assert!(
+            call.contains("(const InfyFmtArg[1]){ { .kind = FA_U64, .v = { .u = (uint64_t)"),
+            "{call}"
+        );
+        assert!(call.ends_with("} } }, 1u);"), "{call}");
+
+        // a run after the last placeholder becomes the tail-only row the header reserves for it
+        let t2 = emit_of("fn f(x: u32) -> String { fmt(\"{}!\", x) }");
+        let row2 = t2
+            .lines()
+            .find(|l| l.contains("static const InfyFmtSpec"))
+            .expect("tail table");
+        assert!(row2.contains("[2] = {"), "{row2}");
+        assert!(row2.contains(".lit = \"!\", .lit_len = 1u, .arg_index = 4294967295u"), "{row2}");
+        assert!(
+            t2.lines().any(|l| l.contains("infy_fmt_run(") && l.contains(", 2u, ") && l.contains(", 1u);")),
+            "n_specs must count the tail row: {:?}",
+            t2.lines().filter(|l| l.contains("infy_fmt_run(")).collect::<Vec<_>>()
+        );
+
+        // a format string with no holes still emits one row, so `n_specs` never describes an empty table
+        let t3 = emit_of("fn f() -> String { fmt(\"plain\") }");
+        assert!(t3.contains(".arg_index = 4294967295u"), "{t3}");
+        assert!(
+            t3.lines().any(|l| l.contains("infy_fmt_run(") && l.contains("(const InfyFmtArg[1]") && l.contains(", 0u);")),
+            "a hole-free call must pass n_args = 0: {:?}",
+            t3.lines().filter(|l| l.contains("infy_fmt_run(")).collect::<Vec<_>>()
+        );
+    }
+
+    /// §10.11: `{name}` is resolved by codegen to an index, while the argument array stays in source
+    /// order — the two halves of that pairing are what the C harness's `"8x2"` case reads.
+    #[test]
+    fn fmt_named_arguments_index_the_argument_array_in_source_order() {
+        let t = emit_of("fn f(w: u32, h: u32) -> String { fmt(\"{h}/{w}\", w=1u32, h=2u32) }");
+        let row = t
+            .lines()
+            .find(|l| l.contains("static const InfyFmtSpec"))
+            .expect("named table");
+        assert!(row.contains("[2] = {"), "{row}");
+        assert!(
+            row.contains(".arg_index = 1u, .which = FY_AUTO, .width = -1, .precision = -1, .fill = 0u, .align = 0u, .alt = 0u, .zero_pad = 0u }, { .lit = \"/\", .lit_len = 1u, .arg_index = 0u"),
+            "{row}"
+        );
+        let call = t.lines().find(|l| l.contains("infy_fmt_run(")).expect("call");
+        assert!(call.contains("(const InfyFmtArg[2])"), "{call}");
+        assert!(call.contains("FA_U64"), "{call}");
+    }
+
+    /// §10.11: the carriers `InfyFmtArg` can hold are written by kind, and the ones it cannot are a
+    /// named refusal rather than a plausible substitute.
+    #[test]
+    fn fmt_writes_the_carriers_the_runtime_union_holds_and_refuses_the_rest() {
+        let t = emit_of("fn f(s: &str, o: String, n: i64, b: bool, c: char, v: f64) -> String { fmt(\"{}{}{}{}{}{}\", s, o, n, b, c, v) }");
+        let call = t.lines().find(|l| l.contains("infy_fmt_run(")).expect("six-arg call");
+        for kind in ["FA_STR", "FA_I64", "FA_BOOL", "FA_CHAR", "FA_F64"] {
+            assert!(call.contains(kind), "{kind} missing from {call}");
+        }
+        assert!(call.contains(".s = infy_string_as_str(&"), "{call}");
+        assert_eq!(call.matches("(const InfyFmtArg[6])").count(), 1, "{call}");
+
+        // no 128-bit union slot (`runtime/infy_rt.h`), and an ADT would need an `InfyDebugVt` derive
+        // does not emit yet (F35) — both refuse by name instead of picking a wrong `InfyFmtKind`.
+        let e = emit_try("fn f(v: u128) -> String { fmt(\"{}\", v) }").unwrap_err().join("\n");
+        assert!(e.contains("128"), "{e}");
+        let e2 = emit_try("struct P { pub x: u32 }\nfn f(p: P) -> String { fmt(\"{}\", p) }")
+            .unwrap_err()
+            .join("\n");
+        assert!(e2.contains("InfyDebugVt"), "{e2}");
+        let e3 = emit_try("fn f(v: u32) -> String { fmt(\"{}\", ()) }").unwrap_err().join("\n");
+        assert!(e3.contains("§10.11"), "{e3}");
     }
 
     /// §7.6.3 项 2/3: an A-track call is emitted as a call **through the wrapper symbol**, and the
