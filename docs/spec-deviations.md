@@ -395,18 +395,53 @@ NUL（只有跨 A 轨边界才是 `R-0003`/UB-007）。若后端照发 `infy_str
 **锁定点** = 见 `docs/BACKLOG.md` F2 之外的覆盖表行；`codegen::tests::integer_addition_is_a_checked_runtime_call`
 锁住"整数运算必须是 `infy_*` 调用"这一半。
 
-## D-31 §4.7.1 的移动（owned 值换地址）在 stage [8] 被**拒绝**
+## D-31 §4.7.1 的移动（owned 值换地址）：**F12 轮起改为发射 `infy_cleanup_cancel(&源)`**（此前是拒绝）
 
-§4.7.4 + ABI §3 的释放是靠 `infy_cleanup_push(fn, &obj, is_defer)` 登记**地址**、在作用域末尾
-`infy_cleanup_pop_run()` 弹**栈顶**实现的（`infy_rt.h:115-118`）。`let d = s;`、把 owned 值按值传给形参、
+§4.7.4 + ABI §3 的释放靠 `infy_cleanup_push(fn, &obj, is_defer)` 登记**地址**、在作用域末尾
+`infy_cleanup_pop_run()` 弹**栈顶**实现（`infy_rt.h:115-118`）。`let d = s;`、把 owned 值按值传给形参、
 `return s;` 三种移动都会让已登记的地址失效：要么留下双弹（同一缓冲两次 `infy_free` = 段错误），
-要么对已经搬走的值执行释放（悬垂）。运行时没有"按地址取消/搬迁清理项"的入口。
+要么对已经搬走的值执行释放（悬垂）。
 
-**选定实现**：这三种移动形式一律 `CgError`，消息指名 §4.7.1/§4.7.4 与"双层释放/悬垂"，
-并在 `docs/BACKLOG.md` 登记为 **F12**（给运行时加 `infy_cleanup_relocate(old, new)` 或按地址移除的 API）。
-不移动的 owned 值（形参、`let` 绑定到新建值）按声明序 push、作用域末尾 pop，LIFO 即 §4.7.4 的逆序。
-**锁定点** = `codegen::tests::moving_an_owned_binding_is_refused`（三种形式成对）+
-`owned_values_register_a_cleanup_entry_at_their_scope`（正常路径的 push/shim/pop 与元素大小）。
+**（历史）C2 轮的选定实现**：三种移动形式一律 `CgError`，并在 `docs/BACKLOG.md` 登记为 **F12**
+（建议给运行时加 `infy_cleanup_relocate(old, new)` 或按地址移除的 API）。
+
+**（现行）F12 轮的选定实现** —— 规范 §4.7.1/§4.7.4 只说"移动后由**新所有者**在它的作用域里释放"，
+没有规定运行时必须能"搬迁"，所以选**最小那一个**：
+
+* **按地址摘除，不搬迁**：C 侧新增 `uint8_t infy_cleanup_cancel(void* obj)`（`infy_rt.h`），从内到外取
+  **第一条 `obj` 相等且 `is_scope == 0`** 的清理项，摘掉记录本身、**不跑 Drop**，返回是否命中。
+  没有做 `relocate(old, new)`：代码里从来不需要"把项搬到新地址"，只需要"让源那条不再作答"，
+  而目的地由 codegen 另 `push` 一条 —— 少一个入口就少一处会错的地方。
+* **`obj == 0` 直接返回 0**（不匹配任何项）：codegen 只会登记 `&local`，允许 0 等于让一次调用取消掉
+  任意一条以 0 当载荷的**手写**项（`infy_cleanup_push(fn, 0, 1)` 的 defer 就是这个形状）。
+* **跳过 scope 哨兵**：`infy_scope_mark()` 塞进同一个 deque 的哨兵不是清理项，被摘掉会让 §3.13 的括号失衡。
+* **`#[must_drop]` 仍报 `R-0730`**：`cancel` 与 `pop_noop` 都是"移除而不跑"，所以移动一个 `#[must_drop]`
+  值必须和 `#[no_drop]` 那条路一样响（同形语义，不是新判据）。
+* **成对不变量在 Rust 侧**：`Binding` 带 `pop: Option<(usize, usize)>` = 它欠的那条 `pop_run` 的槽位，
+  `pops` 是 `Vec<Vec<Option<String>>>`；取消 = 摘运行时的项 **+ 清自己的槽位**同一动作。
+  于是"一条 push 恰好一条答案"（`pop_run` / `pop_noop` / `cancel`）这个 `close_scope`/`drain_pops`
+  依赖的不变量在三种形式下都成立，可机检（`codegen::tests::cleanup_ledger`）。
+* **`return` 的判据是"按值提到"**：`mentions_by_value` 做标识符边界匹配，**左边是 `&` 就跳过** ——
+  `&s` 是借用，所有权不动，取消它反而**漏**。两个方向的代价不对称（多取消 = 漏、少取消 = 双释放），
+  所以两条都有锁：`a_return_that_carries_the_binding_in_a_literal_cancels_its_entry` 与
+  `a_borrow_leaves_the_cleanup_entry_in_place`。
+* **两条"拒绝"实测不可达，删掉**：① 把 owned 按值交给 A 轨 `extern` —— 阶段 [4] 就 `E-0723`
+  （§7.6.4 行 3/末条：`String`/`Vec` 的裸内存不得跨边界），codegen 那条分支永远走不到；
+  ② 把 owned 移进链帧槽位 —— `emit_chain` 在**铺帧之前**就对任何带析构器的帧局部报
+  「帧由调度器释放（`infy_free(f->frame)`），释放时机未实现」。两者都不是本轮的缺口，
+  且②那条真拒绝此前**没有测试**，F12 轮补上 `a_chain_frame_local_with_a_destructor_is_refused_by_name`。
+
+**锁定点**：`codegen::tests` 的 `a_let_move_cancels_the_source_entry_and_keeps_the_destination_pop` /
+`an_owned_byvalue_argument_cancels_the_callers_entry` / `a_returned_owned_binding_cancels_its_entry` /
+`a_return_that_carries_the_binding_in_a_literal_cancels_its_entry` /
+`a_borrow_leaves_the_cleanup_entry_in_place` / `moving_a_value_that_never_registered_an_entry_emits_no_cancel`
+（六条共用 `cleanup_ledger`）+ `owned_values_register_a_cleanup_entry_at_their_scope`（正常路径的
+push/shim/pop 与元素大小）；C 侧 = `runtime/test_rt.c` 的 `test_drop_order` 四组 **+13 断言**
+（非栈顶摘除只免跑一次 Drop / 按地址命中而非按值 / 不许摘 scope 哨兵 / `#[must_drop]` 仍 `R-0730`）。
+**验收本体**另见 `docs/coverage.md` 的 **P36**（release 二进制实跑三份最小 module + 逐行读生成的 C）。
+被替换掉的旧锁点 `moving_an_owned_binding_is_refused` 锁的正是本轮关掉的缺口，随之下线（**不是放宽断言**：
+同一份源码现在必须**生成**，且旧地址的 `pop_run` 必须**消失**）。
+不移动的 owned 值（形参、`let` 绑定到新建值）仍按声明序 push、作用域末尾 pop，LIFO 即 §4.7.4 的逆序。
 
 ## D-32 §7.4 的 `.inf meta` 只有 208 字节固定记录，规范点名的五张表没有槽位/没有字节表
 
@@ -1409,4 +1444,41 @@ control（无变异）= `561 passed / 0 failed`；M1 = 两处长度求值换回 
 `test result` 行为空 —— 这会被后面的判据读成"变异没红"。现在脚本先清掉自己的 work 目录，再在复制完成后
 断言 `Cargo.toml`/`src/lib.rs`/`src/sema.rs`/`conformance/cases`/`docs/coverage.md` 五项齐备，缺一即 exit 2 ⇒
 **"没测"永远不许被读成"没红"**。
+
+## D-54 连携语句写在 chain 顶层：规范给了码（`E-0300`）却没给"报错之后怎么办"，而实现这里是**非终止** —— F53 轮的四处定死
+
+§8.1 的分类表把 `goto` / `start` / `start_flag` / `resume` 列为**连携语句**，"只能出现在某语句尾部的
+`linkage_block = { … }` 内"；§9.6 的码表 `E-0300` 标题就是「连携语句独立出现（UB-011）」，note 的样例
+正是 `goto("x");` 写在 chain 顶层。规范**没说**的是：报了 `E-0300` 之后解析器怎么继续（恢复策略）。
+实现这里更糟：`parser.rs` 的链体循环 `while !at(RBrace) && !at_end()` 只写
+`if let Some(s) = self.stmt() { … }` —— **没有前进守卫**。`stmt()` 对这三个关键字返回 `None` 且不消费记号
+（它没有这三条臂，落到的表达式那支也无法起始），于是每圈攒一条诊断、`pos` 不动 ⇒ 诊断 Vec 翻倍到
+**33 GB** 把进程打死（实测 `cargo test` 的临时探针 `memory allocation of 33285996544 bytes failed` /
+`0xc0000409`；`infy check` 与 `infy fmt --check` 对九个最小形状**全部超时 rc=124**）。
+`block()` 与 `linkage_block()` 两处都有这个守卫，**只有 `chain` 那一处漏了** —— 所以同一个 `goto` 写在
+`fn` 体里只是 `E-0053`（实测 exit 2、不挂），而**修前既有测试一条都没红**：规范的连携块形状走的是有守卫的
+那条路（**判据写在哪一层 ≠ 覆盖到哪一层**，见经验库 unreachable-implementation-branch）。
+
+**定死的四处**：
+
+* **(a) 码用 `E-0300`，标题逐字取码表**「连携语句独立出现（UB-011）」—— 不是 `E-0053`（那会把 UB-011
+  这一类语法外的语义错误降级成"缺记号"），也不是新造码（§9.6 是封闭表）。`help` 用码表的
+  「包进宿主语句的 `{ … }` 连携块」。
+* **(b) 恢复 = 消费整条构造**：命中这三个关键字时调 `linkage_stmt()` 把 `goto(…)` / `start(…)` /
+  `start_flag` **整条吃掉**再报，而不是 `bump()` 一个记号。只前进一格会把 `(+0)` 留在流里 ⇒ 级联出
+  一串 `E-0053`（本仓库反复出现的那类"一个错爆 N 条"，见 F36/F37）。消费整条 = 一个构造恰好一条诊断。
+* **(c) 通用守卫照 `linkage_block` 同形补齐**：`stmt()` 返回 `None` 且 `pos` 未动时
+  `syntax_err` + `synchronize()`，仍不动再 `bump()`。这一条**不是**为 `goto` 服务的，是为"任何无法起始
+  语句的记号"服务的（锁点 = `junk_at_chain_top_level_reports_once_and_advances`，语料是一个裸 `)`）。
+  (b) 与 (c) 是两层：(b) 给规范要的码与干净恢复，(c) 保证这一族**任何**成员都不再挂死。
+* **(d) `resume` 这一半没跟着改**：`stmt()` 有 `Kind::Keyword(Kw::Resume)` 臂（`parser.rs:1835`，产
+  `StmtKind::Resume`），所以 `chain C { resume(); }` 按 §8.1 也该是 `E-0300`，实测却是 `infy check`
+  exit **0** / 0 诊断。**没顺手改** —— 它已有 HIR 与发射路径，把它挪进连携族要连动阶段 [7]/[8]，
+  超出"止血非终止"这一格。登记为 **F54**（保持 `[ ]`，写清实测行为与改动面）。
+
+**成对锁点三条**（`parser::tests`）：`a_linkage_statement_at_chain_top_level_is_e0300_and_terminates`
+（三个关键字各一份语料）、`junk_at_chain_top_level_reports_once_and_advances`（通用守卫）、
+`a_goto_mounted_on_a_host_statement_is_not_e0300`（合法形状**不许**被新诊断波及 —— 这条防的是把修复
+做成"一律拒绝"）。**验收本体 = 修前/修后同一份语料对照**（九个形状 rc 124 → 2），记在
+`docs/coverage.md` 的 **P37**；临时探针（`zz_probe_f12_text`）按规矩删掉，不留进测试树。
 

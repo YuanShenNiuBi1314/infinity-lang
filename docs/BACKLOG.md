@@ -1119,7 +1119,7 @@
       顺序填充 ⇒ `struct S { a: [u32; N] }` 写在 `const N` 之前求不到值，本轮之后**显式失败**（修前实证：
       `uint32_t a[0]` + `sizeof(S) == 0`，见 `target/scratch/f11/before-c10`）。
 
-- [ ] F12 **owned 值的移动在 stage [8] 被拒绝，根因是运行时清理队列只支持弹栈顶**（C2 轮定位，实现选择见偏差 **D-31**）：
+- [x] F12 **owned 值的移动在 stage [8] 被拒绝，根因是运行时清理队列只支持弹栈顶**（C2 轮定位，实现选择见偏差 **D-31**）：
       `infy_rt.h:115-118` 的清理 API 是 `infy_cleanup_push(fn, &obj, is_defer)` + `infy_cleanup_pop_run()` /
       `infy_cleanup_pop_noop()`，登记的是**地址**且只能弹**栈顶**。于是这三类合法 INFY 写法无法发射：
       (a) `let d: String = s;`（换地址）；(b) `take(s)` 按值传形参（ callee 与 caller 各有一份清理项 → 双 `infy_free`）；
@@ -1128,6 +1128,36 @@
       验收：给运行时加"按地址取消/搬迁清理项"的入口（如 `infy_cleanup_relocate(void* old, void* new)` 或
       `infy_cleanup_cancel(fn, obj)`），实现三条移动形式，并把上面那条测试从"必须报错"改成"必须生成 + 成对断言
       旧地址不再被释放"；改 `infy_rt.h` 后**四条 C 链都要复跑**。
+      **F12 轮（2026-10-18）落地 = 提交 `13fba7b`**（半成品的来源：cron-34 之后有一批**未提交**的 F12 改动
+      留在树里，2026-10-17 15:38–15:48 写入，带一条自标 `TEMP PROBE — delete before commit` 的临时测试；
+      本轮按"优先收敛而不是重写"处理，探针已删，**没有回退别人的半成品**）。选的实不是搬迁而是**按地址摘除**：
+      C 侧新增 `uint8_t infy_cleanup_cancel(void* obj)`（取第一条 `obj` 相等且 `is_scope == 0` 的项，摘掉、
+      **不跑 Drop**；`obj == 0` 直接返回 0；`#[must_drop]` 照 `pop_noop` 同形报 `R-0730`），Rust 侧 `Binding`
+      多带 `pop: Option<(usize, usize)>` = 它欠的那条 `pop_run` 的槽位（`pops` 换 `Vec<Vec<Option<String>>>`）
+      ⇒ 取消 = 摘运行时的项 **+** 清槽位**同一动作**，"一条 push 恰好一条答案"这个 `close_scope`/`drain_pops`
+      依赖的不变量在三种形式下都成立。`relocate(old, new)` 从未实现也不需要：代码里只需要"让源那条不再作答"，
+      目的地由 codegen 另 `push` 一条（裁定 = 偏差 **D-31** 的"现行"段）。
+      **验收本体 = release 二进制实跑**（`target/scratch/f12/m1_let|m2_call|m3_ret|z_shapes`，`infy build`
+      全 exit **0**，逐行读生成的 C）：`let d = s` = push(&s)+push(&d)+**cancel(&s)**+1 次 pop；`take(s)` =
+      callee 自己 push/pop、caller **cancel**；`return s` = push+**cancel**+`return s_1;`、pop **0 次**；
+      `return P { s }`（把绑定装进字面量带走）同样 cancel；**`take(&s)` 不 cancel**（借用 = 所有权不动，
+      取消它就是漏）⇒ 六条 `cleanup_ledger` 锁点（`push` == `pop_run` + `pop_noop` + `cancel`）实测
+      `(2,2)/(2,2)/(1,1)/(1,1)/(1,1)/(0,0)`。旧锁点 `moving_an_owned_binding_is_refused` 随缺口下线 ——
+      **不是放宽断言**：同一份源码现在必须**生成**且旧地址的 `pop_run` 必须**消失**。
+      **两条拒绝实测不可达 ⇒ 删**（不是改注释）：① 把 owned 按值交给 A 轨 `extern` —— 阶段 [4] 就 `E-0723`
+      （实测 `infy check target/scratch/f12/y_atrack` = exit 2，"`String` 不得跨 A 轨边界：行 3/末条"）；
+      ② 把 owned 移进链帧槽位 —— `emit_chain` 在**铺帧之前**就对任何带析构器的帧局部报「帧由调度器释放
+      （`infy_free(f->frame)`），释放时机未实现」，而这条**真**拒绝此前零测试 ⇒ 本轮补
+      `a_chain_frame_local_with_a_destructor_is_refused_by_name`。
+      **数字**：`cargo test --offline --lib` **570 passed / 0 failed**（`codegen` 27→**33**）、
+      `cargo check --offline --lib` **0 error / 0 warning**、`cargo build --offline --release` exit 0、
+      四条 C 链全绿（两份 `-c` 各 stderr **0 字节**、rt **32353 assertions / 0 failures**（+13 = cancel 四组）、
+      两条 IFBC 各 **180/180** + `cmp` 无差异）、tour 的 `fmt --check|check|build|run|test` +
+      `--verify-reproducible` + `artifact info --nodes` 全 exit **0**、**C11 12512 / build-id `d7c4408e…370015` /
+      节点表 7-8-9-10-16-20 一字未动**、**产物 200644 → 200700**（宿主镜像 199898 = `infy_rt.c` 多一个函数，
+      build-id 的输入里没有宿主镜像 ⇒ 它不动）、`infy conformance --report` 仍 **83 = 77/0/6 ⇒ exit 1**。
+      验收证据另立 `docs/coverage.md` **P36**。**没关掉的面**：移动后使用仍归借用检查（本条只保证 emitted C
+      不双释放/不悬垂）；带析构器的链帧局部与跨 A 轨的 owned 值仍被**上游**拒着（措辞红线见 D-31/`docs/status.md`）。
 
 - [ ] F13 **`-128` 这类无后缀负字面量被阶段 [4] 判成 `E-0110`**（C2 轮写测试时确认，未改实现）：
       `src/sema.rs` 的一元负号只接受 `is_signed() || is_float()` 的 `Ty::Prim`，而 §4.13 规则 2 让无后缀字面量取
@@ -1553,7 +1583,99 @@
       那份源码 `check` **exit 0** 且发出的 C 是 `uint32_t a[4]`（本轮把该形状同时用作正反例语料）；
       两条各自成对测试。
 
+- [x] F53 **连携语句写在 `chain` 顶层把前端打成非终止（`infy check` 与 `infy fmt --check` 双双挂死）**（F12 轮的临时探针撞出来，探针已删；根因与定死见偏差 **D-54**）：
+      `parser.rs` 的链体循环 `while !at(RBrace) && !at_end()` 只写 `if let Some(s) = self.stmt() { … }` ——
+      **没有前进守卫**。`goto` / `start` / `start_flag` 是 §8.1 的**连携语句**，`stmt()` 没有这三条臂，
+      落到表达式那支也起始不了 ⇒ 返回 `None` 且**不消费记号** ⇒ 每圈攒一条诊断、`pos` 不动，诊断 Vec
+      翻倍到 **33 GB** 把进程打死。**修前实测**：九个最小形状（`chain C { goto(+0); }`、`goto(1)`、
+      `goto("x")`、`start(chain = C, node = 0)`、`start_flag;` 及它们的越界/多节点变体）对
+      `infy check` 与 `infy fmt --check` **全部 rc=124（超时）**；同一条 `goto` 写在 `fn` 体里只是
+      `E-0053`（exit 2、不挂）—— 因为 `block()` 与 `linkage_block()` 都有那个守卫，**只有 `chain` 这一处漏了**。
+      这也解释了为什么既有测试一条都不红：规范的连携形状（`宿主语句; { goto(…) }`）走的是有守卫的那条路。
+      **规范早就给了码**：§8.1 分类表 + §9.6 的 `E-0300`「连携语句独立出现（UB-011）」，note 的样例正是
+      `goto("x");` 写在 chain 顶层，而 `src/codes.rs:768` 有这一条却**零发射点**（§9.5 的 UB-011 同）。
+      **F53 轮（2026-10-18）落地 = 提交 `13fba7b`**，两处一起：① 命中这三个关键字时发 **`E-0300`**
+      （标题逐字取码表，help 用「包进宿主语句的 `{ … }` 连携块」），并用 `linkage_stmt()` 把**整条构造消费掉**
+      —— 只 `bump()` 一格会把 `(+0)` 留在流里级联一串 `E-0053`（F36/F37 那一族"一个错爆 N 条"）；
+      ② 补一条与 `linkage_block` 同形的**通用**前进守卫（`syntax_err` + `synchronize()`，仍不动再 `bump()`），
+      兜住任何无法起始语句的记号 —— 这一层不是为 `goto` 服务的。
+      **锁定点**（`parser::tests` 三条）：`a_linkage_statement_at_chain_top_level_is_e0300_and_terminates`
+      （三个关键字各一份）、`junk_at_chain_top_level_reports_once_and_advances`（语料 = 一个裸 `)`）、
+      `a_goto_mounted_on_a_host_statement_is_not_e0300`（合法形状**不许**被新诊断波及 —— 防的是把修复做成
+      "一律拒绝"）。**验收本体 = 同一份语料修前/修后对照**（`target/scratch/f12/g_*|v_*|w_*|p2_goto`）：
+      修前九个 **rc=124** ⇒ 修后九个 **rc=2**，其中八个打 `E-0300`（`p2_goto` 先撞语料自己的 `E-0101`）；
+      两个 `fn` 体对照 `x_fnbody|x_blocktail` 仍 `E-0053` / exit 2 ⇒ 证明改的是链体那一处。记 **P37**。
+      数字：`cargo test --offline --lib` **570 passed / 0 failed**（`parser` 11→**14**）、
+      `cargo check --offline --lib` 0 error / 0 warning、tour 六条 + `artifact info --nodes` 全 exit 0、
+      四条 C 链全绿（rt **32353/0**、两条 IFBC 各 **180/180** + `cmp` 无差异、两份 `-c` 各 stderr **0 字节**）
+      —— F53 本身**没动 C**，本轮 C 侧的全部改动来自 F12 那一格。
+      **红线**：不许说"链体顶层的连携语句语义已完整" —— `resume` 那一半仍漏（**F54**）；也不许把这条说成
+      "测试驱动发现的红灯" —— 修前它一条测试都不红，是探针把进程打死后回推出来的。
+      **仍在的同类风险（本轮没收，留给下一轮顺手收）**：全仓 `while !at(…) && !at_end()` 形状的循环还有
+      多少处没有前进守卫，本轮只按语料命中面数了链体这一处，未做全量清点。
+
+- [ ] F54 **`resume` 在 §8.1 属于连携语句，却被 `stmt()` 当普通语句 ⇒ `chain C { resume(); }` 静默通过**（F53 轮同族发现，未改）：
+      `parser.rs:1835` 有 `Kind::Keyword(Kw::Resume) => { bump; eat(Semi); Some(StmtKind::Resume) }` 这一臂，
+      于是 `resume` 在链体顶层**能**解析（F53 那三个关键字走的是"新守卫 + `E-0300`"那条路，`resume` 根本
+      不会落到守卫上）。**实测**：`infy check target/scratch/f12/w_resume` = exit **0** / 0 诊断，
+      而 §8.1 的分类表把 `resume` 与 `goto`/`start`/`start_flag` 同列"只能出现在 `linkage_block` 内"，
+      §9.6 的 `E-0300`（UB-011）按文面应当适用。规范自相矛盾的一面：§8.1 的**普通语句**列里同时写了
+      `pause`、`stop`（这两个确实可独立出现，§8.2 的 `stop` 语义明写"普通语句即可使用"），却没写 `resume`。
+      **本轮没动**的原因：`resume` 已有 HIR 与发射路径（改判成连携语句要连动阶段 [7]/[8] 与 `StmtKind::Resume`
+      的消费方），超出"止血非终止"这一格。
+      验收：① 先裁 §8.1（连携）与 §8.2 `stop` 类推（普通）哪一边胜，裁定落 `docs/spec-deviations.md`；
+      ② 若判连携 ⇒ `chain C { resume(); }` 报 `E-0300`、`宿主语句; { resume(); }` 仍合法，两侧成对测试；
+      ③ 若判普通 ⇒ 改正 §8.1 的读取口径并把 `docs/coverage.md` 的 §8.1 行写明依据。
+
 ## 2. 当前指针
+
+> **F12/F53 轮收尾（2026-10-18）：F12 与 F53 各勾 `[x]`，新登记 F54 未修；本段取代下一段** ——
+> 交付提交 **`13fba7b`**（C 侧 `infy_cleanup_cancel` + Rust 侧 `Binding.pop` 槽位 + 三种移动形式发射 +
+> 两条不可达拒绝删除 + `parser.rs` 链体守卫与 `E-0300` + 十条新锁点）。
+> **开工时树是坏的**：上一轮之后有一批**未提交**的 F12 半成品留在树里（`runtime/infy_rt.c/.h`、
+> `runtime/test_rt.c`、`src/codegen.rs`，2026-10-17 15:38–15:48），其中一条自标
+> `TEMP PROBE — delete before commit` 的测试撞出了 F53 ⇒ **开工基线不可测**
+> （`cargo test` 跑到它时 `memory allocation of 33285996544 bytes failed` / `0xc0000409`，整个测试二进制
+> 没跑完）。本轮按"优先收敛而不是重写"处理：**没有回退别人的半成品**，探针已删，缺的锁定点补齐。
+> **F53 一句话**：`chain` 体循环缺前进守卫，`goto`/`start`/`start_flag` 让 `stmt()` 返回 `None` 且不消费记号
+> ⇒ 每圈攒一条诊断、`pos` 不动 ⇒ 非终止；规范早就给了码（§8.1/UB-011 ⇒ `E-0300`，`codes.rs:768` 有条目、
+> **零发射点**）。修前九个语料 `infy check`/`infy fmt --check` **全部 rc=124**，修后 **全部 rc=2**（八个 `E-0300`）。
+> 同族漏网一条 = **F54**（`resume` 被 `stmt()` 当普通语句 ⇒ `chain C { resume(); }` 实测 exit **0** / 0 诊断）。
+> **新基线（本机 `-j 1`）**：`cargo test --offline --lib` **570 passed / 0 failed**（= 561 + 9：
+> `codegen` 27→**33** · `parser` 11→**14**）、全目标 = 570 + bin 0 + doc 0、`cargo check --offline --lib`
+> **0 error / 0 warning**、`cargo build --offline --release` exit 0、tour 的
+> `fmt --check|check|build|run|test` + `--verify-reproducible` + `artifact info --nodes` 全 exit **0**、
+> **C11 12512 / build-id `d7c4408e…370015` / 节点表 7-8-9-10-16-20 一字未动**、**产物 200644 → 200700**
+> （宿主镜像 199898 + blob 738 + 段尾 64 —— 只因为 `infy_rt.c` 多一个函数，build-id 的输入里没有宿主镜像）、
+> `infy conformance --report` 仍 **83 = 77/0/6 ⇒ exit 1**（92.8% · 缺口 2217）、四条 C 链全绿
+> （两份 `-c` 各 stderr **0 字节**、rt **32353 / 0**（+13 = cancel 四组）、两条 IFBC 各 **180/180** + `cmp` 无差异）。
+> **开头清掉的债 + 关闭的判据**：远端 `toolchain` 回查 = **`1bf2bbc`** = 本地 HEAD ⇒ 现算欠账 **0**
+> （cron-34 收尾那笔故意不推的补记已被后续推送带走）；**run #18**（`39010035031`，head `9d8dd91`）与
+> **run #19**（`39013982172`，head `1bf2bbc`）都 = **completed success**，`gh run view … --log`
+> （989 行 → `target/scratch/ci-run18.log` / `ci-run19.log`）两条的**步 7 均实录 `561 passed; 0 failed`**
+> ⇒ **F11 的远端判据到此关闭**（`git merge-base --is-ancestor af7a668 1bf2bbc` rc **0** ⇒ #19 的树含 F11 交付）。
+> **本轮新增的常驻面（下一轮直接用）**：① 清理项的"取消"入口只有 `infy_cleanup_cancel(void*)`
+> （按地址、跳过 scope 哨兵、`obj == 0` 返回 0、`#[must_drop]` 仍 `R-0730`）—— **任何新增的移动/搬迁都必须
+> 同时清 `Binding.pop` 槽位**，否则 emitted C 的 `push` 与答案不再一一配对（机检 = `cleanup_ledger`）；
+> ② `chain` 体的语句循环现在自带两层守卫（关键字走 `E-0300` + `linkage_stmt()` 消费整条，其余走
+> `synchronize()`/`bump()`）—— 别再假设 `stmt()` 返回 `None` 就等于"调用方会前进"；
+> ③ `resume` 与 `goto`/`start`/`start_flag` **不同族**（`parser.rs:1835` 有普通语句臂），判 §8.1 时别混；
+> ④ 语料 `target/scratch/f12/`（`m1_let|m2_call|m3_ret|z_shapes|g_*|v_*|w_*|x_*|p*|y_atrack`，
+> **每份自带 `MODULE.infy.toml`**，少了会被父目录清单吸进去变 `E-0501`）；
+> ⑤ 本轮新脚本 `scripts/sync-doc-numbers-f12.py`（默认干跑 / 幂等 / 逐条 expected / 落
+> `logs/sync-doc-numbers-f12.log`，14 条规则全 ALL-OR-NOTHING）。
+> **措辞红线（本轮）**：不许说"owned 值现在处处能移动"（跨 A 轨与链帧仍被上游拒：`E-0723` / `emit_chain`）；
+> 不许说 `infy_cleanup_cancel` 会**搬迁**所有权（它只摘除，`relocate` 从未实现）；不许说"链体顶层的连携语句
+> 语义已完整"（`resume` 那一半 = F54）；不许把 F53 说成"测试驱动发现的红灯"（修前一条测试都不红）。
+> 既有红线不变：覆盖 83/2300 ⇒ 不得声称「INFY v2.0 兼容」；`[u32; 后声明的 const]` 仍只是显式拒绝（F52②）；
+> 阶段 [4] 的字段类型仍解析两遍（F52①）；不许说"派生代码的类型标注可信"（F49 未修）。
+> **下一轮 = ①** 现算欠账补推（本轮两笔：代码 `13fba7b` + 做账）+ 回查覆盖本轮交付树的那条 run
+> （**步 7 现在应打 570 passed**；`cancelled` 既不是红也不是绿；红了先分辨是不是这十条新锁点，**不许**为此
+> 放宽断言；一次交付只推一笔）。**②** §1 第一个 `[ ]` = **F13**（`-128` 这类无后缀负字面量被阶段 [4] 判
+> `E-0110`：一元负号只接受 `is_signed() || is_float()` 的 `Ty::Prim`，而 §4.13 规则 2 让无后缀字面量取
+> `Ty::IntLit` ⇒ `fn g() -> i32 { -128 }` 报错；验收 = 取上下文类型后做 §2.8 范围检查，成对测试
+> `-128` 通过 / `fn g() -> u32 { -1 }` 报 `E-0111`）。**③** 卫生欠账顺手收：全仓 `while !at(…) && !at_end()`
+> 形状的循环**还有几处没有前进守卫**（本轮只按语料命中面数了 `chain` 这一处，未做全量清点，见 F53 末段）。
 
 > **F11 轮收尾（2026-10-17）：F11 勾 `[x]`，本段取代下一段** —— 交付提交 **`af7a668`**
 > （`sema` 的 Array 类型臂改「求值或 `E-0131` + `Ty::Invalid`」+ `const_eval_usize` 的 `u128 as u64` 换

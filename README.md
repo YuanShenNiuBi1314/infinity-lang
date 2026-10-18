@@ -20,7 +20,7 @@
   步 3-12 逐条 `success` ⇒ 步 7 = **548 passed / 0 failed**、步 10 = rt **32340 assertions, 0 failures**、
   步 11 = IFBC 两条链各 **180 asserts, 180 pass, 0 FAIL**、步 12 tour 产物 **221823**（宿主镜像 221021 + blob 738 + 段尾 64）
   ⇒ BACKLOG **F1 已勾 `[x]`**，读法是「**认包含交付的那个 commit 触发的 run**」，任何一次 run 变红就重新打开。**读远端日志时记住一条口径**：产物字节与 `build-id`
-  是宿主 `cc` 的函数（runner 的 `gcc 15.2.0` 产 221666 字节，本机 MSYS2 `gcc 16.2.0` 产 200644 字节（F8 轮改 `infy_rt.c` 后；改前 199975）；段 blob 738 +
+  是宿主 `cc` 的函数（runner 的 `gcc 15.2.0` 产 221666 字节，本机 MSYS2 `gcc 16.2.0` 产 200700 字节（F8 轮改 `infy_rt.c` 后；改前 199975）；段 blob 738 +
   段尾 64 与生成的 C11 12512 字节两侧相同 —— **F6 轮把 tour 按 §9.5 规范化后是 12512**，D-17 裁决前两侧都是 12513），所以 CI 只打印这些数、不门禁它们
 - License: MIT
 
@@ -74,7 +74,7 @@ infy conformance --update-golden       # §12.4 要求显式授权；带 --i-kno
 | §12 / §12.5 | 合规套件：用例格式 + 分类表 + 运行器 + `infy conformance --report` 的**逐分类**通过率 + 通过率表落进文档 | 🟡 E1 轮落成 `src/conformance.rs`（分类表逐字抄 §12.1/§12.2/§12.5 的 20 行，合计 1244/256/800/2300 由单测钉住；用例格式 = 一个用例一个目录 `case.toml` + 逐字节源文件，裁定见偏差 **D-47**；运行器走 `cli::check_verdict` = `infy check` 自己那条链，不是第二套前端）+ `conformance/cases/**` 首批 **83 条 / 17 个分类**；**E2 轮把命令行接上** = 逐分类通过率 20 行一行不少、空分类的通过率列打 `n/a`、`Blocked` 进分母不进分子并逐条打 `defect=F34/F35/F36/F37`、退出码裁定 = 偏差 **D-48(a)**（今天 `83 条：Pass 77 / Fail 0 / Blocked 6` ⇒ **exit 1**）；**E3 轮把那份数字落成对外表格** = `docs/coverage.md` §6（20 行 × 11 列 + 三档小计 + 合计 + 缺口三分类），表里每个数字由 `conformance::tests::the_pass_rate_table_in_coverage_md_matches_the_corpus` 逐格对回 `conformance::tally`（副本漂了就红），红线本身由 `no_markdown_doc_claims_the_compatibility_name` + `the_front_facing_docs_restate_the_refusal` 机检。**仍 🟡 而且不能声称合规**：覆盖 **83/2300 ≈ 3.6%**，三个分类结构性缺用例（F38 / F19 / `host.rs` 占位），比较面只有【诊断码 + 退出码】而 §12.3 的黄金文件与 §12.4 的等价性矩阵不进 `cases/**`（`--update-golden` 两分支都拒 = D-48(e)；矩阵四档一档都跑不了 = F12/F19/F29/F31/F32）|
 | 运行时 | 检查型算术、drop/defer 序、Vec/String 增长因子、NFC 比较、Map/VecMap/Deque 序、`xxHash64`、`std.fmt` 字节精确、SplitMix64+PCG32、无偏 Fisher–Yates、ResourceLock FIFO、焦点调度与 `focus`/`chain` 半径、§9.2 渲染、产物容器、host 三步握手、`std.fs` | ✅ 对 harness 而言：`gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c` → **32340 assertions / 0 failures**（0 error / 0 warning，链的是生产 `infy_rt.c`）。IFBC 那 180 断言 B2 轮起也链生产 `infy_rt.c`（同为 180/180，输出逐字节相同），且 D4(3) 轮起两侧读**同一份规范化文本**。仍不等于 §12 合规：外部用例已有 83 条而 §12 要求 2300（P28/E1） |
 
-`cargo test --offline --lib` 目前 **561 passed / 0 failed**（**F11 轮 555 → 561**：`sema` 24 → **29** · `hir` 21 → **22** = `[T; N]` 的长度"要么按 §2.12 求出来、要么显式 `E-0131`"的六条锁点，两处长度读取口同时去掉 `as u64` 折位，裁定 = 偏差 **D-53**，实测行为见 `docs/coverage.md` 的 **P35** 与 `docs/status.md` 的 F11 一节；**F10/F51 轮 551 → 555**：`cli` 46 → **47** · `fmt` 40 → **41** · `parser` 10 → **11** · `sema` 23 → **24** = 超宽枚举判别式按层报 `E-0042` 的四条锁点，裁定 = 偏差 **D-52**，实测行为见 `docs/coverage.md` 的 **P34** 与 `docs/status.md` 的 F10/F51 一节；**F9 轮 548 → 551**：整数字面量收成单一形状 `ExprKind::Lit(Lit::Int)`，删掉 `ast::ExprKind::Int` 变体连同 14 处判据，并补上 F2 轮欠的 `parser::primary()` 臂顺序锁，见 `docs/status.md` 的 F9 一节。另有 **83 条 §12 外部用例**：77 Pass / 6 Blocked / 0 Fail，`infy conformance --report` 打的正是这一份数字，见下）（`cargo check --offline --lib` 0 error / **0 warning** —— F2 轮把 50 条一次清零，两处「没接上」因此接上：§9.6 的 `[lints]` 与 wheel 归档的成员偏移，见 `docs/status.md` 的 F2 一节；
+`cargo test --offline --lib` 目前 **570 passed / 0 failed**（**F12/F53 轮 561 → 570**：`codegen` 27 → **33** · `parser` 11 → **14**；上一档 **F11 轮 555 → 561**：`sema` 24 → **29** · `hir` 21 → **22** = `[T; N]` 的长度"要么按 §2.12 求出来、要么显式 `E-0131`"的六条锁点，两处长度读取口同时去掉 `as u64` 折位，裁定 = 偏差 **D-53**，实测行为见 `docs/coverage.md` 的 **P35** 与 `docs/status.md` 的 F11 一节；**F10/F51 轮 551 → 555**：`cli` 46 → **47** · `fmt` 40 → **41** · `parser` 10 → **11** · `sema` 23 → **24** = 超宽枚举判别式按层报 `E-0042` 的四条锁点，裁定 = 偏差 **D-52**，实测行为见 `docs/coverage.md` 的 **P34** 与 `docs/status.md` 的 F10/F51 一节；**F9 轮 548 → 551**：整数字面量收成单一形状 `ExprKind::Lit(Lit::Int)`，删掉 `ast::ExprKind::Int` 变体连同 14 处判据，并补上 F2 轮欠的 `parser::primary()` 臂顺序锁，见 `docs/status.md` 的 F9 一节。另有 **83 条 §12 外部用例**：77 Pass / 6 Blocked / 0 Fail，`infy conformance --report` 打的正是这一份数字，见下）（`cargo check --offline --lib` 0 error / **0 warning** —— F2 轮把 50 条一次清零，两处「没接上」因此接上：§9.6 的 `[lints]` 与 wheel 归档的成员偏移，见 `docs/status.md` 的 F2 一节；
 D4(1) 轮把 `ifbc` 从 6 项抬到 **19** 项，并删掉 `CodeBuilder` 的一个死字段，告警 −1；D4(2) 轮 +1 = 钉
 "Rust 写入器的字节 == 已提交夹具"；D4(3) 轮 +2 = `ifbc` **22** 项，钉"本侧渲染的规范化文本 == C 侧渲染并
 提交的那份"；D1(1) 轮 +23 = `btrack` 从 **0** 到 **23**、D1(2) 轮到 **30** 项，钉 §7.7.1 探针、§7.7.2 五个扫描项、§7.7.3 版本锁
@@ -98,7 +98,7 @@ C3 轮新建的 `artifact` 直接带 **18** 项（§7.4 容器逐字段读回、
 探针/扫描/降级路径 —— 阶段 [6a] 至今没有 CLI 调用点；`hir` 于 C1 轮补了 20 项声明层金样，语句/表达式级 IFIR 仍未落 ——
 阶段 [8] 是 AST→C 直接发射）。
 C 侧另有两份独立 harness，**两份都直接链生产 `runtime/infy_rt.c`**：`runtime/test_rt.c` →
-**32340 assertions / 0 failures**（B1 轮收敛，`-Wall -Wextra` 零告警；C3 轮起其中 27 项是把 **Rust 写入器**的
+**32353 assertions / 0 failures**（B1 轮收敛，`-Wall -Wextra` 零告警；**F12 轮 32340 → 32353** = `infy_cleanup_cancel` 的四组；C3 轮起其中 27 项是把 **Rust 写入器**的
 逐字节夹具 `runtime/fixtures/artifact_rust_writer.bin` 交给生产读取器 `infy_art_read_file` = Rust 写 ↔ C 读）；
 `runtime/test_ifbc.c` →
 **180 asserts, 180 pass, 0 FAIL**（B2 轮真实链接、D4(2) 轮对齐 D-38 的唯一线格式后 82 → 146，D4(3) 轮的
@@ -114,10 +114,16 @@ A 轨只落了 `@c` + `cc` + 标量/指针跨边界那一半（§7.6.2 工具链
 `infy build` 的阶段 [10]（产物签名/sumdb 校验段与运行时自校验比对，§5.8）**未做** —— 容器里写了依赖 dirhash 清单，但没人拿它去比对；
 `src/hir.rs` 与 `src/codegen.rs` 不再是占位文件：前者只落**声明层**（类型布局、链节点表、`env` 偏移、符号名），
 后者发射 C11 但**没有独立的语句/表达式级 IR**；
-`src/codegen.rs` 明确拒绝的构造（逐条指名条款，见偏差 D-26…D-31/D-46 与 BACKLOG F12…F15/F31）：闭包、`dyn`、
+`src/codegen.rs` 明确拒绝的构造（逐条指名条款，见偏差 D-26…D-31/D-46 与 BACKLOG F13…F15/F31；F12 已在
+F12 轮从这份名单里出去，见下）：闭包、`dyn`、
 `@embed` 的 B 轨半边（F29）、A 轨 §7.6.4 里那五类「规范允许但还没有发射形态」的跨边界类型（ptr+len 展开、
 null→`Option`、`Result` 出参、回调 ctx、struct 按值）、`event` 调用、`for`/`defer`/`const_assert`、128 位算术与字面量、窄位宽移位、
-`overflow = "saturate"`、含 NUL 的 `str` 字面量、字节串字面量、owned 值的三种移动形式；
+`overflow = "saturate"`、含 NUL 的 `str` 字面量、字节串字面量；
+**owned 值的三种移动形式以前也在这条名单里（F12 / D-31），现在不是了** —— `let d = s`、把 owned 值按值
+传给形参、`return s`（含 `return P { s }`）都会发射 `infy_cleanup_cancel(&源)`，且目的地仍各答一次清理，
+成对关系由 `codegen::tests` 核对 `push` 数 == `pop_run` + `pop_noop` + `cancel` 数的六条锁点钉住；
+**但两条"移动"仍被上游拒**（不是 codegen 的事）：跨 A 轨边界的 owned 形参在阶段 [4] 就 `E-0723`
+（§7.6.4 的行 3/末条），带析构器的链帧局部由 `emit_chain` 在铺帧前拒；
 `infy test --cov`（§12.4 的 `-O0` 节点表插桩没有阶段产出，显式 exit 1，BACKLOG F22）、
 `infy test --bench` 依赖的 `std/test`（§14.7 的 `test::Bench`/`b.iter()` 与 `test::assert_eq` 在 §10 的 std
 签名表里**一条都没有**，故有参数的 `#[bench]` 一律拒绝并点名本条，BACKLOG F21）、
@@ -154,7 +160,8 @@ null→`Option`、`Result` 出参、回调 ctx、struct 按值）、`event` 调�
 4. **§12.3 / §12.4 不进 `cases/**` 的那一面（第四类，不在这 92.8% 里）**：黄金文件（`--update-golden` 两个分支
    都拒绝 = D-48(e)；黄金文本由 `runtime/fixtures` 的两侧写入器生成 = D-45(b)，真接还需要 **F29**）、
    §12.4 的等价性矩阵（wheel ≡ 源码、`-O0` ≡ `-O3`、`lto=false` ≡ `fat`、A 轨同进程 ≡ `isolation = "process"`
-   ⇒ **一档都跑不了**，因为 **F12/F19/F29/F31/F32** 都还开着）、以及比较面本身只有【诊断码多重集 + §13.4 退出码】
+   ⇒ **一档都跑不了**，因为 **F19/F29/F31/F32** 都还开着（F12 已在 F12 轮关掉，但 §12.4 需要的"同一程序的
+   可观察输出"仍缺 stdout 通道与 IFBC 调用通道）、以及比较面本身只有【诊断码多重集 + §13.4 退出码】
    （§9.2 的位置与文本、§9.4 的 `--diag-json` 结构在用例格式之外）。
 
 红线现在是**机检**而不只是约定：`conformance::tests::no_markdown_doc_claims_the_compatibility_name` 扫全仓 `.md`
