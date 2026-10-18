@@ -24,7 +24,7 @@ use crate::ast::{
 use crate::hir::{HirCrate, HirEntry, HirItem, Layout, Target};
 use crate::sema::{ChainInfo, ConstValue, Program, TestKind, Ty};
 use crate::span::{FileId, Sources};
-use crate::token::{Lit, Punct};
+use crate::token::{IntLit, Lit, Punct};
 
 /// §7.2's built-in target set; anything else must be registered in `TOOLCHAIN.infy.toml`, else
 /// `E-0601`.
@@ -1260,20 +1260,11 @@ impl<'a> Cg<'a> {
                     format!("{f}")
                 }
             }
-            ConstValue::Int(i) => {
-                let u: u128 = if i < 0 {
-                    (-(i as i128)) as u128
-                } else {
-                    i as u128
-                };
-                let text = self.numeric_text(u, ty)?;
-                if i < 0 {
-                    format!("(-{text})")
-                } else {
-                    text
-                }
+            ConstValue::Int(i) => self.numeric_text(i, ty)?,
+            ConstValue::UInt(u) => {
+                let v = i128::try_from(u).map_err(|_| CgError::new("§2.8", "codegen: 常量值超出 i128（`stdint.h` 没有 u128 宏可写）"))?;
+                self.numeric_text(v, ty)?
             }
-            ConstValue::UInt(u) => self.numeric_text(u, ty)?,
         })
     }
 
@@ -2575,24 +2566,41 @@ impl<'a> Cg<'a> {
                 Ok(Val::of(ty, text))
             }
             Lit::Int(i) => {
-                let ty = match want {
-                    Some(t) if t.is_integer() => t.clone(),
-                    _ => self.prog.ty(e.span).cloned().unwrap_or(Ty::Prim(Prim::I32)),
-                };
-                let ty = if matches!(ty, Ty::IntLit) || ty.text() == "<int-literal>" {
-                    Ty::Prim(Prim::I32)
-                } else {
-                    ty
-                };
-                let v = i.value.ok_or_else(|| CgError::new("§2.8", "codegen: 整型字面量超出 i128"))?;
+                let ty = self.int_lit_type(e, want);
+                let v = Self::int_lit_value(i)?;
                 Ok(Val::of(ty.clone(), self.numeric_text(v, &ty)?))
             }
         }
     }
 
+    /// §4.13 rule 2: an unsuffixed integer literal takes the context type, else what stage [4]
+    /// recorded for it, else `i32`. `Ty::IntLit` *is* the "stage [4] has not decided yet" shape, so
+    /// it is normalized here too — the same rule the `binary_operand_types` widening applies.
+    fn int_lit_type(&mut self, e: &Expr, want: Option<&Ty>) -> Ty {
+        let ty = match want {
+            Some(t) if t.is_integer() => t.clone(),
+            _ => self.prog.ty(e.span).cloned().unwrap_or(Ty::Prim(Prim::I32)),
+        };
+        if matches!(ty, Ty::IntLit) {
+            Ty::Prim(Prim::I32)
+        } else {
+            ty
+        }
+    }
+
+    /// §2.8: the digits as a signed number. Only a value wider than `i128` needs refusing, and the
+    /// only types that could hold it (`u128`/`i128`) have no `stdint.h` macro and are refused below.
+    fn int_lit_value(i: &IntLit) -> Result<i128, CgError> {
+        let v = i.value.ok_or_else(|| CgError::new("§2.8", "codegen: 整型字面量超出 i128"))?;
+        i128::try_from(v).map_err(|_| CgError::new("§2.8", "codegen: 整型字面量超出 i128"))
+    }
+
     /// §2.8: the literal's value must fit the resolved type. `sema` checks this, so a failure here
     /// means the two stages disagree — refuse loudly instead of emitting a wrapped constant.
-    fn numeric_text(&mut self, v: u128, ty: &Ty) -> Result<String, CgError> {
+    /// The value is **signed**: §2.8 lets `-128i8` through because the negated value is what must be
+    /// representable, and a magnitude-only `u128` cannot say that (it would have to be re-negated by
+    /// every caller, which is how `const K: i8 = -128;` came to be refused here).
+    fn numeric_text(&mut self, v: i128, ty: &Ty) -> Result<String, CgError> {
         let p = match ty {
             Ty::Prim(p) => *p,
             Ty::Bool => return Ok(if v == 0 { "0".to_string() } else { "1".to_string() }),
@@ -3206,12 +3214,22 @@ impl<'a> Cg<'a> {
                 Ok(Val::of(Ty::Bool, format!("(!({}))", v.text)))
             }
             Punct::Minus => {
+                // §2.8: `-128i8` (and the unsuffixed `-128`) are legal because the **negated** value is
+                // what must be representable, so a literal operand is folded into its negated
+                // constant instead of asking the C compiler for a magnitude its type cannot hold.
+                if let ExprKind::Lit(Lit::Int(i)) = &e.kind {
+                    let ty = self.int_lit_type(e, want);
+                    let v = Self::int_lit_value(i)?
+                        .checked_neg()
+                        .ok_or_else(|| CgError::new("§2.8", "codegen: 整型字面量取负溢出"))?;
+                    return Ok(Val::of(ty.clone(), self.numeric_text(v, &ty)?));
+                }
                 let v = self.expr(e, want)?;
                 match &v.ty {
                     Ty::Prim(p) if p.is_signed() || p.is_float() => Ok(Val::of(v.ty.clone(), format!("(-({}))", v.text))),
                     Ty::Prim(p) => Err(CgError::new(
                         "§4.4",
-                        format!("codegen: 无符号类型 {} 不能取负（E-0111 属阶段 [4]）", p.text()),
+                        format!("codegen: 无符号类型 {} 不能取负（字面量形状已由阶段 [4] 按 §2.8 报 E-0042/E-0043，见偏差 D-55；非字面量形状只能在这里显式拒绝）", p.text()),
                     )),
                     other => Err(CgError::new("§4.4", format!("codegen: `-` 不适用于 {}", other.text()))),
                 }
@@ -4286,12 +4304,21 @@ mod tests {
     }
 
     /// §2.8: a literal is written with the `stdint.h` macro for its resolved type, so the C type
-    /// cannot drift from the HIR type on a target with a different `int` width.
+    /// cannot drift from the HIR type on a target with a different `int` width. A negated literal is
+    /// folded into the **negated** constant, because §2.8 makes the negated value the thing that has
+    /// to be representable — `(-(INT8_C(128)))` would ask for a magnitude no `i8` can hold.
     #[test]
     fn literals_carry_their_resolved_width() {
         let t = emit_of("fn f() -> u64 { 4294967296 }\nfn g() -> i32 { -128i32 }\nfn h() -> bool { true }");
         assert!(t.contains("UINT64_C(4294967296)"), "{t}");
-        assert!(t.contains("(-(INT32_C(128)))"), "{t}");
+        assert!(t.contains("INT32_C(-128)"), "{t}");
+        assert!(!t.contains("(-(INT32_C(128)))"), "the magnitude form is what F13 replaced:\n{t}");
+        // §2.8's exception, unsuffixed and suffixed, at the width where only the negation fits.
+        let s = emit_of("fn g() -> i8 { -128i8 }\nfn k() -> i8 { -128 }");
+        assert_eq!(s.matches("INT8_C(-128)").count(), 2, "{s}");
+        // §2.12: a `const` carries the same signed value, not a re-negated magnitude.
+        let c = emit_of("const K: i8 = -128;\nfn g() -> i8 { K }");
+        assert!(c.contains("INT8_C(-128)"), "{c}");
         // §1: `bool` is `uint8_t` with only 0x00/0x01 legal, and `<stdbool.h>` is not in the contract.
         assert!(t.contains("return 1u;"), "{t}");
         assert!(!t.contains("return true;"), "{t}");

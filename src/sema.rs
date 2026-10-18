@@ -702,6 +702,12 @@ impl<'a> Checker<'a> {
                     Some(t) => self.ty_from_ast(t, &generics),
                     None => Ty::Invalid,
                 };
+                // §2.12 evaluates a `const` initializer instead of `check_expr`, so §2.8's range rule
+                // has to be applied here or the value ships unchecked (F13: `const K: u8 = -1;` used
+                // to be green at [4] and stay green through the artifact).
+                if let Some(e) = init {
+                    self.check_int_in_ctx(e, &Ty::IntLit, &t, name.as_str());
+                }
                 let value = init.as_ref().and_then(|e| self.const_eval(e));
                 if init.is_some() && value.is_none() && !matches!(init.as_ref().map(|e| &e.kind), Some(ExprKind::StructLit { .. } | ExprKind::Path(_) | ExprKind::Lit(_) | ExprKind::Call { .. })) {
                     self.emit("E-0060", span, "编译期求值遇到禁止构造", name, Some("const 初始值必须是编译期可求值的封闭构造（§2.12）".into()), None);
@@ -713,6 +719,9 @@ impl<'a> Checker<'a> {
             ItemKind::Static { name, ty, init, is_mut, .. } => {
                 let generics = BTreeSet::new();
                 let t = match ty { Some(t) => self.ty_from_ast(t, &generics), None => Ty::Invalid };
+                if let Some(e) = init {
+                    self.check_int_in_ctx(e, &Ty::IntLit, &t, name.as_str());
+                }
                 let value = init.as_ref().and_then(|e| self.const_eval(e));
                 let idx = self.prog.statics.len();
                 self.prog.statics.push(ConstInfo { name: name.clone(), package: package.to_string(), ty: t, value, file: span.file, span, is_mut: *is_mut });
@@ -1040,7 +1049,7 @@ impl<'a> Checker<'a> {
                     // re-checking it here would evaluate it after that scope was popped and report a
                     // false "undeclared identifier" for every binding the block introduced.
                     let ty = self.prog.ty(t.span).cloned().unwrap_or(Ty::Invalid);
-                    self.coerce_return(&ty, t.span, &sig.name);
+                    self.coerce_return(&ty, t.span, &sig.name, Some(t));
                 }
                 None => {
                     if !matches!(self.ret_ty, Ty::Unit | Ty::Never | Ty::Invalid) {
@@ -1056,9 +1065,65 @@ impl<'a> Checker<'a> {
         !sig.params.is_empty() && sig.params[0].name == "self"
     }
 
-    fn coerce_return(&mut self, ty: &Ty, span: Span, name: &str) {
+    /// §2.8 with §4.13: an adaptable integer literal takes the context type, but only as far as that
+    /// type can represent it — the same "no wrap, no saturate" rule §2.8 states for suffixed
+    /// literals. Only a value whose own inferred type is still `Ty::IntLit` is checked here: once
+    /// §2.8 has given a literal a type of its own (non-decimal beyond `i32`), a miss against the
+    /// context is the `E-0110` the caller reports, not a second diagnostic for one root cause (F36).
+    fn check_int_in_ctx(&mut self, e: &Expr, got: &Ty, want: &Ty, site: &str) {
+        if !matches!(got, Ty::IntLit) {
+            return;
+        }
+        let p = match want {
+            Ty::Prim(p) => *p,
+            Ty::Ref { inner, .. } | Ty::Boxed { inner } => match &**inner {
+                Ty::Prim(p) => *p,
+                _ => return,
+            },
+            _ => return,
+        };
+        if !p.is_integer() {
+            return;
+        }
+        let v = match adaptable_int_value(e) {
+            Some(v) => v,
+            None => return,
+        };
+        if !int_value_fits(p, v) {
+            self.emit("E-0042", e.span, format!("字面量超出可表示范围：{}（目标类型 {}）", v, p.text()), site, Some("§2.8：不回绕、不饱和；§4.13 让无后缀字面量取上下文类型".into()), Some(format!("换个落得进 {} 的值，或把目标类型换宽", p.text())));
+        }
+    }
+
+    /// §2.8: `-5` is unary minus over the literal `5`, and the negated value must still be
+    /// representable in the literal's own type — that is what makes `-128i8` legal and `-1u32` a
+    /// range error. A literal with no suffix has no type of its own yet, so it is the context's
+    /// problem (`check_int_in_ctx`), not this one; a non-literal operand is left to stage [8],
+    /// which refuses `-x` on an unsigned type by name.
+    fn negated_literal_check(&mut self, operand: &Expr, p: Prim, span: Span) {
+        if p.is_signed() || p.is_float() {
+            return;
+        }
+        let i = match &operand.kind {
+            ExprKind::Lit(Lit::Int(i)) => i,
+            _ => return,
+        };
+        if i.value.map(|v| v == 0).unwrap_or(true) {
+            return;
+        }
+        let (code, msg) = match &i.suffix {
+            Some(suf) => ("E-0043", format!("带后缀字面量溢出：-{}{}", i.digits, suf)),
+            None => ("E-0042", format!("字面量超出可表示范围：-{}（该字面量的类型是 {}）", i.digits, p.text())),
+        };
+        self.emit(code, span, msg, &i.digits, Some("§2.8：负数是一元负号加字面量；加宽后整体必须落在目标类型范围内".into()), Some("换更宽后缀，或改用 std.num 的显式包装运算".into()));
+    }
+
+    fn coerce_return(&mut self, ty: &Ty, span: Span, name: &str, value: Option<&Expr>) {
         if matches!(self.ret_ty, Ty::Unit | Ty::Invalid | Ty::Never) && matches!(ty, Ty::Unit | Ty::Invalid) {
             return;
+        }
+        if let Some(e) = value {
+            let want = self.ret_ty.clone();
+            self.check_int_in_ctx(e, ty, &want, name);
         }
         if !type_compatible(&self.ret_ty, ty) {
             self.emit("E-0110", span, format!("返回值类型不匹配：期望 {}，实际 {}", self.ret_ty.text(), ty.text()), name, Some("§4.2：赋值、参数、返回值、泛型实参必须 100% 类型兼容".into()), Some("显式 `as` 转换，或修正签名".into()));
@@ -1090,6 +1155,7 @@ impl<'a> Checker<'a> {
                             if !type_compatible(d, &t) && !matches!(t, Ty::Invalid) {
                                 self.emit("E-0110", e.span, format!("绑定类型不匹配：声明 {}，实际 {}", d.text(), t.text()), name, Some("§4.2 无隐式转换（UB-001）".into()), Some("显式 `as`，或修正声明".into()));
                             }
+                            self.check_int_in_ctx(e, &t, d, name.as_str());
                         }
                         t
                     }
@@ -1101,9 +1167,19 @@ impl<'a> Checker<'a> {
                     // only for the shape its own note names — one root cause, one diagnostic (F36).
                     self.emit("E-0131", s.span, "绑定类型无法确定", name, Some("既无类型标注也无初始化表达式（§4.1）".into()), None);
                 }
-                // §4.13 rule 7: an unconstrained integer literal defaults to `i32`.
+                // §4.13 rule 2's priority order: the explicit annotation outranks the literal. A
+                // binding written `var x: u8 = 0;` is `u8` — leaving it as `Ty::IntLit` let the
+                // annotation be dropped on the floor, and `let y: u32 = x;` then passed (UB-001).
+                // With no annotation, an integer literal defaults to `i32`, and §2.8's range rule is
+                // then checked against that default.
                 let actual = match (&actual, &declared) {
-                    (Ty::IntLit, None) => Ty::Prim(Prim::I32),
+                    (Ty::IntLit, Some(d)) => d.clone(),
+                    (Ty::IntLit, None) => {
+                        if let Some(e) = init {
+                            self.check_int_in_ctx(e, &Ty::IntLit, &Ty::Prim(Prim::I32), name.as_str());
+                        }
+                        Ty::Prim(Prim::I32)
+                    }
                     _ => actual,
                 };
                 self.declare(name, actual, *is_var);
@@ -1115,6 +1191,7 @@ impl<'a> Checker<'a> {
                 if !type_compatible(&tt, &vt) && !matches!(vt, Ty::Invalid) && !matches!(tt, Ty::Invalid) {
                     self.emit("E-0110", value.span, format!("赋值类型不匹配：左值 {}，右值 {}", tt.text(), vt.text()), "赋值", Some("§4.2 无隐式转换".into()), None);
                 }
+                self.check_int_in_ctx(value, &vt, &tt, "赋值");
                 // §4.3: assigning to a `let` binding is E-0120
                 let name = match &target.kind { ExprKind::Ident(x) => Some(x.clone()), ExprKind::Path(p) => p.last().cloned(), _ => None };
                 if let Some(name) = name {
@@ -1199,7 +1276,7 @@ impl<'a> Checker<'a> {
                 if let Some(v) = value {
                     let t = self.check_expr(v);
                     if matches!(&s.kind, StmtKind::Return { .. }) {
-                        self.coerce_return(&t, v.span, "return");
+                        self.coerce_return(&t, v.span, "return", Some(v));
                     }
                 } else if matches!(&s.kind, StmtKind::Return { .. }) && !matches!(self.ret_ty, Ty::Unit | Ty::Never) {
                     self.emit("E-0053", s.span, "return 缺少值", format!("期望返回 {}", self.ret_ty.text()), None, None);
@@ -1515,7 +1592,16 @@ impl<'a> Checker<'a> {
                             };
                         }
                         match &t {
-                            Ty::Prim(p) if p.is_numeric() => t,
+                            Ty::Prim(p) if p.is_numeric() => {
+                                let p = *p;
+                                self.negated_literal_check(expr, p, e.span);
+                                t
+                            }
+                            // §4.13 rule 2: an unsuffixed literal has no type of its own yet, so
+                            // minus over one is still an unsuffixed literal — §2.8's range rule then
+                            // runs against the context (`check_int_in_ctx`). Reporting `E-0110` here
+                            // was BACKLOG F13: `fn g() -> i32 { -128 }` could not be written at all.
+                            Ty::IntLit => t,
                             Ty::Invalid => Ty::Invalid,
                             other => {
                                 self.emit("E-0110", e.span, "一元负号作用于非数值类型", format!("{}", other.text()), Some("§4.4：无隐式转换".into()), None);
@@ -1538,6 +1624,13 @@ impl<'a> Checker<'a> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let l = self.check_expr(lhs);
                 let r = self.check_expr(rhs);
+                // §2.8/§4.13: whichever side is an adaptable literal, its value must fit the other
+                // side's type. `<<`/`>>` keep both sides out of this — §4.12 makes a shift count of
+                // at least the type width a runtime `R-0007`, not a literal range error.
+                if !matches!(op, Punct::Shl | Punct::Shr) {
+                    self.check_int_in_ctx(lhs, &l, &r, "运算");
+                    self.check_int_in_ctx(rhs, &r, &l, "运算");
+                }
                 self.binop_ty(*op, &l, &r, e.span)
             }
             ExprKind::Assign { target, op, value } => {
@@ -1546,6 +1639,7 @@ impl<'a> Checker<'a> {
                 if !type_compatible(&tt, &vt) && !matches!(vt, Ty::Invalid) && !matches!(tt, Ty::Invalid) {
                     self.emit("E-0110", value.span, format!("赋值类型不匹配：左值 {}，右值 {}", tt.text(), vt.text()), "赋值", Some("§4.2：无隐式数字转换（UB-001）".into()), Some("显式 `as`".into()));
                 }
+                self.check_int_in_ctx(value, &vt, &tt, "赋值");
                 // §4.3: `let` is an immutable binding. This is the only reachable assignment path —
                 // §3.5 parses `x = 2` as an assignment *expression*, so `StmtKind::Assign` never occurs.
                 if let ExprKind::Ident(n) = &target.kind {
@@ -1681,6 +1775,7 @@ impl<'a> Checker<'a> {
                             if !type_compatible(i, &t) && !matches!(t, Ty::Invalid) {
                                 self.emit("E-0110", x.span, "数组元素类型不一致", format!("期望 {}，实际 {}", i.text(), t.text()), None, None);
                             }
+                            self.check_int_in_ctx(x, &t, i, "数组元素");
                         }
                         None => inner = Some(t),
                     }
@@ -1708,9 +1803,11 @@ impl<'a> Checker<'a> {
                     if let Some(si) = si {
                         match self.prog.structs[si].fields.iter().find(|(n, _, _)| n == fname) {
                             Some((_, ty, _)) => {
-                                if !type_compatible(ty, &vt) && !matches!(vt, Ty::Invalid) {
+                                let ty = ty.clone();
+                                if !type_compatible(&ty, &vt) && !matches!(vt, Ty::Invalid) {
                                     self.emit("E-0110", v.span, format!("字段 `{fname}` 类型不匹配：期望 {}，实际 {}", ty.text(), vt.text()), fname, Some("§4.2".into()), None);
                                 }
+                                self.check_int_in_ctx(v, &vt, &ty, fname.as_str());
                             }
                             None => self.emit("E-0110", v.span, format!("{tn} 无字段 `{fname}`"), fname, None, None),
                         }
@@ -1952,10 +2049,16 @@ impl<'a> Checker<'a> {
             Some(v) => {
                 if i.radix == crate::token::Radix::Dec {
                     if v > i64::MAX as u128 && v <= u128::MAX {
-                        // decimal, no suffix, beyond i64 → E-0042 (§2.8)
+                        // decimal, no suffix, beyond i64 → E-0042 (§2.8). `Ty::Invalid`, not `IntLit`:
+                        // the value has already been rejected, and leaving it adaptable made the
+                        // context rule report the same root cause a second time (one cause, one
+                        // diagnostic — docs/BACKLOG.md F36), and the non-decimal arm below has always
+                        // returned `Invalid` for exactly this shape.
                         self.emit("E-0042", span, format!("字面量超出可表示范围：{}", i.digits), "无后缀十进制整型上限为 i64", Some("§2.8".into()), Some("加后缀，如 12345678901234u64".into()));
+                        Ty::Invalid
+                    } else {
+                        Ty::IntLit
                     }
-                    Ty::IntLit
                 } else {
                     // non-decimal without suffix: i32, else u32, else E-0042 (§2.8)
                     if v <= i32::MAX as u128 {
@@ -2102,6 +2205,7 @@ impl<'a> Checker<'a> {
                         if !type_compatible(pt, &at) && !matches!(at, Ty::Invalid) {
                             self.emit("E-0110", a.expr.span, format!("实参类型不匹配：期望 {}，实际 {}", pt.text(), at.text()), format!("第 {} 个实参", idx + 1), Some("§4.2：函数参数 100% 类型兼容".into()), Some("显式 `as`（§4.4）".into()));
                         }
+                        self.check_int_in_ctx(&a.expr, &at, pt, "实参");
                     }
                 }
                 None => self.emit("E-0900", a.expr.span, "宿主事件参数不匹配", format!("`{name}` 无参数 `{}`", a.name.clone().unwrap_or_default()), Some("§10.8/§11：具名实参必须匹配声明".into()), None),
@@ -2320,6 +2424,41 @@ fn contains_ref_needing_lifetime(t: &Ty) -> bool {
         Ty::Result { ok, err } => contains_ref_needing_lifetime(ok) || contains_ref_needing_lifetime(err),
         Ty::Tuple(v) => v.iter().any(|x| contains_ref_needing_lifetime(x)),
         _ => false,
+    }
+}
+
+/// §2.8/§4.13: the value of an integer literal whose type is still the context's to choose — a bare
+/// unsuffixed literal, or a unary minus over one (`128`, `-128`, `- -1`). `None` for a suffixed
+/// literal (it already has a type, so §2.8 checks it in `int_lit_ty`) and for one too wide for
+/// `i128` (whose `E-0042` `int_lit_ty` already reports).
+pub fn adaptable_int_value(e: &Expr) -> Option<i128> {
+    match &e.kind {
+        ExprKind::Lit(Lit::Int(i)) => {
+            if i.suffix.is_some() {
+                return None;
+            }
+            i128::try_from(i.value?).ok()
+        }
+        ExprKind::Unary { op: crate::token::Punct::Minus, expr } => adaptable_int_value(expr)?.checked_neg(),
+        _ => None,
+    }
+}
+
+/// §2.8: is this compile-time value representable in `p`? `usize`/`isize` use the target width
+/// `Prim::bits()` reports (64 here), which is the same width stage [8] emits.
+pub fn int_value_fits(p: Prim, v: i128) -> bool {
+    match p {
+        Prim::U8 => v >= 0 && v <= u8::MAX as i128,
+        Prim::U16 => v >= 0 && v <= u16::MAX as i128,
+        Prim::U32 => v >= 0 && v <= u32::MAX as i128,
+        Prim::U64 | Prim::Usize => v >= 0 && v <= u64::MAX as i128,
+        Prim::U128 => v >= 0,
+        Prim::I8 => v >= i8::MIN as i128 && v <= i8::MAX as i128,
+        Prim::I16 => v >= i16::MIN as i128 && v <= i16::MAX as i128,
+        Prim::I32 => v >= i32::MIN as i128 && v <= i32::MAX as i128,
+        Prim::I64 | Prim::Isize => v >= i64::MIN as i128 && v <= i64::MAX as i128,
+        Prim::I128 => true,
+        _ => true,
     }
 }
 
@@ -2908,5 +3047,92 @@ mod tests {
         assert!(got("fn f() { let y = env.nope; }", "E-0110"), "§4.6 unknown accessor");
         assert!(!got("fn f() { let y = env.iter; }", "E-0101"), "env must not resolve as an identifier");
         assert!(got("fn f() { env.iter = 1; }", "E-0140"), "§4.6 writing env must be E-0140");
+    }
+
+    // ------------------------------------------------- §2.8/§4.13 literal ranges (BACKLOG F13)
+
+    /// §4.13 rule 2: an unsuffixed integer literal has no type of its own, so unary minus over one
+    /// is still an unsuffixed literal and the context supplies the type. Stage [4] used to reject
+    /// every one of these shapes with `E-0110 · 一元负号作用于非数值类型` (docs/BACKLOG.md F13), so
+    /// `fn g() -> i32 { -128 }` could not be written at all.
+    #[test]
+    fn a_negative_unsuffixed_literal_takes_the_context_type() {
+        clean("fn g() -> i32 { -128 }");
+        clean("fn g() -> i64 { -4294967296 }");
+        clean("fn g() -> i32 { -0x10 }");
+        clean("fn m() { let x: i8 = -128; }");
+        clean("fn m() { let x = -1; }");
+        clean("fn take(x: i32) { } fn m() { take(-128); }");
+        // A `return -128;` form would belong here too, but stage [4] reports E-0053 on any body that
+        // ends in `return v;` without a tail expression — docs/BACKLOG.md F55, not this rule.
+    }
+
+    /// The other half of the pair: the negated value must be representable in the context type —
+    /// that is §2.8's own wording for `-128i8` ("加宽后可精确表示且整体落在目标类型范围"), applied to
+    /// the type §4.13 chose instead of the suffix. `E-0042` is the code whose title says
+    /// 字面量超出可表示范围; see docs/spec-deviations.md D-55 for why not `E-0043`/`E-0111`.
+    #[test]
+    fn a_negative_literal_outside_the_context_range_is_e0042() {
+        assert!(got("fn g() -> u32 { -1 }", "E-0042"), "a negative value has no unsigned target");
+        assert!(got("fn g() -> i8 { -129 }", "E-0042"));
+        assert!(got("fn m() { let x: u8 = -1; }", "E-0042"));
+        assert!(got("fn m() { let x = -3000000000; }", "E-0042"), "§4.13 default i32 is a context too");
+        assert!(got("const K: u8 = -1;", "E-0042"), "a const initializer ships its value to the artifact");
+        assert!(got("static mut S: u8 = -1;", "E-0042"));
+    }
+
+    /// §2.8's range rule is one rule, not a negative-literal rule: a positive literal that no
+    /// context can represent is the same `E-0042`, at every context that names a type (the guard is
+    /// not half-applied). Before F13 all of these were `check ok` and stage [8] refused four of them.
+    #[test]
+    fn an_integer_literal_outside_its_context_range_is_e0042_at_every_context() {
+        assert!(got("fn g() -> u8 { 300 }", "E-0042"), "tail expression");
+        assert!(got("fn g() -> u8 { return 300; }", "E-0042"), "return statement");
+        assert!(got("fn m() { let x: u8 = 300; }", "E-0042"), "annotated binding");
+        assert!(got("fn take(x: u8) { } fn m() { take(300); }", "E-0042"), "argument");
+        assert!(got("struct P { a: u8 } fn m() { let p = P { a: 300 }; }", "E-0042"), "struct literal field");
+        assert!(got("fn m() { let a = [1u8, 300]; }", "E-0042"), "array element");
+        assert!(got("fn m() { var x: u8 = 0; x = 300; }", "E-0042"), "assignment");
+        assert!(got("fn m(x: u8) -> u8 { x + 300 }", "E-0042"), "binary operand");
+        assert!(got("fn m(x: u8) -> bool { x == 300 }", "E-0042"), "comparison operand");
+        // …and the values that DO fit stay clean, so none of the above is a blanket rejection.
+        clean("fn g() -> u8 { 255 }");
+        clean("fn take(x: u8) { } fn m() { take(0); }");
+        clean("struct P { a: u8 } fn m() { let p = P { a: 255 }; }");
+        clean("fn m(x: u8) -> u8 { x + 255 }");
+    }
+
+    /// §4.13 rule 2: the annotation outranks the initializer's literal, so `var x: u8 = 0;` really
+    /// binds `u8`. With the annotation dropped the assignment and second-use contexts had no type to
+    /// fail against — `let y: u32 = x;` passed silently (UB-001).
+    #[test]
+    fn an_annotation_outranks_the_initializer_literal() {
+        clean("fn m() { var x: u8 = 0; let y: u8 = x; }");
+        clean("fn take(x: u8) { } fn m() { var y: u8 = 0; take(y); }");
+        assert!(got("fn m() { var x: u8 = 0; let y: u32 = x; }", "E-0110"), "the u8 annotation must survive");
+        assert!(got("fn take(x: u32) { } fn m() { var y: u8 = 0; take(y); }", "E-0110"));
+    }
+
+    /// §4.12 takes the shift count out of the range rule: a count of at least the type width is the
+    /// runtime `R-0007`, not a literal that cannot be represented, so `x << 40` on a `u8` stays clean.
+    #[test]
+    fn a_shift_count_is_not_range_checked() {
+        clean("fn m(x: u8) -> u8 { x << 40 }");
+        clean("fn m(x: u8) -> u8 { x << 200 }");
+    }
+
+    /// §2.8: `-5` is minus over the literal `5`, and the negated value must still be representable
+    /// **in the literal's own type** — which is what makes `-128i8` legal. The suffixed failures are
+    /// `E-0043` (the code table binds that title to 带后缀字面量溢出); an unsuffixed non-decimal
+    /// literal that §2.8 already gave a type of its own is `E-0042`.
+    #[test]
+    fn negating_a_literal_uses_the_range_of_the_literal_s_own_type() {
+        clean("fn g() -> i8 { -128i8 }");
+        clean("fn g() -> i64 { -9223372036854775807 }");
+        clean("fn m() { let x = -128i8; }");
+        assert!(got("fn g() -> u32 { -1u32 }", "E-0043"));
+        assert!(got("fn g() -> u8 { -0xFFu8 }", "E-0043"));
+        assert!(got("fn g() -> u32 { -0xFFFFFFFF }", "E-0042"), "§2.8 defaulted this literal to u32");
+        assert!(got("fn g() -> i8 { -129i8 }", "E-0043"), "the exception reaches one value, not past it");
     }
 }
