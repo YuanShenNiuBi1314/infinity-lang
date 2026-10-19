@@ -16,11 +16,11 @@
   （`.gitattributes` 后匹配优先 ⇒ 全局 `*.infy text eol=lf` 盖掉了语料例外 `-text` ⇒ 故意带 CRLF 的那条用例永久 dirty），
   已修并配回归测试；**修复提交 `c7312eb` 触发的 run `38912466381`（run_number 4）= 步 3-12 逐条 `success`**
   （该步在远端打印 `core.autocrlf = true` ⇒ 守卫是真条件下过的；步 7 远端 `cargo test --offline` = **531 passed / 0 failed**）
-  **最新一条远端实录（F9 轮回查）**：run #13（`38991050867`，push `2852b00`，树含 F8 的 `9c56b45`）= **success**，
-  步 3-12 逐条 `success` ⇒ 步 7 = **548 passed / 0 failed**、步 10 = rt **32340 assertions, 0 failures**、
-  步 11 = IFBC 两条链各 **180 asserts, 180 pass, 0 FAIL**、步 12 tour 产物 **221823**（宿主镜像 221021 + blob 738 + 段尾 64；该行 = F16 交付树的那条 run，F17 轮本机 blob 已变 1087，下一班回查换新数）
+  **最新一条远端实录（F18 轮回查）**：run #28（`39181242747`，push `af8860d` = F17 的交付树）= **success**，
+  步 3-12 逐条 `success` ⇒ 步 7 = **619 passed / 0 failed**、步 10 = rt **32382 assertions, 0 failures**、
+  步 11 = IFBC 两条链各 **180 asserts, 180 pass, 0 FAIL**、步 12 tour 产物 **226689**（宿主镜像 225538 + blob 1087 + 段尾 64）
   ⇒ BACKLOG **F1 已勾 `[x]`**，读法是「**认包含交付的那个 commit 触发的 run**」，任何一次 run 变红就重新打开。**读远端日志时记住一条口径**：产物字节与 `build-id`
-  是宿主 `cc` 的函数（runner 的 `gcc 15.2.0` 产 221666 字节，本机 MSYS2 `gcc 16.2.0` 产 204548 字节（F17 轮又改 `infy_rt.c`：镜像 +3499、blob +349；F8 轮改后 200700，改前 199975）；段 blob 1087 +
+  是宿主 `cc` 的函数（runner 的 `gcc 15.2.0` 产 226689 字节，本机 MSYS2 `gcc 16.2.0` 产 205060 字节（F18 轮又改 `infy_rt.c`：镜像 +512；F17 轮 +3499 与 blob +349；F8 轮改后 200700，改前 199975）；段 blob 1087 +
   段尾 64 与生成的 C11 12512 字节两侧相同 —— **F6 轮把 tour 按 §9.5 规范化后是 12512**，D-17 裁决前两侧都是 12513），所以 CI 只打印这些数、不门禁它们
 - License: MIT
 

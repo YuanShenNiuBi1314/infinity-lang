@@ -3052,6 +3052,8 @@ static int parse_meta_record(const uint8_t* m, uint64_t n, InfyMetaFixed* out, c
     out->len_ifbc = (uint32_t)infy_art_rd_u32(m + INFY_META_OFF_IFBC + 4);
     out->off_sum = (uint32_t)infy_art_rd_u32(m + INFY_META_OFF_SUM);
     out->len_sum = (uint32_t)infy_art_rd_u32(m + INFY_META_OFF_SUM + 4);
+    out->off_rodata = (uint32_t)infy_art_rd_u32(m + INFY_META_OFF_RODATA);
+    out->len_rodata = (uint32_t)infy_art_rd_u32(m + INFY_META_OFF_RODATA + 4);
     out->off_export = (uint32_t)infy_art_rd_u32(m + INFY_META_OFF_EXPORT);
     out->len_export = (uint32_t)infy_art_rd_u32(m + INFY_META_OFF_EXPORT + 4);
     out->target_triple.ptr = (const uint8_t*)(uintptr_t)infy_art_rd_u32(m + INFY_META_OFF_S_TARGET);
@@ -3093,8 +3095,10 @@ int infy_art_read_file(const char* path, InfyMetaFixed* out_meta, uint8_t** blob
     InfyIoErr err;
     memset(&err, 0, sizeof err);
     if (infy_fs_read_all(path, &file, &flen, &err) != 0) {
-        fprintf(stderr, "artifact rejected: cannot read '%s': %s\n", path ? path : "",
-                err.message.ptr ? (const char*)err.message.ptr : "io error");
+        /* InfyString is (ptr, len) with no terminator, so `%s` would read past the buffer. */
+        fprintf(stderr, "artifact rejected: cannot read '%s': %.*s\n", path ? path : "",
+                (int)err.message.len, err.message.ptr ? (const char*)err.message.ptr : "io error");
+        if (err.message.ptr) infy_string_drop(&err.message);
         return -1;
     }
     InfyArtTrailer t;
@@ -3316,8 +3320,8 @@ void infy_art_dump_meta(const InfyMetaFixed* m, const uint8_t* blob, uint64_t bl
         fprintf(out, "%-18s off=%llu size=%llu %s\n", key,
                 (unsigned long long)off, (unsigned long long)sz, infy_env_tag_name(tag));
     }
-    fprintf(out, "segments\n");
-    fprintf(out, "%-18s off=%-10u len=%u\n", "meta", 0u, 0u);
+    fprintf(out, "segments (blob-relative)\n");
+    fprintf(out, "%-18s off=%-10u len=%u\n", "meta", 0u, INFY_META_FIXED_BYTES);
     fprintf(out, "%-18s off=%-10u len=%u\n", "chains", (unsigned)m->off_chains, (unsigned)m->len_chains);
     fprintf(out, "%-18s off=%-10u len=%u\n", "events", (unsigned)m->off_events, (unsigned)m->len_events);
     fprintf(out, "%-18s off=%-10u len=%u\n", "nodes", (unsigned)m->off_nodes, (unsigned)m->len_nodes);
@@ -3325,6 +3329,19 @@ void infy_art_dump_meta(const InfyMetaFixed* m, const uint8_t* blob, uint64_t bl
     fprintf(out, "%-18s off=%-10u len=%u\n", "ifbc", (unsigned)m->off_ifbc, (unsigned)m->len_ifbc);
     fprintf(out, "%-18s off=%-10u len=%u\n", "sum", (unsigned)m->off_sum, (unsigned)m->len_sum);
     fprintf(out, "%-18s off=%-10u len=%u\n", "export", (unsigned)m->off_export, (unsigned)m->len_export);
+    /* The three derived regions have no offset slot in the frozen record (§11.2, D-32/D-60), so
+     * both tools compute them the same way; `infy artifact sections` prints them, so this dump has
+     * to as well or the two segment blocks stop being the same length (F18). */
+    fprintf(out, "%-18s off=%-10u len=%u\n", "resource_keys",
+            (unsigned)((uint64_t)m->off_export + m->len_export), (unsigned)(4u * m->n_resource_keys));
+    uint32_t env_len = 0;
+    if (blob && infy_art_env_at(m) + INFY_ENV_COUNT_BYTES <= blob_len) {
+        env_len = INFY_ENV_COUNT_BYTES
+                + infy_art_env_count(m, blob, blob_len) * INFY_ENV_REC_BYTES;
+    }
+    fprintf(out, "%-18s off=%-10u len=%u\n", "env_offsets",
+            (unsigned)infy_art_env_at(m), (unsigned)env_len);
+    fprintf(out, "%-18s off=%-10u len=%u\n", "rodata", (unsigned)m->off_rodata, (unsigned)m->len_rodata);
     if (blob && m->len_strings >= 8) {
         uint64_t n = m->len_strings / 8u;
         if (n > 64) n = 64;

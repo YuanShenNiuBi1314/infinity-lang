@@ -328,7 +328,8 @@ typedef struct {
     InfyStr target_triple, build_id, platform, lang_version, source_toolchain;
     uint32_t n_chains, n_events, n_nodes, n_ifbc_modules, n_resource_keys;
     uint32_t off_chains, len_chains, off_events, len_events, off_nodes, len_nodes,
-             off_strings, len_strings, off_ifbc, len_ifbc, off_sum, len_sum, off_export, len_export;
+             off_strings, len_strings, off_ifbc, len_ifbc, off_sum, len_sum,
+             off_rodata, len_rodata, off_export, len_export;
 } InfyMetaFixed;
 /* Locate and validate the trailer of the running executable; used at startup and by
  * `infy artifact info|sections` (which call infy_art_read_file instead). */

@@ -1298,10 +1298,26 @@
       rt **32382 / 0**、两条 IFBC **180/180** + `cmp` 无差异、tour 六连全 exit 0、产物 **204548** 字节
       （宿主镜像 203397 + blob 1087 + 段尾 64；blob 的 +349 = 180 字节的表 + 11 个池项）。
 
-- [ ] F18 **C 侧 `infy_art_dump_meta` 的 `meta` 段行写死 `off=0 len=0`**（C3 轮读真实产物时发现，`infy_rt.c:3119`）：
+- [x] F18 **C 侧 `infy_art_dump_meta` 的 `meta` 段行写死 `off=0 len=0`**（C3 轮读真实产物时发现，`infy_rt.c:3119`）：
       真实容器里 meta 是 `off=0 len=208`。这是**打印错误**不是容器错误（Rust 侧 `artifact::dump_sections` 打的是真 208），
       但两份工具的输出因此不可比对。
       验收：改成打真实的 `INFY_META_FIXED_BYTES`，并让 `infy artifact sections` 与 C 侧 dump 在同一夹具上逐行可比。
+      **F18 轮（cron-43，2026-10-19）已修**：C 侧段表块与 `dump_sections` 的块对齐 —— ① `meta` 行改打
+      `INFY_META_FIXED_BYTES`（208）；② 块标题从 `segments` 改成 `segments (blob-relative)`（与 Rust 同串）；
+      ③ 补上此前只有 Rust 侧才有的三行 `resource_keys` / `env_offsets` / `rodata`（前两行按 D-32/D-60 的推导
+      现算，`rodata` 要求 `InfyMetaFixed` 新增 `off_rodata/len_rodata` 并在 `parse_meta_record` 里按
+      `INFY_META_OFF_RODATA=120` 解析 —— 那个枚举常量早就在 `infy_rt_internal.h:341`，只是没人读它）；
+      ④ 顺手修了同一函数上游的报错装配：`infy_art_read_file` 把非终止的 `InfyString` 当 `%s` 打（实测行尾拖出
+      缓冲区外的字节 `open for read failedE…`）⇒ 改 `%.*s` 并补 `infy_string_drop`。
+      **证据**：`bash scripts/f18-dump-compare.sh --apply` ⇒ 7 条探针全 PASS、exit 0
+      （冻结夹具 `runtime/fixtures/artifact_rust_writer.bin` 与 tour 真产物两份容器上，两份工具的 segments 块
+      **各 12 行逐字节相同**；把 C 块的 `len=208` 手写回 `len=0` 后 `diff` 变红 = 判据有牙齿；读不存在的容器
+      ⇒ exit 1 且 stderr 整行 82 字节干净）；`test_rt.c` 里新增一段**手写**的 12 行期望块（数字抄自另一侧工具，
+      不由被测代码算出）⇒ rt **32382 → 32387 assertions / 0 failures**（+5 全在那一段）；
+      `cargo test --offline --lib -j 1` **619 / 0** 不变（本轮零 Rust 改动）；`infy build examples/tour` 六连
+      全 exit 0，产物 **204548 → 205060**（宿主镜像 203397 → 203909，blob 1087 一字未动 = `infy_rt.c` 的
+      机器码 +512）；两份 `-c` 编译各 0 告警。新工具 `runtime/art_dump_main.c` 只由该脚本编译，不进任何 CI 编译行。
+      **同一夹具上两份输出第一次可比**，此前 F17 轮的红线②「只做到同一份字节给同一个结论」现在扩展到段表。
 
 - [ ] F19 **没有任何 INFY 构造能写 stdout，且 §13.4 的 `--arg` / `--feature` 没有消费者**（C4 轮实现 `infy run` 时确认）：
       (a) §14.3 的导览不打字，`codegen` 的 tour 子集里也没有任何通往 stdout 的入口，而 §7.7.1 第 4 项把 B 轨
@@ -1958,6 +1974,18 @@
       不再可复现），并给 `infy artifact info` 的 `resource_keys` 出行 + 一条命令级探针。
       做完之前**不许**写"锁键声明已被真程序校验"——今天校验的代码在，喂它的表还恒空。
 
+- [ ] F71 **C 侧 `infy_art_read_file` 的 meta 区段越界校验比 Rust 少两格（`events` 与 `rodata`）⇒ 同一份坏字节两侧结论不同**（F18 轮读代码时发现）：
+      Rust 侧 `src/artifact.rs:869-882` 对 **8** 个区段做 `off+len > blob_len ⇒ Bad::SegmentRangeEscapesBlob`
+      （strings/chains/nodes/ifbc/sum/export/**events**/**rodata**），注释还写着"The range check
+      `infy_art_read_file` performs"；C 侧 `runtime/infy_rt.c:3125-3130` 那一条只列了 **6** 个 ——
+      `events` 与 `rodata` 没进判据（trailer 那一路的 `rodata` 反而在 `infy_rt.c:3015-3018` 校验了）。
+      后果：一份把 meta 的 `events` 或 `rodata` 写成越界的容器，Rust 拒、C 收，F18 之后 C 还会把那个越界的
+      `rodata` 打进段表（只打数字，不解引用 ⇒ 不是 OOB 读，但"两份工具同一判据"这条又被破了一格）。
+      验收：C 侧补齐两格（与 Rust 同一张表），并加一条**反例**断言 —— 手写把夹具的 `INFY_META_OFF_RODATA`
+      那一格改成 `blob_len+1`，期望 `infy_art_read_file` 返回 -1 且 `infy artifact sections` 也拒绝同一份字节；
+      改前该断言必须红（现形判据 = `scripts/f18-dump-compare.sh` 的 `compare` 之外再加一条拒绝探针）。
+      注意这条一动 `infy_rt.c` 就动产物字节（宿主镜像），换数走 `scripts/sync-doc-numbers-f18.py` 的形状另写一份。
+
 ### 阶段 G：竞品对标 —— 竞品的优点逐个超越，竞品的已知缺陷逐个封死
 
 > 来源：2026-10-18 对项目所有者点名的竞品（rustc/cargo、Go、Zig/Nim、CPython/Lua/JS/TS、JVM/.NET/Swift、
@@ -2366,7 +2394,45 @@
 
 ## 2. 当前指针
 
-> **F17 轮收尾（2026-10-19，cron-42）：F17 只过两格、保持 `[ ]`，新登记 F70 未修；本段取代上面 F16 轮那段的"下一轮"** ——
+> **F18 轮收尾（2026-10-19，cron-43）：F18 勾 `[x]`，新登记 F71 未修；本段取代上面 F17 轮那段的"下一轮"** ——
+> 交付 = **两份工具第一次在同一夹具上逐行可比**（F17 的红线②只做到"同一份字节给同一个结论"，本轮把它扩展到段表）：
+> C 侧 `infy_art_dump_meta` 的 `meta` 行改打真的 `INFY_META_FIXED_BYTES`（此前写死 `len=0`）、块标题改成
+> `segments (blob-relative)`、补 `resource_keys`/`env_offsets`/`rodata` 三行（`rodata` 要 `InfyMetaFixed`
+> 新增 `off_rodata/len_rodata` 并按 `INFY_META_OFF_RODATA=120` 解析 —— 常量早就在 `infy_rt_internal.h:341`，
+> 只是没人读）；顺带修 `infy_art_read_file` 的报错装配（非终止 `InfyString` 被当 `%s` 打 ⇒ `%.*s` + `infy_string_drop`）；
+> 新工具 `runtime/art_dump_main.c` 只由比对脚本编译，**不进任何 CI 编译行**。
+> **基线（本机 `-j 1`）**：开工 **619 passed / 0 failed** ⇒ 收尾 **619 / 0**（本轮零 Rust 改动）、
+> `cargo check --offline --lib -j 1` **0 error / 0 warning**、rt **32382 → 32387 / 0**（+5 = `test_rt.c` 里那段
+> **手写** 12 行期望块的 CK，数字抄自另一侧工具、不由被测代码算出）、两份 `-c` 编译各 stderr **0 字节**、
+> tour `fmt --check / check / build / run / test / build --verify-reproducible` 六连 exit **0**、
+> 产物 **204548 → 205060**（宿主镜像 203397 → 203909，blob 1087 一字未动 = `infy_rt.c` 机器码 +512）、
+> `bash scripts/f18-dump-compare.sh --apply` **exit 0 / 7 条探针全 PASS**（夹具与 tour 真产物两份各 **12 行逐字节相同**；
+> 把 `len=208` 手写回 `len=0` 后 `diff` 变红；读不存在的容器 ⇒ exit 1 + stderr 整行 82 字节干净）、
+> `python scripts/check-doc-numbers.py` 见下。**换数走 `scripts/sync-doc-numbers-f18.py`**（12 条规则逐条报命中数，
+> 新串吃掉旧串才谈得上幂等，重跑报 ALREADY）。
+> **远端回查（本轮做的，指针①那格已兑现）**：覆盖 F17 交付树的 run **#28**（`39181242747`，push `af8860d`）=
+> **success**，步 7 **619 passed / 0 failed**、步 8 告警 **0**、步 10 rt **32382 assertions, 0 failures**、
+> 步 11 两条 IFBC 各 **180/180**、步 12 tour 产物 **226689**（宿主镜像 225538 + blob 1087 + 段尾 64）
+> ⇒ README 的"最新一条远端实录"已从 run #13 换成 #28（`scripts/sync-doc-numbers-f18.py` 第 7–10 条规则）。
+> **措辞红线**：① 本轮**没有**给 C 侧的 `rodata` 解析补越界校验 ⇒ 不许说"两侧段表判据等价"，见 **F71**；
+> ② F17 那条红线不变（`ResourceKeys` 的表还恒空，`std.chain.lock` 仍过不了 `infy check`，**F70/F40**）；
+> ③ `runtime/art_dump_main.c` 是比对工具不是产品入口，别把它写成"infy artifact sections 的 C 版命令"。
+> **下一轮 = ①** 现算欠账补推 + 回查**覆盖本轮交付树**的那条 run：步 7 应仍 **619/0**、步 8 告警 0、
+> 步 10 rt **32387**、步 11 两条 IFBC **180/180** + `cmp`、步 12 tour 六条全 exit 0 且产物字节 = runner 的新数
+> （本轮又改了 `infy_rt.c` ⇒ README/status.md 的**本机**数已是 205060，runner 侧要等那条 run 出来再换，
+> 换数别再手改，照 `sync-doc-numbers-f18.py` 的形状写一份 f19 的）；`cancelled` 既不是红也不是绿。
+> **②** §1 第一个 `[ ]` 仍是 **F17**（②格被 **F70** 挡着，F70 的根在 **F40** 的绑定面）；卡住就按 §1 顺延 **F19**
+> （(a) 定一条 stdout 通道让某条真程序的 stdout 非空并被逐字节断言、(b) §13.4 的 `--arg/--feature` 接进真消费者或记偏差）；
+> **F71 是本轮新登记的、位置在阶段 F 末尾**，按 §1 自上而下它排在 F19…F70 之后，别插队。
+> **③ 上一轮欠的变异探针仍然欠着**：`Bad::EnvTableEscapesBlob`、`infy_art_env_check` 与 `infy_lock_acquire`
+> 的声明校验都没证过"摘掉判据后测试会变红"（本轮只证了段表那条的牙齿）；形状照 `scripts/f16-mutation-probe.py`。
+> **④ 卫生欠账不变**：F68（§1 引用的码号回核到 `codes.rs`，脚本化）、全仓 `while !at(…) && !at_end()` 的
+> 前进守卫清点（F53）、"返回 `(树, 消耗数)`" helper 的其余调用点（F63 形状）。
+> **⑤ 本轮踩到的环境事实**（已进经验库）：Git Bash 把 argv 按 **CP936** 交给原生 C 程序，而 `infy_fs_read_all`
+> 按 UTF-8 解码 ⇒ 仓库根含中文时，**任何含中文的绝对路径都打不开**（实测 `CreateFileW` 失败）。C 侧工具的
+> 路径参数一律用仓库相对路径 + `cd "$REPO"`。
+
+> **F17 轮收尾（2026-10-19，cron-42）：F17 只过两格、保持 `[ ]`，新登记 F70 未修；本段的"下一轮"已被上面 F18 轮那段取代** ——
 > 交付 = **§11.2 的 `EnvOffsets` 第一次进产物（Rust 写 + C 读 + 两侧同一判据）**，裁定 = 偏差 **D-60(a)–(h)**：
 > `artifact::EnvRec` + `Content.env_offsets` + `write()` 在 `ResourceKeys` 之后发一条**自描述行数**的区段
 > （208 字节冻结记录连条数槽位都没有 ⇒ 位置沿用 D-32 推导、条数写在区段自己的 4 字节头里），

@@ -1678,6 +1678,37 @@ static void test_artifact(void) {
         InfyStr f0 = infy_art_string(&fm, fb, 0);
         CK_EQ(f0.len, 21u);
         CK(memcmp(f0.ptr, "x86_64-pc-windows-gnu", 21) == 0);
+        /* F18：同一份字节交给两份工具，段表必须逐行相同。这里把 C 侧渲染落到文件，
+         * `scripts/f18-dump-compare.sh` 拿它跟 `infy artifact sections` 的输出逐行比。
+         * 期望块是**手写的**，12 行数字取自另一侧工具对同一份夹具的输出（不是由被测代码算出来的），
+         * 所以任何一侧段表漂移、少一行、或把 meta 又打回 len=0，这条都会红。 */
+        static const char want_segments[] =
+            "segments (blob-relative)\n"
+            "meta               off=0          len=208\n"
+            "chains             off=408        len=20\n"
+            "events             off=428        len=0\n"
+            "nodes              off=428        len=64\n"
+            "strings            off=208        len=200\n"
+            "ifbc               off=492        len=0\n"
+            "sum                off=492        len=12\n"
+            "export             off=504        len=8\n"
+            "resource_keys      off=512        len=4\n"
+            "env_offsets        off=516        len=180\n"
+            "rodata             off=696        len=259\n";
+        FILE* fd = fopen("rt_fixture_dump.txt", "wb");
+        CK(fd != 0);
+        if (fd) { infy_art_dump_meta(&fm, fb, fl, fd); fclose(fd); }
+        {
+            static char sbuf[8192];
+            FILE* rf = fopen("rt_fixture_dump.txt", "rb");
+            CK(rf != 0);
+            size_t rn = rf ? fread(sbuf, 1, sizeof sbuf - 1, rf) : 0;
+            if (rf) fclose(rf);
+            sbuf[rn] = 0;
+            CK(rn > sizeof want_segments);
+            CK(strstr(sbuf, want_segments) != 0);
+            CK(strstr(sbuf, "meta               off=0          len=0\n") == 0);
+        }
         free(fb);
     }
 
