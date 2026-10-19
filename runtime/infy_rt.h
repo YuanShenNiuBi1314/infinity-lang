@@ -336,8 +336,25 @@ int  infy_art_self(InfyMetaFixed* out_meta, uint8_t** blob, uint64_t* blob_len);
 int  infy_art_read_file(const char* path, InfyMetaFixed* out_meta, uint8_t** blob, uint64_t* blob_len);
 /* Section accessors: string pool entries are (u32 off, u32 len) pairs against the blob. */
 InfyStr infy_art_string(const InfyMetaFixed* m, const uint8_t* blob, uint32_t idx);
+/* §11.2 `EnvOffsets` + `ResourceKeys`, both derived regions (no slot in the frozen record): the
+ * table starts where `ResourceKeys` ends and is bounded by its own count column. `blob_len` is the
+ * blob's length, which the record itself does not carry. A row index out of range returns -1;
+ * `infy_art_env_check` answers 0 when the container and this runtime agree (or when the container
+ * declares no table at all) and -1 with a reason otherwise — the caller reports §11.3 step 3. */
+uint64_t infy_art_env_at(const InfyMetaFixed* m);
+uint32_t infy_art_env_count(const InfyMetaFixed* m, const uint8_t* blob, uint64_t blob_len);
+int infy_art_env_row(const InfyMetaFixed* m, const uint8_t* blob, uint64_t blob_len, uint32_t i,
+                     uint64_t* offset, uint64_t* size, uint32_t* tag, InfyStr* name);
+int infy_art_env_offset_of(const InfyMetaFixed* m, const uint8_t* blob, uint64_t blob_len,
+                           const char* name, uint64_t* offset, uint64_t* size);
+int infy_art_env_check(const InfyMetaFixed* m, const uint8_t* blob, uint64_t blob_len,
+                       const char** why);
+/* Index of `name` in the container's `ResourceKeys`, or -1. This is the only place the resource
+ * names are compared: §11.2 keeps the string lookup off the lock path. */
+int infy_art_lock_key_index(const InfyMetaFixed* m, const uint8_t* blob, uint64_t blob_len,
+                            const char* name);
 /* Dump .inf meta as text — the same rendering `infy artifact info` prints. */
-void infy_art_dump_meta(const InfyMetaFixed* m, const uint8_t* blob, FILE* out);
+void infy_art_dump_meta(const InfyMetaFixed* m, const uint8_t* blob, uint64_t blob_len, FILE* out);
 
 /* ---------- IFBC virtual machine (§7.8, appendix D) ---------- */
 typedef enum {

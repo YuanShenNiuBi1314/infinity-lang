@@ -1582,6 +1582,7 @@ fn stage9(
         .map(|(m, v, d)| artifact::SumRec { package: m.clone(), version: v.clone(), dirhash: d.clone() })
         .collect();
     let p = &l.manifest.profile;
+    let env_offsets = env_offset_rows(&hc.env)?;
     let content = artifact::Content {
         host_image: &image,
         ifabi: crate::VERSION.ifabi,
@@ -1615,10 +1616,47 @@ fn stage9(
         events,
         nodes,
         sums,
+        // Nothing to collect yet: `std.chain.lock("db")` does not resolve from INFY source
+        // (stage [4] answers `E-0101 · 未声明的标识符 std`, so no build reaches here with a key).
+        // Registering that blocker is F70; inventing a table the front end cannot fill is not.
         resource_keys: Vec::new(),
+        env_offsets,
         entry,
     };
     artifact::write(&content).map_err(|e| e.to_string())
+}
+
+/// §11.2 `EnvOffsets` rows, taken straight out of the table stage [4] measured for this build
+/// target — the same numbers codegen bakes into the C as `env.x` offset loads, so the container
+/// states what the code was compiled against instead of leaving the host to guess (§11.3 step 3).
+/// A §4.6 field whose type has no tag here is a spec change nobody adjudicated: refuse the build.
+fn env_offset_rows(env: &hir::EnvTable) -> Result<Vec<artifact::EnvRec>, String> {
+    env.fields
+        .iter()
+        .map(|f| {
+            let tag = match &f.ty {
+                sema::Ty::Prim(crate::ast::Prim::U32) => artifact::ENV_TY_U32,
+                sema::Ty::Prim(crate::ast::Prim::U64) => artifact::ENV_TY_U64,
+                sema::Ty::Prim(crate::ast::Prim::F32) => artifact::ENV_TY_F32,
+                sema::Ty::Str => artifact::ENV_TY_STR,
+                other => {
+                    return Err(format!(
+                        "§4.6 的 `env.{}` 取型 {}，§11.2 的 `EnvOffsets` 类型标签表没有这一档（BACKLOG F17）",
+                        f.name,
+                        other.text()
+                    ))
+                }
+            };
+            Ok(artifact::EnvRec {
+                name: f.name.to_string(),
+                offset: u32::try_from(f.offset)
+                    .map_err(|_| format!("`env.{}` 的快照偏移 {} 超出 u32", f.name, f.offset))?,
+                size: u32::try_from(f.layout.size)
+                    .map_err(|_| format!("`env.{}` 的快照宽度 {} 超出 u32", f.name, f.layout.size))?,
+                tag,
+            })
+        })
+        .collect()
 }
 
 /// The §7.2 triple of the machine running the compiler.
@@ -3265,6 +3303,7 @@ mod tests {
             nodes: vec![],
             sums: rows.to_vec(),
             resource_keys: vec![],
+            env_offsets: vec![],
             entry: None,
         };
         artifact::write(&content).expect("容器写入应成功")
@@ -3681,6 +3720,7 @@ fn main() { }
             nodes: vec![],
             sums: vec![],
             resource_keys: vec![],
+            env_offsets: vec![],
             entry: None,
         };
         artifact::write(&content).expect("容器写入应成功")

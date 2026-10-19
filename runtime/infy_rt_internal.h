@@ -344,6 +344,13 @@ enum {
     INFY_META_OFF_BUILDID32 = 176
 };
 
+/* §11.2 `EnvOffsets`: the frozen record has no slot for it — not even a row count — so the region
+ * follows `ResourceKeys` in the blob (both derive from `export`, D-32) and carries its own count
+ * (D-60). One row = (u32 name pool index, u32 snapshot offset, u32 size, u32 type tag). */
+#define INFY_ENV_COUNT_BYTES 4u
+#define INFY_ENV_REC_BYTES 16u
+enum { INFY_ENV_TY_U32 = 0, INFY_ENV_TY_U64 = 1, INFY_ENV_TY_F32 = 2, INFY_ENV_TY_STR = 3 };
+
 /* host-driven env refresh, called by the scheduler between node dispatches (§4.6) */
 void infy_rt_host_env_refresh(void);
 

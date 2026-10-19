@@ -1744,3 +1744,48 @@ lock 比对"；§13.4 的 `artifact` 只列了 `info|sections`；§13.4 的退�
 
 
 
+
+## D-60 F17 的 `EnvOffsets`：§11.2 给了这张表的名字、键与值，却没给它在容器里的一个字节
+
+规范侧的既有材料：§11.2 的镜像表写「`EnvOffsets` | `env.*` 名 | `EnvSnapshot` 字段偏移与类型标签 |
+`IFABI` 固定」、§11.3 第 3 步写「`EnvSnapshot` 布局（字段数 + 偏移表）与宿主一致 → 否则 `R-0905`」、
+§10 写「`env.x` 编译成一次按编译期偏移的加载，偏移记在 `.inf meta` 的 `EnvOffsets` 里」。
+**规范没给的**：这张表在 blob 里的位置、行字节、条数怎么读、没有槽位时怎么办、类型标签的数值表、
+以及"未声明的资源名"该用哪条码。F17 轮（cron-42，2026-10-19）逐条自裁如下。
+
+* **(a) 位置沿用 D-32 的推导规则，条数自带。** 冻结的 208 字节记录里既没有 `EnvOffsets` 的 `(off, len)`
+  槽位，也没有条数字段 ⇒ 区段起点 = `export.off + export.len + 4 × n_resource_keys`（紧接着
+  `ResourceKeys`，与 D-32 给 `ResourceKeys` 定的"读取方自己推"同一条规则），**行数列写在自己的 4 字节头里**。
+  不这么做的替代方案是把记录从 208 撑大 —— 那会同时改 `INFY_META_OFF_*`、C 侧 `InfyMetaFixed`、
+  两份逐字节夹具和 `describe_offset` 的段表，规范明文称其为"冻结布局"，改它需要 ABI bump，不在本轮范围。
+* **(b) 行字节 = `(u32 池索引, u32 偏移, u32 宽度, u32 类型标签)`，16 字节一行。** 类型标签规范只说"标签"，
+  没给值表 ⇒ 取 §4.6 那张类型表的书写序：`0=u32、1=u64、2=f32、3=str`（两侧同一张枚举，
+  Rust `artifact::ENV_TY_*` ↔ C `INFY_ENV_TY_*`）。宽度单列是因为 §11.3 第 3 步要判"字段数 + 偏移表"，
+  只给偏移无法发现 `InfyStr` 被改成 8 字节指针那一类漂移。
+* **(c) 条数装不下 ⇒ 拒绝容器，不读成一张短表。** Rust 侧新增 `Bad::EnvTableEscapesBlob`，C 侧
+  `infy_art_read_file` 打 `artifact rejected: the EnvOffsets row count escapes the blob` 并返 -1。
+  两侧对同一份字节给同一个结论 —— 这句话只到"同一判据"为止，**不等于**"两侧装载期校验等价"
+  （那条红线仍是 F26 / D-42）。
+* **(d) 没有表不是不一致。** `count = 0` 时 `infy_art_env_check` 返回 0：手工拼的容器、以及本轮之前
+  写出的旧容器都不带这张表。把"缺表"判成 `R-0905` 会让"实现没有落点"读成"每次装载都失败"。
+  §11.3 第 3 步在缺表时仍由 `infy_host_handshake` 的 layout hash 承担（它比对的是宿主自己算的哈希）。
+* **(e) 接线点 = `infy_runtime_start` 读到自身容器之后。** 规范自己说这三条运行时期检"只在 `.infib`
+  被动态装载时才可能触发"，而本实现没有动态装载入口 ⇒ 这一条是"能接的地方先接上"，
+  动态装载那一半仍无落点，登记在册（§11.3 的完整面属 G 阶段）。
+* **(f) `ResourceKeys` 的锁键校验借用 `R-0004`（`R_INDEX_OOB`）。** 规范没有给"运行时请求了一个产物里
+  没声明的资源名"这条码。`infy_lock_acquire` 已经用 `R_INDEX_OOB` 判 NULL 名，未声明就是同一形状的
+  越界（表里没有这一格），于是复用它并在消息里点名 §11.2。声明表为空 ⇒ 不校验，保持 F17 之前的行为。
+  校验按名字比对（≤`n_resource_keys` 次 `memcmp`）而不是按索引：§11.2 的"运行时路径零字符串比较"
+  讲的是事件分发（`EventId` 查表），而 `lock()` 的入参本来就是 `&str`，`lock_find_locked` 今天也在比名字。
+* **(g) `infy_art_dump_meta` 多收一个 `blob_len`。** 推导出来的区段（`ResourceKeys`/`EnvOffsets`）的长度
+  不在冻结记录里，`InfyMetaFixed` 也不带 blob 长度；渲染这张表必须有界。这是工具侧签名，不是 ABI。
+* **(h) 前端仍收集不到 `ResourceKeys`，本轮不伪造。** 实测 `std.chain.lock("db")` 在阶段 [4] 得到
+  `E-0101 未声明的标识符 std`（F40 一族：`import "std/…"` 不产生绑定），所以没有任何真实程序能带着
+  键走到阶段 [9] ⇒ `cli::stage9` 明确写 `resource_keys: Vec::new()` 并把原因指向新登记的 **F70**。
+  C 侧的读法、校验与拒绝已经落地并被 `test_rt.c` 断言（用 `runtime/fixtures/artifact_rust_writer.bin`
+  里那条真实键）。
+
+随本条落地的还有 §11.2 的**读侧第一次有 EnvOffsets**（此前 11 个偏移只活在 `hir::env_table` 与生成的 C 里，
+产物与运行时都不认识它）。本轮没动的相邻面：**F70**（`std.chain.lock` 从源码不可达 ⇒ 表恒空）、
+**F18**（C 侧 `infy_art_dump_meta` 的 `meta` 段仍写死 `off=0 len=0`，本轮只加了 `EnvOffsets` 的行渲染）、
+`env_offsets` 为空时 `infy artifact info` 打 `n_env_offsets 0`（不是缺行）。

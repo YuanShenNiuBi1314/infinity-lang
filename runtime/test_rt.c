@@ -1377,12 +1377,19 @@ static void build_artifact(const char* path, int mode) {
     int break_crc = mode == 1;
     uint32_t exe_len = (uint32_t)strlen(image);
 
-    /* blob layout: meta(200) | strings pair table | rodata bytes */
+    /* blob layout: meta(208) | strings pair table | export | resource keys | EnvOffsets |
+     * rodata bytes. F17 made the last two derived regions real here: the reader finds
+     * `ResourceKeys` at `export.off + export.len` and `EnvOffsets` right after it, so an
+     * empty-but-declared export region would drop both inside the pair table. */
     uint32_t meta_len = INFY_META_FIXED_BYTES;
-    uint32_t pair_count = 5;
+    uint32_t pair_count = 18;                  /* 5 meta strings + entry + reskey + 11 env names */
     uint32_t pairs_len = pair_count * 8u;
-    uint32_t rodata_off = meta_len + pairs_len;
-    uint32_t rodata_cap = 256;
+    uint32_t export_at = meta_len + pairs_len;
+    uint32_t reskey_at = export_at + 8u;
+    uint32_t env_at = reskey_at + 4u;
+    uint32_t env_len = INFY_ENV_COUNT_BYTES + 11u * INFY_ENV_REC_BYTES;
+    uint32_t rodata_off = env_at + env_len;
+    uint32_t rodata_cap = 512;
     uint32_t blob_len = rodata_off + rodata_cap;
     uint8_t* blob = (uint8_t*)calloc(blob_len, 1);
 
@@ -1403,21 +1410,20 @@ static void build_artifact(const char* path, int mode) {
     infy_art_wr_u32(blob + INFY_META_OFF_N_NODES, 11);
     infy_art_wr_u32(blob + INFY_META_OFF_N_IFBC, 0);
     infy_art_wr_u32(blob + INFY_META_OFF_N_RESKEYS, 1);
-    infy_art_wr_u32(blob + INFY_META_OFF_CHAINS, meta_len);      /* empty-but-declared regions */
+    infy_art_wr_u32(blob + INFY_META_OFF_CHAINS, export_at);      /* empty-but-declared regions */
     infy_art_wr_u32(blob + INFY_META_OFF_CHAINS + 4, 0);
-    infy_art_wr_u32(blob + INFY_META_OFF_EVENTS, meta_len);
+    infy_art_wr_u32(blob + INFY_META_OFF_EVENTS, export_at);
     infy_art_wr_u32(blob + INFY_META_OFF_EVENTS + 4, 0);
-    infy_art_wr_u32(blob + INFY_META_OFF_NODES, meta_len);
+    infy_art_wr_u32(blob + INFY_META_OFF_NODES, export_at);
     infy_art_wr_u32(blob + INFY_META_OFF_NODES + 4, 0);
-    infy_art_wr_u32(blob + INFY_META_OFF_STRINGS, rodata_off - rodata_cap);   /* = meta+len+pairs? */
     infy_art_wr_u32(blob + INFY_META_OFF_STRINGS, meta_len);
     infy_art_wr_u32(blob + INFY_META_OFF_STRINGS + 4, pairs_len);
-    infy_art_wr_u32(blob + INFY_META_OFF_IFBC, meta_len);
+    infy_art_wr_u32(blob + INFY_META_OFF_IFBC, export_at);
     infy_art_wr_u32(blob + INFY_META_OFF_IFBC + 4, 0);
-    infy_art_wr_u32(blob + INFY_META_OFF_SUM, meta_len);
+    infy_art_wr_u32(blob + INFY_META_OFF_SUM, export_at);
     infy_art_wr_u32(blob + INFY_META_OFF_SUM + 4, 0);
-    infy_art_wr_u32(blob + INFY_META_OFF_EXPORT, meta_len);
-    infy_art_wr_u32(blob + INFY_META_OFF_EXPORT + 4, 0);
+    infy_art_wr_u32(blob + INFY_META_OFF_EXPORT, export_at);
+    infy_art_wr_u32(blob + INFY_META_OFF_EXPORT + 4, 8);          /* one real (kind, name) record */
 
     uint32_t pool_at = meta_len, pool_len = rodata_off, npairs = 0;
     uint32_t idx_target = npairs; put_str(blob, &pool_at, &pool_len, &npairs, "x86_64-pc-windows-gnu");
@@ -1425,7 +1431,7 @@ static void build_artifact(const char* path, int mode) {
     uint32_t idx_plat   = npairs; put_str(blob, &pool_at, &pool_len, &npairs, "win10");
     uint32_t idx_lang   = npairs; put_str(blob, &pool_at, &pool_len, &npairs, "INFY-v2.0.0");
     uint32_t idx_tool   = npairs; put_str(blob, &pool_at, &pool_len, &npairs, "infyc 0.1.0");
-    CK(npairs == pair_count);
+    CK(npairs == 5u);                              /* the five §7.4 meta strings come first */
     infy_art_wr_u32(blob + INFY_META_OFF_S_TARGET, idx_target);
     infy_art_wr_u32(blob + INFY_META_OFF_S_TARGET + 4, 0);
     infy_art_wr_u32(blob + INFY_META_OFF_S_BUILDID, idx_build);
@@ -1436,6 +1442,42 @@ static void build_artifact(const char* path, int mode) {
     infy_art_wr_u32(blob + INFY_META_OFF_S_LANGVER + 4, 0);
     infy_art_wr_u32(blob + INFY_META_OFF_S_TOOLCHAIN, idx_tool);
     infy_art_wr_u32(blob + INFY_META_OFF_S_TOOLCHAIN + 4, 0);
+    /* F17: the entry name, the one declared resource key and the eleven `env.*` names all need a
+     * pool slot, because both derived tables reference names, not bare numbers. */
+    uint32_t idx_entry  = npairs; put_str(blob, &pool_at, &pool_len, &npairs, "Pipeline");
+    uint32_t idx_reskey = npairs; put_str(blob, &pool_at, &pool_len, &npairs, "db:orders:writer");
+    static const char* env_names[11] = { "iter", "runtime_s", "realtime", "ram_mb", "cpu_use",
+                                         "gpu_use", "chain_id", "node_idx", "focus_id",
+                                         "platform", "build_id" };
+    static const uint64_t env_off[11] = {
+        offsetof(InfyEnvSnapshot, iter),      offsetof(InfyEnvSnapshot, runtime_s),
+        offsetof(InfyEnvSnapshot, realtime),  offsetof(InfyEnvSnapshot, ram_mb),
+        offsetof(InfyEnvSnapshot, cpu_use),   offsetof(InfyEnvSnapshot, gpu_use),
+        offsetof(InfyEnvSnapshot, chain_id),  offsetof(InfyEnvSnapshot, node_idx),
+        offsetof(InfyEnvSnapshot, focus_id),  offsetof(InfyEnvSnapshot, platform),
+        offsetof(InfyEnvSnapshot, build_id) };
+    static const uint64_t env_size[11] = { 4, 4, 8, 4, 4, 4, 4, 4, 4, 16, 16 };
+    static const uint32_t env_tag[11] = { INFY_ENV_TY_U32, INFY_ENV_TY_U32, INFY_ENV_TY_U64,
+        INFY_ENV_TY_U32, INFY_ENV_TY_F32, INFY_ENV_TY_F32, INFY_ENV_TY_U32, INFY_ENV_TY_U32,
+        INFY_ENV_TY_U32, INFY_ENV_TY_STR, INFY_ENV_TY_STR };
+    uint32_t env_idx[11];
+    for (int i = 0; i < 11; i++) {
+        env_idx[i] = npairs;
+        put_str(blob, &pool_at, &pool_len, &npairs, env_names[i]);
+    }
+    CK(npairs == pair_count);
+
+    infy_art_wr_u32(blob + export_at, 0);                  /* entry kind: entry_chain */
+    infy_art_wr_u32(blob + export_at + 4, idx_entry);
+    infy_art_wr_u32(blob + reskey_at, idx_reskey);         /* the one key n_resource_keys declares */
+    infy_art_wr_u32(blob + env_at, 11u);                   /* EnvOffsets: its own row count (D-60) */
+    for (int i = 0; i < 11; i++) {
+        uint8_t* r = blob + env_at + INFY_ENV_COUNT_BYTES + (uint32_t)i * INFY_ENV_REC_BYTES;
+        infy_art_wr_u32(r, env_idx[i]);
+        infy_art_wr_u32(r + 4,  (uint32_t)env_off[i]);
+        infy_art_wr_u32(r + 8,  (uint32_t)env_size[i]);
+        infy_art_wr_u32(r + 12, env_tag[i]);
+    }
     for (int i = 0; i < 32; i++) blob[INFY_META_OFF_BUILDID32 + i] = (uint8_t)(0x11 * (i % 8) + i);
 
     uint8_t trailer[64];
@@ -1460,6 +1502,7 @@ static void build_artifact(const char* path, int mode) {
 
     FILE* f = fopen(path, "wb");
     fwrite(image, 1, exe_len, f);
+    if (mode == 3) infy_art_wr_u32(blob + env_at, 9999u);   /* a count that cannot fit the blob */
     fwrite(blob, 1, blob_len, f);
     if (break_crc) trailer[56] ^= 0xFF;          /* a single flipped bit must be rejected */
     fwrite(trailer, 1, 64, f);
@@ -1500,7 +1543,7 @@ static void test_artifact(void) {
     CK_EQ(m.n_events, 7u);
 
     FILE* dump = fopen("rt_artifact_dump.txt", "wb");
-    infy_art_dump_meta(&m, blob, dump);
+    infy_art_dump_meta(&m, blob, blen, dump);
     fclose(dump);
     dump = fopen("rt_artifact_dump.txt", "rb");
     char dbuf[4096];
@@ -1511,8 +1554,46 @@ static void test_artifact(void) {
     CK(strstr(dbuf, "ifabi") != 0);
     CK(strstr(dbuf, "panic_radius") != 0);
     CK(strstr(dbuf, "x86_64-pc-windows-gnu") != 0);
+    /* F17: `infy artifact info` prints the eleven offsets, so the C rendering must carry the same
+     * keys or the two dumps stop being diffable. */
+    CK(strstr(dbuf, "n_env_offsets") != 0);
+    CK(strstr(dbuf, "env.iter") != 0);
+    CK(strstr(dbuf, "env.build_id") != 0);
+
+    /* F17: `EnvOffsets` and `ResourceKeys` are derived regions (§11.2, layout ruled in D-60) — the
+     * reader has to find the table where the writer said it is, and the §11.3 step-3 check has to
+     * agree with this runtime's own snapshot. */
+    CK_EQ(infy_art_env_at(&m),
+          (uint64_t)m.off_export + m.len_export + 4ull * m.n_resource_keys);
+    CK_EQ(infy_art_env_count(&m, blob, blen), 11u);
+    {
+        uint64_t off = 0, sz = 0; uint32_t tag = 0; InfyStr nm = { (const uint8_t*)"", 0 };
+        CK_EQ(infy_art_env_row(&m, blob, blen, 0, &off, &sz, &tag, &nm), 0);
+        CK_EQ(nm.len, 4u);
+        CK(memcmp(nm.ptr, "iter", 4) == 0);
+        CK_EQ(off, offsetof(InfyEnvSnapshot, iter));
+        CK_EQ(tag, (uint32_t)INFY_ENV_TY_U32);
+        CK_EQ(infy_art_env_row(&m, blob, blen, 11, &off, &sz, &tag, &nm), -1);
+        CK_EQ(infy_art_env_offset_of(&m, blob, blen, "build_id", &off, &sz), 0);
+        CK_EQ(off, offsetof(InfyEnvSnapshot, build_id));
+        CK_EQ(sz, 16u);
+        CK_EQ(infy_art_env_offset_of(&m, blob, blen, "queue_len", &off, &sz), -1);
+        const char* why = 0;
+        CK_EQ(infy_art_env_check(&m, blob, blen, &why), 0);
+        CK_EQ(infy_art_lock_key_index(&m, blob, blen, "db:orders:writer"), 0);
+        CK_EQ(infy_art_lock_key_index(&m, blob, blen, "db:other"), -1);
+    }
 
     free(blob);
+
+    /* a row count that cannot fit the blob rejects the container — it is never read as a shorter
+     * table (the Rust reader answers Bad::EnvTableEscapesBlob for the same bytes) */
+    build_artifact("rt_artifact_envbig.bin", 3);
+    {
+        uint8_t* b9 = 0; uint64_t l9 = 0;
+        CK_EQ(infy_art_read_file("rt_artifact_envbig.bin", &m, &b9, &l9), -1);
+        CK(b9 == 0);
+    }
 
     /* a corrupted trailer CRC must reject the file (§7.4 self-validation) */
     build_artifact("rt_artifact_bad.bin", 1);
@@ -1576,6 +1657,12 @@ static void test_artifact(void) {
         CK_EQ(fm.n_nodes, 2u);
         CK_EQ(fm.n_ifbc_modules, 0u);
         CK_EQ(fm.n_resource_keys, 1u);
+        /* Rust 写 ↔ C 读：这张容器由 src/artifact.rs 的写入器生成，EnvOffsets 与 ResourceKeys
+         * 都由 C 侧的推导读法解出来，并与本运行时的快照布局对账（§11.3 step 3）。 */
+        CK_EQ(infy_art_env_count(&fm, fb, fl), 11u);
+        { const char* why = 0; CK_EQ(infy_art_env_check(&fm, fb, fl, &why), 0); }
+        CK_EQ(infy_art_lock_key_index(&fm, fb, fl, "std.chain.lock:db"), 0);
+        CK_EQ(infy_art_lock_key_index(&fm, fb, fl, "std.chain.lock:nope"), -1);
         CK_EQ(fm.target_triple.len, 21u);
         CK(memcmp(fm.target_triple.ptr, "x86_64-pc-windows-gnu", 21) == 0);
         CK_EQ(fm.platform.len, 7u);

@@ -1286,6 +1286,17 @@
       而 `src/hir.rs` 其实**已经算出** §4.6/§10 的 11 个偏移并有金样（`hir::tests`），只是没写进产物。
       验收：`EnvTable` 写进 blob（新区或 meta 尾部扩展，须与 C 侧同时改并记偏差），`infy artifact info` 打印 11 个偏移；
       `std.chain.lock` 键名收集进 `ResourceKeys`，并由 `infy_rt.c` 用于锁键校验。
+      **F17 轮（cron-42，2026-10-19）验收拆成三格，两格已过、一格被 F70 卡住 ⇒ 本条保持 `[ ]`**：
+      ① `EnvOffsets` 已进 blob（`artifact::EnvRec` + 自描述行数区段，位置与字节 = 偏差 **D-60(a)(b)**），
+      `infy artifact info` 打 **11 行**（`n_env_offsets 11` + `env.iter off=0 size=4 u32` …），
+      C 侧 `infy_art_env_check` 在 `infy_runtime_start` 读到自身容器后按 `offsetof(InfyEnvSnapshot,…)` 对账，
+      不符 ⇒ `R-0905`；③ 已做：`infy_art_lock_key_index` + `infy_lock_acquire` 的声明校验（码的选取 =
+      **D-60(f)**），`test_rt.c` 用夹具里那条真实键有正/反两条断言；
+      ② **没做**：前端收集不到任何键，因为 `std.chain.lock` 从源码就不可达（实测 exit 2 + `E-0101`/`E-0110`），
+      登记为 **F70**，`cli::stage9` 因此显式写 `resource_keys: Vec::new()`。
+      数字：`cargo test --offline --lib -j 1` **619 passed / 0 failed**（`artifact` 18 → **24**）、
+      rt **32382 / 0**、两条 IFBC **180/180** + `cmp` 无差异、tour 六连全 exit 0、产物 **204548** 字节
+      （宿主镜像 203397 + blob 1087 + 段尾 64；blob 的 +349 = 180 字节的表 + 11 个池项）。
 
 - [ ] F18 **C 侧 `infy_art_dump_meta` 的 `meta` 段行写死 `off=0 len=0`**（C3 轮读真实产物时发现，`infy_rt.c:3119`）：
       真实容器里 meta 是 `off=0 len=208`。这是**打印错误**不是容器错误（Rust 侧 `artifact::dump_sections` 打的是真 208），
@@ -1933,6 +1944,20 @@
       拒绝 + 非 0 退出），并且 `test_rt.c` 有正例（一致）与反例（改一行 hash ⇒ 红）成对锁点；
       做完之前**不许**在任何文档里写"产物有运行时自校验"。
 
+- [ ] F70 **`std.chain.lock` 从 INFY 源码不可达 ⇒ `ResourceKeys` 永远是空集，F17 的第二半没有输入**（F17 轮实测）：
+      `target/scratch/f17/probe`（`fn claim() { let g = std.chain.lock("db"); }`）走 `infy check` 得
+      **exit 2 + 2 条**（`E-0101 未声明的标识符 std` + `E-0110 类型 <invalid> 没有方法 lock`），
+      所以没有任何真程序能带着资源名走到阶段 [9]。根因不在这条，在 **F40**（任何 `import "std/…"`
+      都不产生绑定），而 `stdlib.rs` 的 `STD` 表里 `std.chain.lock → infy_lock_acquire` 那一行
+      **没有任何消费者**（`grep -rn "\.native" src/ | grep -v stdlib.rs` = 0 命中）。
+      F17 轮已把两侧都做齐：Rust 写/读 `ResourceKeys`、C 侧 `infy_art_lock_key_index` + `infy_lock_acquire`
+      的声明校验 + `test_rt.c` 正/反断言（用的就是 `runtime/fixtures/artifact_rust_writer.bin` 里那条真实键），
+      差的只是"前端把字面量收集起来"这一格。**下一格的判据**：先让 `std.chain.lock("db")` 过 `infy check`
+      （接 F40 的绑定面），再在 `cli::stage9` 把字面量按**字节序排序去重**收进
+      `Content.resource_keys`（排序是必须的：`write()` 的字节是内容的函数，收集顺序若来自一次 AST 遍历就
+      不再可复现），并给 `infy artifact info` 的 `resource_keys` 出行 + 一条命令级探针。
+      做完之前**不许**写"锁键声明已被真程序校验"——今天校验的代码在，喂它的表还恒空。
+
 ### 阶段 G：竞品对标 —— 竞品的优点逐个超越，竞品的已知缺陷逐个封死
 
 > 来源：2026-10-18 对项目所有者点名的竞品（rustc/cargo、Go、Zig/Nim、CPython/Lua/JS/TS、JVM/.NET/Swift、
@@ -2341,7 +2366,49 @@
 
 ## 2. 当前指针
 
-> **F16 轮收尾（2026-10-19，cron-41）：F16 勾 `[x]`，新登记 F68/F69 未修；本段取代上面 F15 轮那段的"下一轮"** ——
+> **F17 轮收尾（2026-10-19，cron-42）：F17 只过两格、保持 `[ ]`，新登记 F70 未修；本段取代上面 F16 轮那段的"下一轮"** ——
+> 交付 = **§11.2 的 `EnvOffsets` 第一次进产物（Rust 写 + C 读 + 两侧同一判据）**，裁定 = 偏差 **D-60(a)–(h)**：
+> `artifact::EnvRec` + `Content.env_offsets` + `write()` 在 `ResourceKeys` 之后发一条**自描述行数**的区段
+> （208 字节冻结记录连条数槽位都没有 ⇒ 位置沿用 D-32 推导、条数写在区段自己的 4 字节头里），
+> `env_region()/env_offsets()` 推导读法，`infy artifact info` 打 **11 行** `env.*`，`dump_sections` 与
+> `describe_offset` 认这一格（顺带补上此前会打成"区段间隙"的 `ResourceKeys`）；C 侧同步：
+> `infy_env_layout_hash()` 里那份匿名 `fields[11][2]` 提成 **`g_env_fields`**（一份表同时喂哈希与对账），
+> 新增 `infy_art_env_at/count/row/offset_of/check` + `infy_art_lock_key_index`，`infy_art_read_file` 加
+> "条数越界即拒"，`infy_art_dump_meta` 渲同 11 行并**多收一个 `blob_len`**，`infy_runtime_start` 按
+> §11.3 第 3 步对账（不符 ⇒ `R-0905`；缺表 = 0，不是红），`infy_lock_acquire` 有声明表而名字不在表里
+> ⇒ `R-0004` + 点名 §11.2。夹具 `INFY_REGENERATE_FIXTURE=1` 重生成 **730 → 1079 字节**，`test_rt.c` 的
+> `build_artifact()` 改成**真的**按推导规则摆放（旧写法把空 `export` 顶在 200，两张推导表都会落进池里）。
+> **基线（本机 `-j 1`）**：开工 **613 passed / 0 failed** ⇒ 收尾 **619 / 0**（+6 全在 `artifact` 18 → **24**）、
+> `cargo check --offline --lib -j 1` **0 error / 0 warning**、`cargo build --offline --release -j 1` exit **0**、
+> rt **32353 → 32382 / 0**（+29，两份 `-c` 仍 stderr 0 字节）、两条 IFBC **180/180** + `cmp` 无差异、
+> tour `fmt --check / check / build / run / test / build --verify-reproducible` 六连 exit **0**、
+> 产物 **200700 → 204548**（宿主镜像 203397 + blob **1087** + 段尾 64；**C11 12512 与 build-id
+> `d7c4408e…370015` 一字未动** —— 增的是 `infy_rt.c` 的镜像 +3499 与区段 +349）、
+> `infy conformance --report` 仍 **83 = 77/0/6 ⇒ exit 1**（92.8%）、`python scripts/check-doc-numbers.py`
+> **exit 0 / PASS total=619 modules=23 table_rows=23 status_terms=23**。
+> **措辞红线（本轮新增，别踩）**：① 不许写"锁键声明已被真程序校验"——校验代码在（C 侧三条断言用夹具里
+> 那条真实键），但喂它的前端表**恒空**：`std.chain.lock("db")` 过不了 `infy check`（实测 exit 2 + `E-0101`/`E-0110`），
+> 见 **F70/F40**；② 不许写"两侧装载期校验等价"——本轮只做到"同一份字节给同一个结论"（`Bad::EnvTableEscapesBlob`
+> ↔ C 的 `artifact rejected: the EnvOffsets row count escapes the blob`）；③ §11.3 第 3 步的接线点是
+> `infy_runtime_start` 读**自身**容器，动态装载 `.infib` 那一路仍无落点；④ `infy artifact info` 打 11 行只对
+> **真程序产物**成立，手写/旧容器打 `n_env_offsets 0`（不是缺行，也不是红）。
+> 既有红线不变：覆盖 83/2300 ⇒ 不得声称"INFY v2.0 兼容"；"两侧装载期校验等价"不许讲（F26 / D-42）；
+> 派生代码的类型标注不可信（F49）；`return v;` 收尾仍无条件 `E-0053`（F55）；带载荷的用户变体仍造不出来（F62）；
+> `fmt` 的 §10.11 trait 面只对实参是标量时成立（F65/F35）；`.inf sum` 的运行时自校验仍无落点（F69）。
+> **下一轮 = ①** 现算欠账补推 + 回查**覆盖本轮交付树**的那条 run：步 7 应打 **619 passed / 0 failed**、步 8 告警 0、
+> 步 10 rt **32382**、步 11 两条 IFBC **180/180** + `cmp`、步 12 tour 六条全 exit 0；**README 第 21 行那条 runner 产物
+> 数字（221823 / blob 738）仍属 F16 的 run，本轮只就地标注"待回查换新"，下一班要把它换成新数**；
+> `cancelled` 既不是红也不是绿。**②** §1 第一个 `[ ]` 仍是 **F17**（只剩"前端把 `std.chain.lock` 的字面量按字节序
+> 排序去重收进 `Content.resource_keys`"那一格，被 **F70**（接 **F40**）挡着；卡住就按 §2 顺延 **F18**）——
+> **F18 的落点已被本轮动过**：`infy_art_dump_meta` 现在收 `blob_len`，`meta` 段那行仍写死 `off=0 len=0`，改它不必再动签名。
+> **③ 本轮欠的一次验证**：没跑变异探针——`Bad::EnvTableEscapesBlob`、`infy_art_env_check` 与 `infy_lock_acquire` 的
+> 声明校验都只有"新增测试 + `mode 3` 反例"，没证过"摘掉判据后测试会变红"；形状照 `scripts/f16-mutation-probe.py`
+> （要求指定那条测试变红、`finally` 按字节复原 + sha256 复验）。**④ 卫生欠账不变**：F68（§1 引用的码号回核到
+> `codes.rs`，脚本化）、全仓 `while !at(…) && !at_end()` 的前进守卫清点（F53）、"返回 `(树, 消耗数)`" helper 的
+> 其余调用点（F63 形状）。**⑤ 本轮脚本可复用**：`scripts/sync-doc-numbers-f17.py`（29 条规则逐条报命中数，两条锚点
+> 不符被它自己挡下；字节级读写 + CRLF 计数守卫）。
+
+> **F16 轮收尾（2026-10-19，cron-41）：F16 勾 `[x]`，新登记 F68/F69 未修；本段已被上面 F17 轮那段取代，其"下一轮"不再有效** ——
 > 交付 = **阶段 [10] 的 `.inf sum` ↔ `MODULE.infy.lock` 逐条比对**（裁定 = 偏差 **D-59(a)–(g)**）：
 > `artifact::Artifact::sums()`（读侧解码器第一次存在）+ `cli::dirhash_shape`（§5.8 第 1 项形态门禁）+
 > `cli::sum_verify_text`（**双向**逐条）+ `artifact_cmd` 的 `verify` 分支 ⇒ `infy artifact verify <产物>

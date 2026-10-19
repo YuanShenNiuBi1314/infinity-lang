@@ -28,6 +28,26 @@ pub const META_MAGIC: &[u8; 8] = b"INFYMETA";
 pub const META_FIXED_BYTES: usize = 208;
 /// The six §7.4 segments, counted into `seg_count`.
 pub const SEG_COUNT: u16 = 6;
+/// §11.2 `EnvOffsets`. The frozen 208-byte record has no slot for it — not even a row count — so
+/// the region follows `ResourceKeys` (the D-32 derivation) and prefixes its own count (D-60).
+pub const ENV_COUNT_BYTES: usize = 4;
+/// One `EnvOffsets` row: `(u32 name pool index, u32 offset, u32 size, u32 type tag)`.
+pub const ENV_REC_BYTES: usize = 16;
+/// Type tags for the fourth column. §11.2 asks for a 「类型标签」 but gives no value table, so this
+/// is the §4.6 field set's own order (u32, u64, f32, str) — recorded as D-60.
+pub const ENV_TY_U32: u32 = 0;
+pub const ENV_TY_U64: u32 = 1;
+pub const ENV_TY_F32: u32 = 2;
+pub const ENV_TY_STR: u32 = 3;
+
+pub fn env_tag_name(tag: u32) -> &'static str {
+    match tag {
+        ENV_TY_U64 => "u64",
+        ENV_TY_F32 => "f32",
+        ENV_TY_STR => "str",
+        _ => "u32",
+    }
+}
 
 /// Byte offsets inside the 208-byte `.inf meta` fixed record; mirrors `INFY_META_OFF_*`.
 pub mod meta_off {
@@ -125,7 +145,7 @@ pub fn describe_offset(bytes: &[u8], off: usize) -> String {
         Err(e) => return format!("差异偏移 {off} 在 blob 内，但 .inf meta 不可解析：{e}"),
     };
     let m = &art.meta;
-    let named: [(&str, Region); 9] = [
+    let named: [(&str, Region); 11] = [
         (".inf meta", Region { off: 0, len: META_FIXED_BYTES as u32 }),
         ("字符串池", m.strings),
         ("ChainTable", m.chains),
@@ -134,6 +154,8 @@ pub fn describe_offset(bytes: &[u8], off: usize) -> String {
         (".inf ifbc", m.ifbc),
         (".inf sum", m.sum),
         ("入口/导出表", m.export),
+        ("ResourceKeys", Region { off: m.export.off + m.export.len, len: 4 * m.n_resource_keys }),
+        ("EnvOffsets", art.env_region()),
         (".inf rodata", m.rodata),
     ];
     for (name, r) in named {
@@ -330,6 +352,27 @@ impl SumRec {
     }
 }
 
+/// §11.2 `EnvOffsets` row: one `env.*` name with the offset and size the host snapshot puts it at
+/// plus the type tag codegen used. `name` is the §4.6 field name without the `env.` prefix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvRec {
+    pub name: String,
+    pub offset: u32,
+    pub size: u32,
+    pub tag: u32,
+}
+
+impl EnvRec {
+    fn bytes(&self, pool: &mut Pool) -> Vec<u8> {
+        let mut v = Vec::with_capacity(ENV_REC_BYTES);
+        push_u32(&mut v, pool.intern(&self.name));
+        push_u32(&mut v, self.offset);
+        push_u32(&mut v, self.size);
+        push_u32(&mut v, self.tag);
+        v
+    }
+}
+
 fn push_u32(v: &mut Vec<u8>, x: u32) {
     v.extend_from_slice(&x.to_le_bytes());
 }
@@ -406,6 +449,10 @@ pub struct Content<'a> {
     /// §8.4/§12 `std.chain.lock` resource keys; the front end does not collect them yet, so the
     /// region stays declared-and-empty rather than invented (BACKLOG C3 "明确未做").
     pub resource_keys: Vec<String>,
+    /// §11.2 `EnvOffsets`: the §4.6 field set as the compiler measured it for this target. Written
+    /// whenever the front end has a table (production builds always do); an empty vec writes a
+    /// zero-count region, which readers report as "no table" rather than as a mismatch.
+    pub env_offsets: Vec<EnvRec>,
     /// §7.4 entry description: `(kind, name)` with kind 0 = `entry_chain`, 1 = `fn main`. The
     /// frozen 208-byte meta record has no entry slot, so it is written as the first record of the
     /// `export` region — `(u32 kind, u32 pool index)` (D-32).
@@ -428,6 +475,7 @@ pub enum Bad {
     BlobCarriesMagic,
     IfabiMismatch(u32),
     SegmentRangeEscapesBlob,
+    EnvTableEscapesBlob,
 }
 
 impl std::fmt::Display for Bad {
@@ -449,6 +497,9 @@ impl std::fmt::Display for Bad {
                 return write!(f, ".inf meta IFABI {v} != runtime IFABI (§11.3 step 1)")
             }
             Bad::SegmentRangeEscapesBlob => ".inf meta segment range escapes the blob",
+            Bad::EnvTableEscapesBlob => {
+                "the §11.2 EnvOffsets row count escapes the blob (D-60: the table is self-sized, so a count that does not fit is a broken container)"
+            }
         };
         f.write_str(s)
     }
@@ -522,6 +573,38 @@ impl<'a> Artifact<'a> {
             .map(|c| self.pool_string(rd_u32(c)))
             .collect()
     }
+    /// `(off, len)` of the `EnvOffsets` region: it starts where `ResourceKeys` ends (D-60), and its
+    /// length is its own count column, so a container without a table reads as a 4-byte region.
+    pub fn env_region(&self) -> Region {
+        let off = self.meta.export.off + self.meta.export.len + 4 * self.meta.n_resource_keys;
+        let at = off as usize;
+        if at + ENV_COUNT_BYTES > self.blob.len() {
+            return Region { off, len: 0 };
+        }
+        let n = rd_u32(&self.blob[at..at + ENV_COUNT_BYTES]) as usize;
+        Region { off, len: (ENV_COUNT_BYTES + n * ENV_REC_BYTES) as u32 }
+    }
+    /// §11.2 `EnvOffsets` rows. A count that promises more bytes than the blob holds yields the
+    /// rows that do fit — a truncated tail is dropped, never guessed at (same rule as `sums()`).
+    pub fn env_offsets(&self) -> Vec<EnvRec> {
+        let r = self.env_region();
+        if r.len == 0 || (r.off as usize) + ENV_COUNT_BYTES > self.blob.len() {
+            return Vec::new();
+        }
+        let n = rd_u32(&self.blob[r.off as usize..r.off as usize + ENV_COUNT_BYTES]) as usize;
+        let body_at = r.off as usize + ENV_COUNT_BYTES;
+        self.blob[body_at..]
+            .chunks(ENV_REC_BYTES)
+            .take(n)
+            .filter(|c| c.len() == ENV_REC_BYTES)
+            .map(|c| EnvRec {
+                name: self.pool_string(rd_u32(&c[0..4])),
+                offset: rd_u32(&c[4..8]),
+                size: rd_u32(&c[8..12]),
+                tag: rd_u32(&c[12..16]),
+            })
+            .collect()
+    }
     /// §7.4's entry description, read from the first record of the export region.
     pub fn entry(&self) -> Option<(u32, String)> {
         if self.meta.export.len < 8 {
@@ -535,8 +618,9 @@ impl<'a> Artifact<'a> {
 /// Assemble the container: `host image | blob | trailer`.
 ///
 /// The blob layout is `meta | pool pairs | chains | events | nodes | ifbc | sum | export |
-/// resource keys | rodata`, so every region offset falls out of the lengths before it — no
-/// back-patching, which is also why two builds of the same content cannot differ by layout luck.
+/// resource keys | env offsets | rodata`, so every region offset falls out of the lengths before
+/// it — no back-patching, which is also why two builds of the same content cannot differ by
+/// layout luck.
 pub fn write(c: &Content) -> Result<Vec<u8>, Bad> {
     let mut pool = Pool::new();
     // Intern in a fixed field order so indices are a function of content only.
@@ -555,6 +639,11 @@ pub fn write(c: &Content) -> Result<Vec<u8>, Bad> {
     for k in &c.resource_keys {
         let idx = pool.intern(k);
         push_u32(&mut reskey_bytes, idx);
+    }
+    let mut env_bytes: Vec<u8> = Vec::with_capacity(ENV_COUNT_BYTES + c.env_offsets.len() * ENV_REC_BYTES);
+    push_u32(&mut env_bytes, c.env_offsets.len() as u32);
+    for e in &c.env_offsets {
+        env_bytes.extend_from_slice(&e.bytes(&mut pool));
     }
     let export: Vec<u8> = match (c.entry.as_ref(), entry_name_idx) {
         (Some((kind, _)), Some(idx)) => {
@@ -583,6 +672,8 @@ pub fn write(c: &Content) -> Result<Vec<u8>, Bad> {
     // The `ResourceKeys` table advances the cursor but has no slot in the frozen meta record;
     // readers derive it as `export.off + export.len` for `4 * n_resource_keys` bytes (D-32).
     let _ = region_of(&reskey_bytes);
+    // `EnvOffsets` follows it and derives the same way, self-sized by its own count column (D-60).
+    let _ = region_of(&env_bytes);
     let (pair_bytes, str_bytes) = pool.build(cursor as u32);
     let r_rodata = Region { off: cursor as u32, len: str_bytes.len() as u32 };
     let r_strings = Region { off: pairs_at, len: pairs_len };
@@ -632,6 +723,7 @@ pub fn write(c: &Content) -> Result<Vec<u8>, Bad> {
     blob.extend_from_slice(&sum_bytes);
     blob.extend_from_slice(&export);
     blob.extend_from_slice(&reskey_bytes);
+    blob.extend_from_slice(&env_bytes);
     blob.extend_from_slice(&str_bytes);
     debug_assert_eq!(blob.len(), blob_len as usize);
     // The reader counts trailers over the appended area only (D-33), so the blob must not carry a
@@ -788,6 +880,18 @@ pub fn read(file: &[u8], runtime_ifabi: u32) -> Result<Artifact<'_>, Bad> {
             return Err(Bad::SegmentRangeEscapesBlob);
         }
     }
+    // §11.2 `EnvOffsets` has no meta slot either, so its declared row count is the only thing that
+    // bounds it (D-60): a count that does not fit the blob refuses the container instead of being
+    // read as a shorter table — the same rule `.inf sum`'s verifier applies to its row count.
+    {
+        let at = (meta.export.off as usize + meta.export.len as usize) + 4 * meta.n_resource_keys as usize;
+        if at + ENV_COUNT_BYTES <= blob.len() {
+            let n = rd_u32(&blob[at..at + ENV_COUNT_BYTES]) as u64;
+            if at as u64 + ENV_COUNT_BYTES as u64 + n * ENV_REC_BYTES as u64 > t.blob_len as u64 {
+                return Err(Bad::EnvTableEscapesBlob);
+            }
+        }
+    }
     let pairs = &blob[meta.strings.off as usize..(meta.strings.off + meta.strings.len) as usize];
     let pool: Vec<(u32, u32)> = pairs
         .chunks(8)
@@ -839,6 +943,16 @@ pub fn dump_info(a: &Artifact) -> String {
     line("n_nodes", m.n_nodes.to_string());
     line("n_ifbc_modules", m.n_ifbc_modules.to_string());
     line("n_resource_keys", m.n_resource_keys.to_string());
+    // §11.2: `infy artifact info` shows the whole `EnvOffsets` table — the §4.6 offsets are the
+    // reason the runtime can refuse a host snapshot (§11.3 step 3), so they are not a debug detail.
+    let env = a.env_offsets();
+    line("n_env_offsets", env.len().to_string());
+    for e in &env {
+        line(
+            &format!("env.{}", e.name),
+            format!("off={} size={} {}", e.offset, e.size, env_tag_name(e.tag)),
+        );
+    }
     line(
         "entry",
         match a.entry() {
@@ -884,6 +998,7 @@ pub fn dump_sections(a: &Artifact) -> String {
     // `ResourceKeys` has no offset slot in the frozen meta record, so its place follows the blob
     // layout rule: the `n_resource_keys` u32 pool indices right after `export` (D-32).
     o.push_str(&seg("resource_keys", Region { off: m.export.off + m.export.len, len: 4 * m.n_resource_keys }));
+    o.push_str(&seg("env_offsets", a.env_region()));
     o.push_str(&seg("rodata", m.rodata));
     o.push_str("trailer regions\n");
     o.push_str(&seg(".inf ifbc", t.ifbc));
@@ -1028,8 +1143,31 @@ mod tests {
                 dirhash: "h1:AAAA".into(),
             }],
             resource_keys: vec!["std.chain.lock:db".into()],
+            env_offsets: env_rows(),
             entry: Some((ENTRY_CHAIN, "Pipeline".into())),
         }
+    }
+
+    /// §4.6's closed field set as `hir::env_table(Target::REFERENCE)` measures it — the same eleven
+    /// offsets `runtime/infy_rt.h` fixes and `hir::tests` golden-tests. The checked-in C fixture
+    /// carries them, so the cross-language lock point covers `EnvOffsets` too (F17).
+    fn env_rows() -> Vec<EnvRec> {
+        let rows: [(&str, u32, u32, u32); 11] = [
+            ("iter", 0, 4, ENV_TY_U32),
+            ("runtime_s", 4, 4, ENV_TY_U32),
+            ("realtime", 8, 8, ENV_TY_U64),
+            ("ram_mb", 16, 4, ENV_TY_U32),
+            ("cpu_use", 20, 4, ENV_TY_F32),
+            ("gpu_use", 24, 4, ENV_TY_F32),
+            ("chain_id", 28, 4, ENV_TY_U32),
+            ("node_idx", 32, 4, ENV_TY_U32),
+            ("focus_id", 36, 4, ENV_TY_U32),
+            ("platform", 40, 16, ENV_TY_STR),
+            ("build_id", 56, 16, ENV_TY_STR),
+        ];
+        rows.iter()
+            .map(|(name, offset, size, tag)| EnvRec { name: (*name).into(), offset: *offset, size: *size, tag: *tag })
+            .collect()
     }
 
     /// §7.4 / `runtime/infy_rt_internal.h`: the 208-byte meta record is a frozen layout shared with
@@ -1416,6 +1554,88 @@ mod tests {
         write(&content(&image)).expect("fixture content is well-formed")
     }
 
+    /// F17 ①: the table is written, derived and read back — `EnvOffsets` has no meta slot, so its
+    /// place comes out of the regions before it and its size out of its own count column (D-60).
+    #[test]
+    fn env_offsets_region_is_derived_and_self_sized() {
+        let bytes = write(&content(&b"img".to_vec())).unwrap();
+        let a = read(&bytes, crate::VERSION.ifabi).unwrap();
+        let r = a.env_region();
+        assert_eq!(r.off, a.meta.export.off + a.meta.export.len + 4 * a.meta.n_resource_keys);
+        assert_eq!(r.len, (ENV_COUNT_BYTES + 11 * ENV_REC_BYTES) as u32);
+        assert_eq!(a.meta.rodata.off, r.off + r.len, "rodata must start right after the table");
+        assert_eq!(a.env_offsets().len(), 11, "§4.6's closed field set, 11 rows");
+        assert!(dump_sections(&a).contains("env_offsets"), "the section map names the region");
+    }
+
+    /// Names, offsets, sizes and tags all survive the round trip in §4.6's order — codegen loads at
+    /// exactly these offsets, so a reordered or re-tagged row is a different program.
+    #[test]
+    fn env_offsets_round_trip_in_spec_order() {
+        let bytes = write(&content(&b"img".to_vec())).unwrap();
+        let a = read(&bytes, crate::VERSION.ifabi).unwrap();
+        let got = a.env_offsets();
+        assert_eq!(got, env_rows());
+        assert_eq!(got.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().first(), Some(&"iter"));
+        assert_eq!(env_tag_name(ENV_TY_F32), "f32");
+    }
+
+    /// The acceptance half of F17: `infy artifact info` prints the 11 offsets, not just a count.
+    #[test]
+    fn dump_info_prints_all_eleven_env_offsets() {
+        let bytes = write(&content(&b"img".to_vec())).unwrap();
+        let a = read(&bytes, crate::VERSION.ifabi).unwrap();
+        let t = dump_info(&a);
+        assert!(t.contains(&format!("{:<18} {}\n", "n_env_offsets", 11)), "{t}");
+        for (name, off) in
+            [("iter", 0), ("runtime_s", 4), ("realtime", 8), ("ram_mb", 16), ("cpu_use", 20),
+             ("gpu_use", 24), ("chain_id", 28), ("node_idx", 32), ("focus_id", 36),
+             ("platform", 40), ("build_id", 56)]
+        {
+            assert!(t.contains(&format!("env.{name}")), "missing `env.{name}` in:\n{t}");
+            assert!(t.contains(&format!("off={off} ")), "missing offset {off} for `env.{name}`:\n{t}");
+        }
+        assert!(t.contains("env.build_id"), "str rows print too");
+    }
+
+    /// No table is a legal container (a hand-built one may omit it) and must read as zero rows —
+    /// never as eleven invented ones.
+    #[test]
+    fn an_empty_env_table_reads_as_zero_rows() {
+        let image = b"img".to_vec();
+        let mut c = content(&image);
+        c.env_offsets = vec![];
+        let bytes = write(&c).unwrap();
+        let a = read(&bytes, crate::VERSION.ifabi).unwrap();
+        assert_eq!(a.env_region().len, ENV_COUNT_BYTES as u32);
+        assert!(a.env_offsets().is_empty(), "a zero-count table must not synthesize rows");
+        assert!(dump_info(&a).contains(&format!("{:<18} {}\n", "n_env_offsets", 0)));
+    }
+
+    /// A row count that does not fit the blob is a broken container: refuse it, do not read it as a
+    /// shorter table (`.inf sum`'s verifier applies the same shape of rule).
+    #[test]
+    fn an_env_count_that_escapes_the_blob_refuses_the_container() {
+        let mut bytes = write(&content(&b"img".to_vec())).unwrap();
+        let a = read(&bytes, crate::VERSION.ifabi).unwrap();
+        let at = a.trailer.blob_off as usize + a.env_region().off as usize;
+        bytes[at..at + ENV_COUNT_BYTES].copy_from_slice(&9999u32.to_le_bytes());
+        assert_eq!(
+            read(&bytes, crate::VERSION.ifabi).err(),
+            Some(Bad::EnvTableEscapesBlob),
+            "装不下的行数必须拒绝容器，而不是读成一张短表"
+        );
+    }
+
+    /// §7.3 item 3: a byte inside the table is named, not reported as padding.
+    #[test]
+    fn describe_offset_names_the_env_region() {
+        let bytes = write(&content(&b"img".to_vec())).unwrap();
+        let a = read(&bytes, crate::VERSION.ifabi).unwrap();
+        let off = a.trailer.blob_off as usize + a.env_region().off as usize + ENV_COUNT_BYTES;
+        assert!(describe_offset(&bytes, off).contains("EnvOffsets"), "{}", describe_offset(&bytes, off));
+    }
+
     /// C3 的交叉验证锁点：`runtime/fixtures/artifact_rust_writer.bin` 是**本模块写入器**的逐字节固定
     /// 输出，`runtime/test_rt.c` 用生产读取器 `infy_art_read_file` 读同一份字节。这条测试锁住
     /// "写入器再也不会改变夹具"，C 侧锁住"C 读者认得 Rust 作者写的每一个字段"。
@@ -1450,6 +1670,7 @@ mod tests {
         assert_eq!(a.meta.n_nodes, 2);
         assert_eq!(a.meta.n_ifbc_modules, 0);
         assert_eq!(a.meta.n_resource_keys, 1);
+        assert_eq!(a.env_offsets(), env_rows(), "夹具带着 11 行 EnvOffsets，C 侧读者按同一张表对账");
         assert_eq!(a.trailer.seg_count, SEG_COUNT);
         assert_eq!(a.entry(), Some((ENTRY_CHAIN, "Pipeline".to_string())));
         assert_eq!(a.pool_string(0), "x86_64-pc-windows-gnu", "池索引 0 = target，C 侧同序");

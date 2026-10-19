@@ -1504,28 +1504,33 @@ void infy_rng_shuffle(InfyRng* r, void* base, uint64_t n, uint32_t elem_size) {
 
 /* ======================= env (§4.6) ======================= */
 
+/* §4.6's closed field set with the offsets, sizes and §11.2 type tags this runtime's snapshot
+ * actually has. One table serves three judges: the layout hash (§11.3 step 3), the container's
+ * `EnvOffsets` cross-check and `env.x`'s own offsets. */
+typedef struct { const char* name; uint64_t off; uint64_t size; uint32_t tag; } InfyEnvField;
+static const InfyEnvField g_env_fields[11] = {
+    { "iter",      offsetof(InfyEnvSnapshot, iter),       4,  INFY_ENV_TY_U32 },
+    { "runtime_s", offsetof(InfyEnvSnapshot, runtime_s),  4,  INFY_ENV_TY_U32 },
+    { "realtime",  offsetof(InfyEnvSnapshot, realtime),   8,  INFY_ENV_TY_U64 },
+    { "ram_mb",    offsetof(InfyEnvSnapshot, ram_mb),     4,  INFY_ENV_TY_U32 },
+    { "cpu_use",   offsetof(InfyEnvSnapshot, cpu_use),    4,  INFY_ENV_TY_F32 },
+    { "gpu_use",   offsetof(InfyEnvSnapshot, gpu_use),    4,  INFY_ENV_TY_F32 },
+    { "chain_id",  offsetof(InfyEnvSnapshot, chain_id),   4,  INFY_ENV_TY_U32 },
+    { "node_idx",  offsetof(InfyEnvSnapshot, node_idx),   4,  INFY_ENV_TY_U32 },
+    { "focus_id",  offsetof(InfyEnvSnapshot, focus_id),   4,  INFY_ENV_TY_U32 },
+    { "platform",  offsetof(InfyEnvSnapshot, platform),  16,  INFY_ENV_TY_STR },
+    { "build_id",  offsetof(InfyEnvSnapshot, build_id),  16,  INFY_ENV_TY_STR }
+};
+
 uint64_t infy_env_layout_hash(void) {
     /* Field count + offsets + sizes, hashed with the fixed xxHash64 (§11.3 step 3). The layout is
      * IFABI-fixed; any change here must be an ABI bump. */
     uint64_t h = 0x9E3779B97F4A7C15ull;
-    uint64_t fields[11][2] = {
-        { offsetof(InfyEnvSnapshot, iter),                 4 },
-        { offsetof(InfyEnvSnapshot, runtime_s),            4 },
-        { offsetof(InfyEnvSnapshot, realtime),             8 },
-        { offsetof(InfyEnvSnapshot, ram_mb),               4 },
-        { offsetof(InfyEnvSnapshot, cpu_use),              4 },
-        { offsetof(InfyEnvSnapshot, gpu_use),              4 },
-        { offsetof(InfyEnvSnapshot, chain_id),             4 },
-        { offsetof(InfyEnvSnapshot, node_idx),             4 },
-        { offsetof(InfyEnvSnapshot, focus_id),             4 },
-        { offsetof(InfyEnvSnapshot, platform),            16 },
-        { offsetof(InfyEnvSnapshot, build_id),            16 }
-    };
     infy_hash_feed_u64(&h, sizeof(InfyEnvSnapshot));
     infy_hash_feed_u64(&h, 11);                       /* the closed field set (§4.6) */
     for (int i = 0; i < 11; i++) {
-        infy_hash_feed_u64(&h, fields[i][0]);
-        infy_hash_feed_u64(&h, fields[i][1]);
+        infy_hash_feed_u64(&h, g_env_fields[i].off);
+        infy_hash_feed_u64(&h, g_env_fields[i].size);
     }
     return h;
 }
@@ -2519,6 +2524,20 @@ static InfyLockEntry* lock_find_locked(const char* name, int create) {
 
 uint64_t infy_lock_acquire(const char* resource, const InfyNodeLoc* at) {
     if (!resource) { infy_panic(R_INDEX_OOB, "lock(): NULL resource name", at); return 0; }
+    /* §11.2: `ResourceKeys` is the container's declaration of every resource name the build saw.
+     * A declared table that does not contain this name is a build-time bug the runtime can still
+     * name; no container, or a container declaring nothing, leaves the request unchecked (F17). */
+    {
+        InfyMetaFixed m; uint8_t* ab = 0; uint64_t al = 0;
+        if (infy_art_self(&m, &ab, &al) == 0 && m.n_resource_keys > 0 &&
+            infy_art_lock_key_index(&m, ab, al, resource) < 0) {
+            char b[256];
+            snprintf(b, sizeof b, "lock(): resource '%.60s' is not in the artifact's ResourceKeys "
+                                  "table (§11.2)", resource);
+            infy_panic(R_INDEX_OOB, b, at);
+            return 0;
+        }
+    }
     locks_init_once();
     infy_mtx_lock(&g_locks_mu);
     InfyLockEntry* e = lock_find_locked(resource, 1);
@@ -3109,6 +3128,20 @@ int infy_art_read_file(const char* path, InfyMetaFixed* out_meta, uint8_t** blob
         infy_free(file);
         return -1;
     }
+    /* §11.2 `EnvOffsets` is self-sized (D-60), so its count column is the only bound: a count that
+     * does not fit the blob rejects the container instead of reading as a shorter table. The Rust
+     * reader refuses the same way (`Bad::EnvTableEscapesBlob`). */
+    {
+        uint64_t at = (uint64_t)m.off_export + m.len_export + 4ull * m.n_resource_keys;
+        if (at + INFY_ENV_COUNT_BYTES <= t.blob_len) {
+            uint64_t n = infy_art_rd_u32(bl + at);
+            if (at + INFY_ENV_COUNT_BYTES + n * INFY_ENV_REC_BYTES > t.blob_len) {
+                fprintf(stderr, "artifact rejected: the EnvOffsets row count escapes the blob\n");
+                infy_free(file);
+                return -1;
+            }
+        }
+    }
     /* The blob is handed out as an owned copy; the file buffer (which also holds the host image)
      * is released. malloc, not infy_alloc: this is tool-side data and must not show up in
      * std.rt.mem_stats(). */
@@ -3135,12 +3168,115 @@ InfyStr infy_art_string(const InfyMetaFixed* m, const uint8_t* blob, uint32_t id
     return s;
 }
 
+/* ---- §11.2 mirror tables: EnvOffsets and ResourceKeys (F17) ---- */
+
+static const char* infy_env_tag_name(uint32_t tag) {
+    switch (tag) {
+        case INFY_ENV_TY_U64: return "u64";
+        case INFY_ENV_TY_F32: return "f32";
+        case INFY_ENV_TY_STR: return "str";
+        default:              return "u32";
+    }
+}
+
+uint64_t infy_art_env_at(const InfyMetaFixed* m) {
+    if (!m) return 0;
+    return (uint64_t)m->off_export + m->len_export + 4ull * m->n_resource_keys;
+}
+
+uint32_t infy_art_env_count(const InfyMetaFixed* m, const uint8_t* blob, uint64_t blob_len) {
+    if (!m || !blob) return 0;
+    uint64_t at = infy_art_env_at(m);
+    if (at + INFY_ENV_COUNT_BYTES > blob_len) return 0;
+    return (uint32_t)infy_art_rd_u32(blob + at);
+}
+
+int infy_art_env_row(const InfyMetaFixed* m, const uint8_t* blob, uint64_t blob_len, uint32_t i,
+                     uint64_t* offset, uint64_t* size, uint32_t* tag, InfyStr* name) {
+    if (!m || !blob) return -1;
+    uint64_t at = infy_art_env_at(m);
+    if (at + INFY_ENV_COUNT_BYTES > blob_len) return -1;
+    uint32_t n = (uint32_t)infy_art_rd_u32(blob + at);
+    if (i >= n) return -1;
+    uint64_t row = at + INFY_ENV_COUNT_BYTES + (uint64_t)i * INFY_ENV_REC_BYTES;
+    if (row + INFY_ENV_REC_BYTES > blob_len) return -1;
+    if (offset) *offset = infy_art_rd_u32(blob + row + 4);
+    if (size)   *size   = infy_art_rd_u32(blob + row + 8);
+    if (tag)    *tag    = (uint32_t)infy_art_rd_u32(blob + row + 12);
+    if (name)   *name   = infy_art_string(m, blob, (uint32_t)infy_art_rd_u32(blob + row));
+    return 0;
+}
+
+int infy_art_env_offset_of(const InfyMetaFixed* m, const uint8_t* blob, uint64_t blob_len,
+                           const char* name, uint64_t* offset, uint64_t* size) {
+    if (!name) return -1;
+    uint32_t n = infy_art_env_count(m, blob, blob_len);
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t off = 0, sz = 0; uint32_t tag = 0; InfyStr nm = { (const uint8_t*)"", 0 };
+        if (infy_art_env_row(m, blob, blob_len, i, &off, &sz, &tag, &nm) != 0) return -1;
+        if (nm.len == strlen(name) && memcmp(nm.ptr, name, nm.len) == 0) {
+            if (offset) *offset = off;
+            if (size) *size = sz;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* Compare the container's table with this runtime's own snapshot layout (§11.3 step 3). No table
+ * is not a mismatch: `infy_art_env_check` says so and the caller keeps the handshake's hash path. */
+int infy_art_env_check(const InfyMetaFixed* m, const uint8_t* blob, uint64_t blob_len,
+                       const char** why) {
+    static const char* reasons[6] = {
+        "EnvOffsets row count differs from the runtime's field count (§11.3 step 3)",
+        "EnvOffsets row escapes the blob (§11.3 step 3)",
+        "EnvOffsets field name differs from §4.6's closed set (§11.3 step 3)",
+        "EnvOffsets field offset differs from offsetof(InfyEnvSnapshot, …) (§11.3 step 3)",
+        "EnvOffsets field size differs from the runtime's snapshot field (§11.3 step 3)",
+        "EnvOffsets type tag differs from the runtime's field type (§11.3 step 3)"
+    };
+    if (why) *why = 0;
+    if (!m || !blob) return 0;
+    uint32_t n = infy_art_env_count(m, blob, blob_len);
+    if (n == 0) return 0;
+    if (n != 11) { if (why) *why = reasons[0]; return -1; }
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t off = 0, sz = 0; uint32_t tag = 0; InfyStr nm = { (const uint8_t*)"", 0 };
+        if (infy_art_env_row(m, blob, blob_len, i, &off, &sz, &tag, &nm) != 0) {
+            if (why) *why = reasons[1];
+            return -1;
+        }
+        const InfyEnvField* w = &g_env_fields[i];
+        if (nm.len != strlen(w->name) || memcmp(nm.ptr, w->name, nm.len) != 0) {
+            if (why) *why = reasons[2];
+            return -1;
+        }
+        if (off != w->off)   { if (why) *why = reasons[3]; return -1; }
+        if (sz  != w->size)  { if (why) *why = reasons[4]; return -1; }
+        if (tag != w->tag)   { if (why) *why = reasons[5]; return -1; }
+    }
+    return 0;
+}
+
+int infy_art_lock_key_index(const InfyMetaFixed* m, const uint8_t* blob, uint64_t blob_len,
+                            const char* name) {
+    if (!m || !blob || !name) return -1;
+    uint64_t at = (uint64_t)m->off_export + m->len_export;
+    for (uint32_t i = 0; i < m->n_resource_keys; i++) {
+        uint64_t e = at + (uint64_t)i * 4ull;
+        if (e + 4 > blob_len) return -1;
+        InfyStr s = infy_art_string(m, blob, (uint32_t)infy_art_rd_u32(blob + e));
+        if (s.len == strlen(name) && memcmp(s.ptr, name, s.len) == 0) return (int)i;
+    }
+    return -1;
+}
+
 static void dump_str_field(FILE* out, const char* key, InfyStr s) {
     fprintf(out, "%-18s %.*s\n", key, (int)(s.len > 120 ? 120 : s.len),
             s.ptr ? (const char*)s.ptr : "");
 }
 
-void infy_art_dump_meta(const InfyMetaFixed* m, const uint8_t* blob, FILE* out) {
+void infy_art_dump_meta(const InfyMetaFixed* m, const uint8_t* blob, uint64_t blob_len, FILE* out) {
     if (!m || !out) return;
     fprintf(out, "INFY artifact (.inf meta)\n");
     fprintf(out, "%-18s %u\n", "ifabi", (unsigned)m->ifabi);
@@ -3167,6 +3303,19 @@ void infy_art_dump_meta(const InfyMetaFixed* m, const uint8_t* blob, FILE* out) 
     fprintf(out, "%-18s %u\n", "n_nodes", (unsigned)m->n_nodes);
     fprintf(out, "%-18s %u\n", "n_ifbc_modules", (unsigned)m->n_ifbc_modules);
     fprintf(out, "%-18s %u\n", "n_resource_keys", (unsigned)m->n_resource_keys);
+    /* §11.2: `infy artifact info` prints the whole EnvOffsets table, so the C rendering shows it too
+     * — the two dumps are meant to be diffable line by line. */
+    uint32_t nenv = infy_art_env_count(m, blob, blob_len);
+    fprintf(out, "%-18s %u\n", "n_env_offsets", (unsigned)nenv);
+    for (uint32_t i = 0; i < nenv; i++) {
+        uint64_t off = 0, sz = 0; uint32_t tag = 0; InfyStr nm = { (const uint8_t*)"", 0 };
+        if (infy_art_env_row(m, blob, blob_len, i, &off, &sz, &tag, &nm) != 0) break;
+        char key[40];
+        snprintf(key, sizeof key, "env.%.*s", (int)(nm.len > 24 ? 24 : nm.len),
+                 (const char*)nm.ptr);
+        fprintf(out, "%-18s off=%llu size=%llu %s\n", key,
+                (unsigned long long)off, (unsigned long long)sz, infy_env_tag_name(tag));
+    }
     fprintf(out, "segments\n");
     fprintf(out, "%-18s off=%-10u len=%u\n", "meta", 0u, 0u);
     fprintf(out, "%-18s off=%-10u len=%u\n", "chains", (unsigned)m->off_chains, (unsigned)m->len_chains);
@@ -3671,6 +3820,14 @@ int infy_runtime_start(uint32_t entry_chain, uint32_t entry_node) {
     uint64_t blen = 0;
     if (infy_art_self(&m, &blob, &blen) == 0) {
         infy_set_profile_from_meta(&m);       /* overflow / radius / quota / stacks all come from meta */
+        /* §11.3 step 3: the container states the snapshot layout its code was compiled against. A
+         * disagreement refuses the run — §11.3 says refuse, never degrade. No table (count 0) is
+         * not a disagreement; the hash path in infy_host_handshake stays the only other judge. */
+        const char* why = 0;
+        if (infy_art_env_check(&m, blob, blen, &why) != 0) {
+            infy_panic(R_ENV_LAYOUT, why ? why : "EnvOffsets disagrees with the runtime (§11.3 step 3)",
+                       infy_current_node_loc());
+        }
     } else {
         /* No readable container: keep the strict defaults (§7.2 — checks are never off) but say so
          * once, because §7.4 requires a runtime to be self-describing. */

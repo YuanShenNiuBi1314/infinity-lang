@@ -36,7 +36,7 @@ $ echo $?
 
 ```
 $ cargo test --offline --lib
-test result: ok. 613 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out   # **F16 轮 606 → 613**（`cli` 48 → **55** = 阶段 [10] 的 `.inf sum` ↔ lock 比对，裁定 = 偏差 **D-59**，实测见 `docs/coverage.md` 的 **P41**）；**上一档 F15 轮 583 → 606**（新模块 `fmtstr` 0 → **10** · `macro_expand` 35 → **40** · `sema` 37 → **40** · `codegen` 34 → **37** · `parser` 14 → **15** · `cli` 47 → **48** = §10.11 的 `fmt!` 三段，裁定 = 偏差 **D-58**，实测见 `docs/coverage.md` 的 **P40**）；**上一档 F14 轮 579 → 583**（其间 `btrack` 31 → **34**（**F58 轮**：3.13 能力表按 CPython 3.13 自己的发布件重建，外加 `cap_opmap::opcode_contract` 这份与表不同源的版本契约，装载期三方向校验报 `E-0713`） ⇒ 576 → 579），`sema` 35 → **37** · `codegen` 33 → **34** · `borrow` 22 → **23**（构造器模式的绑定进臂体作用域，裁定 = 偏差 **D-56**，探针 `scripts/f14-mutation-probe.ps1`）；**上一档 F13 轮 570 → 576**，`sema` 29→**35**（负字面量取上下文类型 + 每个已知上下文各一对正反例 + 移位量按 §4.12 排除 + 带后缀字面量按自己的范围取负，裁定 = 偏差 **D-55**，见下文 F13 一节；`codegen` 33 不变，但 `literals_carry_their_resolved_width` 改认带符号发射形 `INT8_C(-128)` 并加"旧幅度形不许复现"的反向断言）；上一档 **F12/F53 轮 561 → 570**，`codegen` 27→**33**（owned 移动改「按地址取消清理项」的成对锁）· `parser` 11→**14**（链体顶层连携语句 `E-0300` + 两条前进守卫锁，见下文 F12 / F53 两节）；再上一档 **F11 轮 555 → 561**，`sema` 24→29 · `hir` 21→22 = `[T; N]` 的长度求值失败改显式 `E-0131`（不得静默取 0）的六条锁点（见下文 F11 一节）；再上一档 **F10/F51 轮 551 → 555** = 超宽枚举判别式按层报 `E-0042` 的四条锁点
+test result: ok. 619 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out   # **F17 轮 613 → 619**（`artifact` 18 → **24** = EnvOffsets 的写回读、区段推导、拒绝、渲染六锁，见 P42）；**上一档 F16 轮 606 → 613**（`cli` 48 → **55** = 阶段 [10] 的 `.inf sum` ↔ lock 比对，裁定 = 偏差 **D-59**，实测见 `docs/coverage.md` 的 **P41**）；**上一档 F15 轮 583 → 606**（新模块 `fmtstr` 0 → **10** · `macro_expand` 35 → **40** · `sema` 37 → **40** · `codegen` 34 → **37** · `parser` 14 → **15** · `cli` 47 → **48** = §10.11 的 `fmt!` 三段，裁定 = 偏差 **D-58**，实测见 `docs/coverage.md` 的 **P40**）；**上一档 F14 轮 579 → 583**（其间 `btrack` 31 → **34**（**F58 轮**：3.13 能力表按 CPython 3.13 自己的发布件重建，外加 `cap_opmap::opcode_contract` 这份与表不同源的版本契约，装载期三方向校验报 `E-0713`） ⇒ 576 → 579），`sema` 35 → **37** · `codegen` 33 → **34** · `borrow` 22 → **23**（构造器模式的绑定进臂体作用域，裁定 = 偏差 **D-56**，探针 `scripts/f14-mutation-probe.ps1`）；**上一档 F13 轮 570 → 576**，`sema` 29→**35**（负字面量取上下文类型 + 每个已知上下文各一对正反例 + 移位量按 §4.12 排除 + 带后缀字面量按自己的范围取负，裁定 = 偏差 **D-55**，见下文 F13 一节；`codegen` 33 不变，但 `literals_carry_their_resolved_width` 改认带符号发射形 `INT8_C(-128)` 并加"旧幅度形不许复现"的反向断言）；上一档 **F12/F53 轮 561 → 570**，`codegen` 27→**33**（owned 移动改「按地址取消清理项」的成对锁）· `parser` 11→**14**（链体顶层连携语句 `E-0300` + 两条前进守卫锁，见下文 F12 / F53 两节）；再上一档 **F11 轮 555 → 561**，`sema` 24→29 · `hir` 21→22 = `[T; N]` 的长度求值失败改显式 `E-0131`（不得静默取 0）的六条锁点（见下文 F11 一节）；再上一档 **F10/F51 轮 551 → 555** = 超宽枚举判别式按层报 `E-0042` 的四条锁点
 $ cargo check --offline --lib
 Finished `dev` profile  (0 warnings —— F2 轮把 50 条一次清零：20 条 `unreachable pattern`、6 条 unused import、6 条 unused variable、3 条 `depth` 赋值不读、2 条多余 `mut`、2 条 never-constructed 变体、11 条 never-used fn/method/field；**没有用 `#[allow(...)]` 消数**，其中两处是「没接上」而非「没用」，见下文 F2 一节。口径 = `cargo check --offline --lib --message-format=short` 先 `touch src/lib.rs` 再计数；上一档 50 = F1 轮，51 → 50 = D4(1) 轮删掉 `CodeBuilder.bounds`)
 $ infy check examples/tour
@@ -44,12 +44,12 @@ check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)   # exit 0
 $ infy build examples/tour
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)
 codegen ok — 12512 byte(s) of C11 written to examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
-artifact ok — 200700 byte(s) 写到 examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe（§7.4：宿主镜像 199898 + 段 blob 738 + 段尾 64，6 段）
+artifact ok — 204548 byte(s) 写到 examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe（§7.4：宿主镜像 203397 + 段 blob 1087 + 段尾 64，6 段）
   build-id d7c4408e84614ac24fe0475c31e1af24c9ab27c2790c605d9e371b4fac370015   # exit 0（C3 轮起阶段 [9] 已落地；**F6 轮换值** = D-17 把 tour 规范化 ⇒ dirhash 变；**F8 / F12 轮未变** —— build-id 的九类输入里没有宿主镜像，而产物字节恰恰因为这两轮改了 `infy_rt.c` 才 199975 → 200644 → 200700）
 $ infy run examples/tour                                        # C4 轮起：[7]-[9] 建到临时目录 + 立即执行
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)
 codegen ok — 12512 byte(s) of C11 written to %TEMP%\infy-run-<pid>-<n>\ci.c (stages [7]-[8]; 1 chain(s), 6 node(s))
-artifact ok — 200700 byte(s) 写到 %TEMP%\infy-run-<pid>-<n>\ci.exe（…）       # 程序的 stdout/stderr 逐字节转发
+artifact ok — 204548 byte(s) 写到 %TEMP%\infy-run-<pid>-<n>\ci.exe（…）       # 程序的 stdout/stderr 逐字节转发
 run ok — 程序退出码 0（stdout 0 字节 / stderr 0 字节，§13.4）                  # 这行在 stderr
 $ echo $?
 0                                                                # 程序 stdout 为空的原因见 BACKLOG F19：没有任何 INFY 构造能写 stdout
@@ -91,7 +91,7 @@ $ infy check target/scratch/cli-test-green; infy test target/scratch/cli-test-gr
 check ok — 1 file(s), 0 error(s), 0 warning(s), 0 notice(s)       # §5.9：mod_test.infy 不进普通构建
 check ok — 2 file(s), 0 error(s), 0 warning(s), 0 notice(s)       # 同一 module，infy test 看得见它
 $ infy build examples/tour --verify-reproducible
-verify-reproducible ok — 两个独立构建目录产物字节相同（200700 字节）            # exit 0，§7.3 第 3 项
+verify-reproducible ok — 两个独立构建目录产物字节相同（204548 字节）            # exit 0，§7.3 第 3 项
 $ infy build examples/tour --cc /no/such/cc
 error: E-0602 · … 无法启动 …（§7.6.2：A 轨工具链缺失或未注册，绝不静默跳过链接）  # exit 6
 $ infy artifact info examples/tour/.infy-build/x86_64-pc-windows-gnu/ci.exe --nodes
@@ -107,7 +107,7 @@ $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_ifbc.c runtime/infy_dyn.c \
       runtime/infy_rt.c runtime/test_ifbc.c -o ifbc_real && ./ifbc_real
 IFBC harness: 180 asserts, 180 pass, 0 FAIL      # exit 0，0 error / 0 warning；B2 轮真实链生产 infy_rt.c，stdout 与上一行逐字节相同
 $ gcc -std=c11 -O1 -Wall -Wextra runtime/infy_rt.c runtime/test_rt.c -o rt_tests && (cd target/scratch && ./rt_tests)
-32353 assertions, 0 failures                     # exit 0，0 error / 0 warning；链的是生产 infy_rt.c；C3 轮 +32（Rust 写 ↔ C 读的夹具锁 + D-33）；F8 轮 +5 = §11.1 host 调用跨 panic 的回滚（4 条 CK_EQ + 1 条 expect_panic）；F12 轮 +13 = `infy_cleanup_cancel` 的四组（非栈顶摘除只免跑一次 Drop / 按地址而非按值命中 / 跳过 scope 哨兵 / `#[must_drop]` 仍报 R-0730）
+32382 assertions, 0 failures                     # exit 0，0 error / 0 warning；链的是生产 infy_rt.c；C3 轮 +32（Rust 写 ↔ C 读的夹具锁 + D-33）；F8 轮 +5 = §11.1 host 调用跨 panic 的回滚（4 条 CK_EQ + 1 条 expect_panic）；F12 轮 +13 = `infy_cleanup_cancel` 的四组（非栈顶摘除只免跑一次 Drop / 按地址而非按值命中 / 跳过 scope 哨兵 / `#[must_drop]` 仍报 R-0730）
 $ gcc -std=c11 -Wall -Wextra -c runtime/infy_rt.c
 （无输出）                                        # exit 0，0 warning（B3 的验收命令；三项语义已于 B3 轮落地，见下文 B3 一节）
 $ infy fmt --check examples/tour
@@ -134,13 +134,13 @@ error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权�
 
 > **一行口径（F6 轮，2026-10-17）**：`infy fmt --check examples/tour` 从本轮起 **exit 0**（偏差 **D-17** 已裁 = §9.5 胜、样例侧改写到规范形态）。下文各轮小节里的 `exit 2`（F6 未裁决）、生成 C11 **12513** 字节、`build-id 4d8250b5…55ba`、节点表行号 **8/9/10/11/16/19** 全是**裁决前那棵树**的当时实测值，保留为历史；现值 = **12512** / **`d7c4408e…370015`** / **7/8/9/10/16/20**（产物 199975 与段 blob 738 没动）。这三组数只随 tour 的字节动。**F8 轮再加一句口径**：产物字节是**宿主镜像**的函数，`infy_rt.c` 一动它就动 ⇒ 本机现值 **200700**（宿主镜像 199898；**F12 轮 200644 → 200700** = `infy_rt.c` 多了 `infy_cleanup_cancel`，+56 字节），而 build-id / C11 / 节点表行号三组没动（它们的输入里没有宿主镜像） —— 谁把规范化回滚掉，CI 步 12 的门禁与 `fmt::tests::the_tour_sources_are_the_9_5_fixpoint` 会同时红，不会静默。
 
-613 项按模块（`cargo test --offline --lib -j 1 -- --list` 逐条分组计数，合计 613；**F16 轮实测** = 上一档 606 + 7：`cli` 48 → **55**；**上一档 F15 轮实测** = 上一档 583 + 23：新模块 `fmtstr` 0 → **10** · `macro_expand` 35 → **40** · `sema` 37 → **40** · `codegen` 34 → **37** · `parser` 14 → **15** · `cli` 47 → **48**；**上一档 F14 轮实测** = 上一版 579 + 4：`sema` 35 → **37** · `codegen` 33 → **34** · `borrow` 22 → **23**；上一版 570 = F12/F53 轮实测，再上一版 561 = F11 轮实测）：
+619 项按模块（`cargo test --offline --lib -j 1 -- --list` 逐条分组计数，合计 619；**F17 轮实测** = 上一档 613 + 6：`artifact` 18 → **24**（EnvOffsets 写回读、区段推导、拒绝、渲染六锁 = P42）；**上一档 F16 轮实测** = 上一档 606 + 7：`cli` 48 → **55**；**上一档 F15 轮实测** = 上一档 583 + 23：新模块 `fmtstr` 0 → **10** · `macro_expand` 35 → **40** · `sema` 37 → **40** · `codegen` 34 → **37** · `parser` 14 → **15** · `cli` 47 → **48**；**上一档 F14 轮实测** = 上一版 579 + 4：`sema` 35 → **37** · `codegen` 33 → **34** · `borrow` 22 → **23**；上一版 570 = F12/F53 轮实测，再上一版 561 = F11 轮实测）：
 `lexer` 79 · `derive` **58**（**F9 轮 +1** = `generated_integer_literals_use_the_single_source_literal_shape`，把派生体的整数字面量钉在 parser 那一支形状上） · `fmt` **41**（**F6 轮 +1** = `the_tour_sources_are_the_9_5_fixpoint`，把 `examples/tour` 读回来逐字节比它自己的 §9.5 输出；**F10/F51 轮 +1** = `a_discriminant_wider_than_u128_is_reprinted_not_dropped`，格式化器不许把放不下 `u128` 的判别式整段删掉） · `cli` **48**（C5 轮 16 → D1(2) 轮 20 → D2 轮 28 → D3 轮 33 → E2 轮 38 → F2 轮 39 → F4 轮 41 → F5 轮 46 → **F10/F51 轮 47** = `VALUE_OPTS` 的逐项跳值 + 取值点源码回扫 + 三条命令的目录参数本体 + 空目录/缺 module 的显式失败 + `expand --derive` 的显式拒绝 + `over_wide_discriminants_stop_check_instead_of_wrapping` 的端到端 exit 2） ·
 `macro_expand` **40**（**F15 轮 +5** = 内建 `fmt!` 的阶段 [2] lowering 五锁，见 P40） · `btrack` **34**（D1(1) 前是 0，D1(2) 轮 23 → 30，**F2 轮 +1** = wheel 归档里每个成员按自己的 local header 偏移取数据，**F58 轮 +3** = 3.13 能力表的版本契约三方向校验） ·
 `atrack` **27**（D3 轮新建，此前是 1 行占位） · `codegen` **37**（**F15 轮 +3** = `fmt` 的 specs 表与实参数组发射、具名实参索引、放不下载体的点名拒绝；D3 轮 22 → 26，**F4 轮 +1** = 合法 `dyn` 形参在阶段 [8] 以条款号被拒；**F12 轮 27 → 33** = +7 条新锁（三种移动形式各一条 `cancel`/`pop` 成对、`return P { s }` 的字面量移动、借用**不**取消、无清理项**不**取消、帧局部带析构器按条款号被拒）与 −1 条被改写掉的 `moving_an_owned_binding_is_refused`（它锁的正是本轮关掉的那个缺口）） · `pkg` 24 · `sema` **40**（**F13 轮 +6** = 负字面量取上下文类型、每个已知上下文的站点各一对正反例、移位量按 §4.12 排除、带后缀字面量按自己的范围取负，见下文 F13 一节；**F9 轮 +1** = `a_derived_body_reaches_stage_4_on_one_shared_span`，同时把 F49 那条 span 碰撞量成锁点；**F10/F51 轮 +1** = `over_wide_enum_discriminants_are_e0042_and_never_a_wrap`，两条超宽判别式各一条 `E-0042`、续号不得级联、`u64::MAX` 的收集不再算术溢出；**F11 轮 +5** = `a_const_read_is_the_array_length`（`[u32; N]` = 4、`[u32; 2 + 3]` = 5、写得出来的 `[u32; 0]` 仍是 0，外加"`struct` 写在 `const` 之前"那一半现在是显式 `E-0131`）、`an_unevaluable_array_length_is_e0131`（码集**恰一条**且字段形状是 `<invalid>` 而不是 `[u32; 0]`）、`an_over_wide_array_length_does_not_wrap`（`2^64` / 宽于 `u128` / `-1` 三支）、`a_repeat_expression_length_reports_once`（`[0u32; 1 / 0]` 只留 `E-0062`）、`an_untyped_binding_without_initializer_is_still_e0131`，见下文 F11 一节） ·
 `ifbc` **22**（D4(3) 轮 +2 = 双侧文本锁点） · `hir` **22**（**F4 轮 +1** = `docs/internals/runtime-abi.md` §1 写出的 vtable 偏移被读回来与布局器比；**F11 轮 +1** = `an_over_wide_array_length_has_no_layout_at_stage_7`，第二个长度读取口 `literal_len` 也不许把 `2^64` 折成 0） · `artifact` 18 ·
 `toml` 15 · `borrow` **23**（**F7 轮 15 → 22** = `E-0121` 的判据从「链内存活绑定」换到「全局可变路径」后的 3 条正例 + 7 条反例（含 A4 轮留下的 3 条边界）+ 1 条 span 锁点，见下文 F7 一节） · `sha256` 12 · `conformance` **19**（E1 轮新建 0 → 11，**E3 轮 +3** = 文档表的逐格回核 + §12.4 红线的机检 + 四份文档各须重申红线，**F1 轮 +3** = `.github/workflows/ci.yml` 的命令覆盖面 / 四个重写夹具的开关绝不设 / Windows-only 与两条防假红守卫，**F3 轮 +1** = `.gitignore` 的一次性产物名单形状（按"谁产生它"列的六条一条不能少）+ 反向红线（不得宽到吞掉 `*.bin`/`*.md`/`*.rs` 或整个目录）+ 每个 `scripts/*.ps1` 的审计日志必须落在 `logs/`，**F1 收尾 +1** = 语料 EOL 例外必须声明在全局规则之后） · `codes` 9 ·
-`fmtstr` **10**（**F15 轮新建** = §10.11 格式串的编译期解析，阶段 [4]/[8] 共用同一份实现，`InfyFmtWhich` 的枚举名与 `runtime/infy_rt.h` 同源） · `parser` **15**（**F15 轮 +1** = `a_macro_call_arm_body_does_not_swallow_the_later_arms`：宏调用做臂体时不再吞掉后面的臂（**F63**）；D3 轮 +1 = §3.6 的 `@c` 语句形态；**F9 轮 +1** = `every_integer_spelling_reaches_the_ast_as_the_single_literal_shape`，即 F2 轮欠的那条 `primary` 臂顺序锁；**F10/F51 轮 +1** = `a_discriminant_wider_than_u128_is_still_recorded_as_written`，宽于 `u128` 的判别式必须仍是"写过"的形状且 `Span` 指得住字面量；**F53 轮 +3** = 链体顶层的 `goto`/`start`/`start_flag` 各报 `E-0300` 且**必须返回**（修前这三个语料把 `infy check` 挂死，见下文 F53 一节）+ 链体遇到非语句记号只报一次并前进 + 挂在宿主语句上的 `goto` 不受这条新诊断影响） · `base64` 7 · `stdlib` 4 · `diag` 2 = **613**（逐模块相加：79+58+41+**55**+**40**+**34**+27+**37**+24+**40**+22+22+18+15+23+12+19+9+**15**+7+4+2+**10**，与 `-- --list` 的 613 行一致；末档 **10** = `fmtstr`，F15 轮新建）。
+`fmtstr` **10**（**F15 轮新建** = §10.11 格式串的编译期解析，阶段 [4]/[8] 共用同一份实现，`InfyFmtWhich` 的枚举名与 `runtime/infy_rt.h` 同源） · `parser` **15**（**F15 轮 +1** = `a_macro_call_arm_body_does_not_swallow_the_later_arms`：宏调用做臂体时不再吞掉后面的臂（**F63**）；D3 轮 +1 = §3.6 的 `@c` 语句形态；**F9 轮 +1** = `every_integer_spelling_reaches_the_ast_as_the_single_literal_shape`，即 F2 轮欠的那条 `primary` 臂顺序锁；**F10/F51 轮 +1** = `a_discriminant_wider_than_u128_is_still_recorded_as_written`，宽于 `u128` 的判别式必须仍是"写过"的形状且 `Span` 指得住字面量；**F53 轮 +3** = 链体顶层的 `goto`/`start`/`start_flag` 各报 `E-0300` 且**必须返回**（修前这三个语料把 `infy check` 挂死，见下文 F53 一节）+ 链体遇到非语句记号只报一次并前进 + 挂在宿主语句上的 `goto` 不受这条新诊断影响） · `base64` 7 · `stdlib` 4 · `diag` 2 = **619**（逐模块相加：79+58+41+**55**+**40**+**34**+27+**37**+24+**40**+22+22+**24**+15+23+12+19+9+**15**+7+4+2+**10**，与 `-- --list` 的 619 行一致；末档 **10** = `fmtstr`，F15 轮新建）。
 
 - 词法、语法、`fmt`(§9.5 十四条规则)、`macro_expand`(§6.1–§6.5)、`derive`(§6.7)、诊断码表、
   类型检查（§4.1/§4.2/§4.3/§4.6/§2.8/§4.13/§8.2）、包与依赖（§5.2/§5.3/§5.7/§5.8）、
@@ -167,7 +167,7 @@ error: `infy conformance --update-golden` 被拒绝：§12.4 要求显式授权�
 B 轨 `src/btrack.rs` 的**库内**链路（探针→扫描→降级→本侧装载自检）已于 **D1(1) 轮**跑通并带 23 项单测，**D1(2) 轮**接进 CLI（阶段 [6a]）并把镜像交给 C 侧装载（30 项单测 + `ifbc_py_unit.bin` 夹具）⇒ D1 已勾；
 **D2 轮**再把 §7.8.4 的 `infy ifbc dump|verify` 命令接上（`cli` 20 → **28**，双侧文本第一次在命令层比对）。
 B 轨剩下的缺口在**产物那半边**：阶段 [8] 没有通往 IFBC VM 的调用通道 ⇒ `.inf ifbc` 恒空、含 `@py` 的 module 走不到 [9]（**F29**），§7.7.1 样例本体也被能力表红着拒（**F30**）；
-C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（**当前口径 32353 断言 / 0 失败**，直接链生产 `infy_rt.c`；C3 轮那次是 32335，F8 轮 +5，F12 轮 +13 = `infy_cleanup_cancel` 四组）；
+C 侧 harness(`runtime/test_rt.c`) **B1 轮已收敛**（**当前口径 32382 断言 / 0 失败（F17 轮 +29：C 侧读 EnvOffsets/ResourceKeys + 行数逃逸拒绝）**，直接链生产 `infy_rt.c`；C3 轮那次是 32335，F8 轮 +5，F12 轮 +13 = `infy_cleanup_cancel` 四组）；
 `src/host.rs`、`src/doc.rs` 是 1 行占位文件（`src/conformance.rs` 的占位状态在 E1 轮结束，见下文 E1 一节）（`src/artifact.rs` 已于 C3 轮从"不存在"落成 §7.4 容器写入器 + 读取器 + §7.3 build-id，18 项独立单测）（`src/hir.rs` 已于 C1 轮落成声明层 IR，不再是占位）（**§11 `HostApi` 之前被 README 标成 ✅，是文档错误，本轮已改为未实现**）；
 A 轨只落了 `@c` + `cc` + 标量/指针那一半（§7.6.2 工具链注册、§7.6.5 反向导出、§7.6.6 进程隔离未实现 = F32/F33）、`std.net` TLS、`infy lsp` 未实现。
 IFBC 断言（B3 轮 79 → 82，D4(2) 轮 **82 → 146**：合并线格式 + 17 条间隙指令 + Rust 写↔C 读执行的夹具；
@@ -442,7 +442,7 @@ stdout 逐字节相同）；`cargo test --offline --lib` **333 passed / 0 failed
 交叉验证：一次性探针把**真实 tour 产物**交给 C 侧生产读取器 `infy_art_read_file` →
 `rc=0 blob_len=738`，`infy_art_dump_meta` 的每个字段与 Rust 侧一致（含同一串 build-id）。
 
-**Rust 写 ↔ C 读 的常驻锁点**：`runtime/fixtures/artifact_rust_writer.bin`（730 字节）是写入器的逐字节固定输出，
+**Rust 写 ↔ C 读 的常驻锁点**：`runtime/fixtures/artifact_rust_writer.bin`（1079 字节，F17 轮重生成：+11 个池名、+180 字节 EnvOffsets 区）是写入器的逐字节固定输出，
 `runtime/test_rt.c` 用生产读取器读回它并断言同一组字段（+27 项），`artifact::tests::c_reader_fixture_is_exactly_what_the_writer_produces`
 锁住"写入器不再改变夹具"（只有 `INFY_REGENERATE_FIXTURE=1` 才重写）。rt harness 复跑 **32335 assertions / 0 failures**。
 
